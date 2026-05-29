@@ -60,6 +60,26 @@ sudo usermod -aG docker $USER
 ```
 > Important: After running this command, log out and log back in (or restart your terminal / SSH session) for the changes to take effect!
 
+To achieve deterministic execution and allow ros2_control to run high-priority real-time loops inside a Docker container, you must configure both the Dockerfile and the Runtime Flags:
+#### Container Runtime Flags (Crucial)
+A standard Docker container restricts real-time scheduling (SCHED_FIFO / SCHED_RR) for security reasons. To grant your container the ability to utilize the host's PREEMPT_RT capabilities, you must launch it with elevated privileges and real-time resource limits (ulimits).
+
+When running your container, add the following flags:
+```bash
+docker run -it \
+  --privileged \
+  --net=host \
+  --ulimit rtprio=99 \
+  --ulimit memlock=-1 \
+  your_rt_image_name
+```
+What these flags do:
+- --privileged: Grants the container access to host hardware interfaces (e.g., EtherCAT, CAN, USB).
+- --net=host: Bypasses Docker's network bridge to eliminate latency spikes in ROS 2 communication.
+- --ulimit rtprio=99: Allows the ros2_control threads to set the highest possible real-time priority (99).
+- --ulimit memlock=-1: Allows unlimited memory locking (mlockall()), preventing the Linux kernel from swapping out critical real-time memory pages to disk.
+
+
 ### Remote Development Setup
 
 This repository is optimized for remote development on the `robot-controller` using VS Code and Git. 
