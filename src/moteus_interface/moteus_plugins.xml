@@ -1,0 +1,9 @@
+<library path="moteus_interface">
+  <class name="moteus_interface/MoteusInterface"
+         type="moteus_control::MoteusInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      ROS 2 Control hardware interface for moteus controllers.
+    </description>
+  </class>
+</library>
