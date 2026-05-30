@@ -24,11 +24,6 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(moteus)
 
-message(STATUS "--------------------------------------------------------")
-message(STATUS "🚀 Moteus Library wurde erfolgreich über FetchContent geladen!")
-message(STATUS "📂 Download-Zielordner: ${moteus_SOURCE_DIR}")
-message(STATUS "--------------------------------------------------------")
-
 add_library(${PROJECT_NAME} SHARED
   src/MoteusInterface.cpp
 )
