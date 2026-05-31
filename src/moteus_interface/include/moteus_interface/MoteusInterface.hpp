@@ -5,6 +5,7 @@
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
 
@@ -63,6 +64,9 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+    bool check_joint_interface(hardware_interface::ComponentInfo joint);
+
+private:
     std::vector<double> hw_commands_position_;
     std::vector<double> hw_commands_velocity_;
     std::vector<double> hw_commands_effort_;
@@ -70,8 +74,21 @@ private:
     std::vector<double> hw_states_position_;
     std::vector<double> hw_states_velocity_;
     std::vector<double> hw_states_effort_;
+
+    std::vector<int> can_ids_;
+    std::shared_ptr<mjbots::moteus::Transport> transport_;
+    std::vector<std::shared_ptr<mjbots::moteus::Controller>> controllers_;
+    
+    std::vector<mjbots::moteus::CanFdFrame> command_frames_;
+    std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
+    std::vector<bool> joint_updated_;
 };
 
 }
+
+PLUGINLIB_EXPORT_CLASS(
+  moteus_interface::MoteusInterface, 
+  hardware_interface::SystemInterface
+)
 
 #endif
