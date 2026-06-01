@@ -3,9 +3,10 @@
 namespace moteus_interface
 {
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_init(const hardware_interface::HardwareInfo &info)
+hardware_interface::CallbackReturn MoteusInterface::on_init(
+    const hardware_interface::HardwareComponentInterfaceParams & params)
 {
-    if (hardware_interface::SystemInterface::on_init(info) != hardware_interface::CallbackReturn::SUCCESS)
+    if (hardware_interface::SystemInterface::on_init(params) != hardware_interface::CallbackReturn::SUCCESS)
     {
         return hardware_interface::CallbackReturn::ERROR;
     }
@@ -21,37 +22,59 @@ hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_init(co
     hw_commands_velocity_.assign(num_joints, 0.0);
     hw_commands_effort_.assign(num_joints, 0.0);
     
-    hw_states_position_.assign(num_joints, 0.0);
+    hw_states_position_.assign(num_joints, std::numeric_limits<double>::quiet_NaN());
     hw_states_velocity_.assign(num_joints, 0.0);
     hw_states_effort_.assign(num_joints, 0.0);
 
-    can_ids_.resize(num_joints);
-    controllers_.resize(num_joints);
+    joints_.resize(num_joints);
+    joint_updated_.resize(num_joints);
     command_frames_.resize(num_joints);
     replies_frames_.reserve(num_joints);            // reserve instead of resize for clear/pushback in transport cycle
-    joint_updated_.resize(num_joints);
+    joint_results_.resize(num_joints);
 
     for (size_t i = 0; i < num_joints; ++i)
     {
         if (!check_joint_interface(info_.joints[i])) return hardware_interface::CallbackReturn::ERROR;
 
-        auto param_it = info_.joints[i].parameters.find("can_id");
-        if (param_it != info_.joints[i].parameters.end())
+        auto param_it_can = info_.joints[i].parameters.find("can_id");
+        if (param_it_can != info_.joints[i].parameters.end())
         {
-            can_ids_[i] = std::stoi(param_it->second);
+            joints_[i].can_id = std::stoi(param_it_can->second);
             RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), 
-                        "Joint %s using CAN-ID: %d registered", info_.joints[i].name.c_str(), can_ids_[i]);
+                        "Joint %s using CAN-ID: %d registered", info_.joints[i].name.c_str(), joints_[i].can_id);
         }
         else
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Joint %s missing 'can_id' parameter!", info_.joints[i].name.c_str());
             return hardware_interface::CallbackReturn::ERROR;
         }
+
+        auto param_it_enc = info_.joints[i].parameters.find("encoder_offset");
+        if (param_it_enc != info_.joints[i].parameters.end())
+        {
+            joints_[i].encoder_offset = std::stod(param_it_enc->second);
+        }
+        else
+        {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Joint %s missing 'encoder_offset' parameter!", info_.joints[i].name.c_str());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        auto param_it_gear = info_.joints[i].parameters.find("gear_ratio");
+        if (param_it_gear != info_.joints[i].parameters.end())
+        {
+            joints_[i].gear_ratio = std::stod(param_it_gear->second);
+        }
+        else
+        {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Joint %s missing 'gear_ratio' parameter!", info_.joints[i].name.c_str());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
     }
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-std::vector<hardware_interface::StateInterface> moteus_interface::MoteusInterface::export_state_interfaces()
+std::vector<hardware_interface::StateInterface> MoteusInterface::export_state_interfaces()
 {
     std::vector<hardware_interface::StateInterface> state_interfaces;
 
@@ -78,7 +101,7 @@ std::vector<hardware_interface::StateInterface> moteus_interface::MoteusInterfac
     return state_interfaces;
 }
 
-std::vector<hardware_interface::CommandInterface> moteus_interface::MoteusInterface::export_command_interfaces()
+std::vector<hardware_interface::CommandInterface> MoteusInterface::export_command_interfaces()
 {
     std::vector<hardware_interface::CommandInterface> command_interfaces;
 
@@ -105,56 +128,63 @@ std::vector<hardware_interface::CommandInterface> moteus_interface::MoteusInterf
     return command_interfaces;
 }
 
-hardware_interface::return_type moteus_interface::MoteusInterface::prepare_command_mode_switch(const std::vector<std::string> &start_interfaces, const std::vector<std::string> &stop_interfaces)
+hardware_interface::return_type MoteusInterface::prepare_command_mode_switch(const std::vector<std::string> &/*start_interfaces*/, const std::vector<std::string> &/*stop_interfaces*/)
 {
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type moteus_interface::MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &start_interfaces, const std::vector<std::string> &stop_interfaces)
+hardware_interface::return_type MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &/*start_interfaces*/, const std::vector<std::string> &/*stop_interfaces*/)
 {
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type moteus_interface::MoteusInterface::read(const rclcpp::Time &time, const rclcpp::Duration &period)
+hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time*/, const rclcpp::Duration &/*period*/)
 {
     using namespace mjbots;
-    size_t num_joints = can_ids_.size();
-    std::fill(joint_updated_.begin(), joint_updated_.end(), false);
+    
+    if (!parse_result_frames()) return hardware_interface::return_type::ERROR;
 
-    for (const auto& frame : replies_frames_)
+    for (size_t i = 0; i < joint_results_.size(); ++i) 
     {
-        auto it = std::find(can_ids_.begin(), can_ids_.end(), frame.source);
-        if (it != can_ids_.end()) 
+        const auto& result = joint_results_[i];
+        if (result.fault != 0)
         {
-            size_t joint_index = std::distance(can_ids_.begin(), it);
-            
-            auto layout = mjbots::moteus::Query::Parse(frame.data, frame.size);
-
-            hw_states_position_[joint_index] = layout.position * 2.0 * M_PI;
-            hw_states_velocity_[joint_index] = layout.velocity * 2.0 * M_PI;
-            hw_states_effort_[joint_index]   = layout.torque;
-
-            // TODO: error abfragen von motor und belt slips erkennen
-
-            joint_updated_[joint_index] = true;
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"),
+                            "HARDWARE FAULT on Axis %zu (CAN-ID: %d)! Error Code: %d", 
+                            i+1, joints_[i].can_id, result.fault);
+            return hardware_interface::return_type::ERROR;
         }
-    }
 
-    hardware_interface::return_type ret = hardware_interface::return_type::OK;
-    for (size_t i = 0; i < num_joints; ++i) {
-        if (!joint_updated_[i]) {
+        auto output_position_raw = get_extra_register_value(result, mjbots::moteus::Register::kEncoder1Position);
+        if (!output_position_raw.has_value()) 
+        {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                         "Axis %zu (CAN-ID: %d) did not respond!", i, can_ids_[i]);
-            ret = hardware_interface::return_type::ERROR;
+                        "Axis %zu (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
+                        "Check your query configuration.", i, joints_[i].can_id);
+            return hardware_interface::return_type::ERROR;
         }
+
+        double output_pos = *output_position_raw * 2.0 * M_PI - joints_[i].encoder_offset;
+        double position = result.position * 2.0 * M_PI;
+        static constexpr double belt_slip_threshold = 0.08;
+        if (abs(output_pos - position) > belt_slip_threshold) {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                    "Axis %zu (CAN-ID: %d): Belt slip detected: encoder positions do not match!", i, joints_[i].can_id);
+            return hardware_interface::return_type::ERROR;
+        }
+
+        hw_states_position_[i] = position;
+        hw_states_velocity_[i] = result.velocity * 2.0 * M_PI;
+        hw_states_effort_[i]   = result.torque;
     }
-    return ret;
+
+    return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type moteus_interface::MoteusInterface::write(const rclcpp::Time &time, const rclcpp::Duration &period)
+hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*time*/, const rclcpp::Duration &/*period*/)
 {
     using namespace mjbots;
-    const size_t num_joints = can_ids_.size();
+    const size_t num_joints = joints_.size();
 
     if (get_lifecycle_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
     {
@@ -165,14 +195,14 @@ hardware_interface::return_type moteus_interface::MoteusInterface::write(const r
             cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
             cmd.feedforward_torque = hw_commands_effort_[i];
 
-            command_frames_[i] = controllers_[i]->MakePosition(cmd);
+            command_frames_[i] = joints_[i].controller->MakePosition(cmd);
         }
     }
     else
     {
         for (size_t i = 0; i < num_joints; ++i)
         {
-            command_frames_[i] = controllers_[i]->MakeStop();
+            command_frames_[i] = joints_[i].controller->MakeStop();
         }
     }
     // Blocking at end of each control loop to ensure data coherency and avoid race conditions
@@ -181,7 +211,7 @@ hardware_interface::return_type moteus_interface::MoteusInterface::write(const r
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_configure(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Configuring moteus interface...");
 
@@ -210,16 +240,38 @@ hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_configu
         read_format.fault              = mjbots::moteus::Resolution::kInt8;
         read_format.extra[0]           = encoder1;
 
-        size_t num_joints = can_ids_.size();
+        size_t num_joints = joints_.size();
         for (size_t i = 0; i < num_joints; ++i)
         {
             mjbots::moteus::Controller::Options options;
-            options.id = can_ids_[i];
+            options.id = joints_[i].can_id;
             options.query_format = read_format;
             options.position_format = write_format;
-            controllers_[i] = std::make_shared<mjbots::moteus::Controller>(options);
-            command_frames_[i] = controllers_[i]->MakeStop();
+            joints_[i].controller = std::make_shared<mjbots::moteus::Controller>(options);
+            command_frames_[i] = joints_[i].controller->MakeStop();
         }
+        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+
+        if (!parse_result_frames()) return hardware_interface::CallbackReturn::ERROR;
+        for (size_t i = 0; i < joint_results_.size(); ++i) 
+        {
+            const auto& result = joint_results_[i];
+            auto output_position_raw = get_extra_register_value(result, mjbots::moteus::Register::kEncoder1Position);
+
+            if (!output_position_raw.has_value()) 
+            {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                            "Axis %zu (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
+                            "Check your query configuration.", i+1, joints_[i].can_id);
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+
+            moteus::OutputExact::Command cmd;
+            cmd.position = *output_position_raw - joints_[i].encoder_offset/(2.0 * M_PI);
+            command_frames_[i] = joints_[i].controller->MakeOutputExact(cmd);
+        }
+
+        // Set internal encoder to absolute position and make sure first call of read() does not fail
         transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
 
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), 
@@ -235,29 +287,92 @@ hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_configu
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_activate(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
-    return hardware_interface::CallbackReturn();
+    RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Activating Hardware...");
+    using namespace mjbots;
+    for (size_t i = 0; i < joints_.size(); ++i)
+        {
+            if (std::isnan(hw_states_position_[i])) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                     "Axis %zu undefined state, no valid position on startup", i+1);
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            hw_commands_position_[i] = hw_states_position_[i];
+            hw_commands_velocity_[i] = 0;
+            hw_commands_effort_[i] = 0;
+
+            moteus::PositionMode::Command cmd;
+            cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
+            cmd.velocity = 0;
+            cmd.feedforward_torque = 0;
+
+            command_frames_[i] = joints_[i].controller->MakePosition(cmd);
+        }
+    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_deactivate(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
-    return hardware_interface::CallbackReturn();
+    RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Deactivating Hardware...");
+    for (size_t i = 0; i < joints_.size(); ++i)
+    {
+        command_frames_[i] = joints_[i].controller->MakeStop();
+    }
+    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_cleanup(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_cleanup(const rclcpp_lifecycle::State &/*previous_state*/)
 {
-    return hardware_interface::CallbackReturn();
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_shutdown(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_shutdown(const rclcpp_lifecycle::State & previous_state)
 {
-    return hardware_interface::CallbackReturn();
+    RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Shutdown requested, stopping hardware...");
+    return on_deactivate(previous_state);
 }
 
-hardware_interface::CallbackReturn moteus_interface::MoteusInterface::on_error(const rclcpp_lifecycle::State &previous_state)
+hardware_interface::CallbackReturn MoteusInterface::on_error(const rclcpp_lifecycle::State & previous_state)
 {
-    return hardware_interface::CallbackReturn();
+    RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Hardware interface encountered an error, executing emergency stop!");
+    return on_deactivate(previous_state);
+}
+
+bool MoteusInterface::parse_result_frames()
+{
+    using namespace mjbots;
+    size_t num_joints = joints_.size();
+    std::fill(joint_updated_.begin(), joint_updated_.end(), false);
+
+    for (const auto& frame : replies_frames_)
+    {
+        auto it = std::find_if(joints_.begin(), joints_.end(),
+            [&frame](const Joint& j) { 
+                return j.can_id == frame.source; 
+            }
+        );
+        if (it != joints_.end()) 
+        {
+            size_t joint_index = std::distance(joints_.begin(), it);
+            
+            joint_results_[joint_index] = moteus::Query::Parse(frame.data, frame.size);
+
+            joint_updated_[joint_index] = true;
+        }
+    }
+
+    bool ret = true;
+    for (size_t i = 0; i < num_joints; ++i) {
+        if (!joint_updated_[i]) {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                         "Axis %zu (CAN-ID: %d) did not respond!", i+1, joints_[i].can_id);
+            ret = false;
+        }
+    }
+    return ret;
 }
 
 bool MoteusInterface::check_joint_interface(hardware_interface::ComponentInfo joint)

@@ -15,13 +15,21 @@ namespace moteus_interface
 class MoteusInterface : public hardware_interface::SystemInterface 
 {
 public:
+    struct Joint {
+        int can_id;
+        double gear_ratio;
+        double encoder_offset; 
+        
+        std::shared_ptr<mjbots::moteus::Controller> controller;
+    };
+public:
     RCLCPP_SHARED_PTR_DEFINITIONS(MoteusInterface)
 
     MoteusInterface() = default;
     virtual ~MoteusInterface() = default;
 
     hardware_interface::CallbackReturn on_init(
-        const hardware_interface::HardwareInfo & info) override;
+        const hardware_interface::HardwareComponentInterfaceParams & params) override;
 
 
     std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
@@ -64,7 +72,23 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+    bool parse_result_frames();
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
+
+    template <typename T = double>
+    std::optional<T> get_extra_register_value(
+        const mjbots::moteus::Query::Result& result, 
+        mjbots::moteus::Register reg_to_find)
+    {
+        for (size_t j = 0; j < mjbots::moteus::Query::kMaxExtra; ++j)
+        {
+            if (result.extra[j].register_number == reg_to_find)
+            {
+                return static_cast<T>(result.extra[j].value); 
+            }
+        }
+        return std::nullopt;
+    }
 
 private:
     std::vector<double> hw_commands_position_;
@@ -75,13 +99,14 @@ private:
     std::vector<double> hw_states_velocity_;
     std::vector<double> hw_states_effort_;
 
-    std::vector<int> can_ids_;
+    std::vector<Joint> joints_;
+    std::vector<bool> joint_updated_;
+
     std::shared_ptr<mjbots::moteus::Transport> transport_;
-    std::vector<std::shared_ptr<mjbots::moteus::Controller>> controllers_;
     
+    std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
-    std::vector<bool> joint_updated_;
 };
 
 }
