@@ -54,8 +54,8 @@ controller_manager:
         - MoteusHardwareSystem
       shutdown_on_initial_state_failure: false
     overruns:
-      print_warnings: ''
-    update_rate: 100.0
+      print_warnings: true
+    update_rate: 100
 
     lock_memory: true
     thread_priority: 99
