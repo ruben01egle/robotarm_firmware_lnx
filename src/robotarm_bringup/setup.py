@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='ruben01egle@gmail.com',
-    description='Launch und Config Steuerzentrale für den Roboterarm',
+    description='Launch robotarm control software',
     license='Apache-2.0',
     extras_require={
         'test': [
