@@ -11,6 +11,8 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    is_active_ = false;
+
     size_t num_joints = info_.joints.size();
     if (num_joints == 0)
     {
@@ -186,7 +188,7 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
     using namespace mjbots;
     const size_t num_joints = joints_.size();
 
-    if (get_lifecycle_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+    if (is_active_)
     {
         for (size_t i = 0; i < num_joints; ++i)
         {
@@ -310,6 +312,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lif
             command_frames_[i] = joints_[i].controller->MakePosition(cmd);
         }
     transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    is_active_ = true;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -321,6 +324,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         command_frames_[i] = joints_[i].controller->MakeStop();
     }
     transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    is_active_ = false;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 

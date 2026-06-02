@@ -91,6 +91,8 @@ private:
     }
 
 private:
+    bool is_active_;
+
     std::vector<double> hw_commands_position_;
     std::vector<double> hw_commands_velocity_;
     std::vector<double> hw_commands_effort_;

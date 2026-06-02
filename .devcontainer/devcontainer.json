@@ -10,6 +10,7 @@
         "--privileged",
         "--net=host",
         "--ipc=host",
+        "--cap-add=sys_nice",
         "--ulimit", "rtprio=99",
         "--ulimit", "memlock=-1"
     ],

@@ -66,12 +66,14 @@ A standard Docker container restricts real-time scheduling (SCHED_FIFO / SCHED_R
 
 When running your container, add the following flags:
 ```bash
-docker run -it \
-  --privileged \
-  --net=host \
-  --ulimit rtprio=99 \
-  --ulimit memlock=-1 \
-  your_rt_image_name
+"runArgs": [
+      "--privileged",
+      "--net=host",
+      "--ipc=host",
+      "--cap-add=sys_nice",
+      "--ulimit", "rtprio=99",
+      "--ulimit", "memlock=-1"
+    ],
 ```
 What these flags do:
 - --privileged: Grants the container access to host hardware interfaces (e.g., EtherCAT, CAN, USB).

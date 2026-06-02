@@ -1,6 +1,64 @@
 controller_manager:
   ros__parameters:
-    update_rate: 100
+    defaults:
+      allow_controller_activation_with_inactive_hardware: false
+      deactivate_controllers_on_hardware_self_deactivate: true
+      switch_controller:
+        strictness: strict
+
+    diagnostics:
+      threshold:
+        controller_manager:
+          periodicity:
+            mean_error:
+              error: 10.0
+              warn: 5.0
+            standard_deviation:
+              error: 10.0
+              warn: 5.0
+        controllers:
+          execution_time:
+            mean_error:
+              error: 200.0
+              warn: 100.0
+            standard_deviation:
+              error: 20.0
+              warn: 10.0
+          periodicity:
+            mean_error:
+              error: 10.0
+              warn: 5.0
+            standard_deviation:
+              error: 10.0
+              warn: 5.0
+        hardware_components:
+          execution_time:
+            mean_error:
+              error: 200.0
+              warn: 100.0
+            standard_deviation:
+              error: 20.0
+              warn: 10.0
+          periodicity:
+            mean_error:
+              error: 10.0
+              warn: 5.0
+            standard_deviation:
+              error: 10.0
+              warn: 5.0
+
+    enforce_command_limits: true
+    handle_exceptions: true
+    hardware_components_initial_state:
+      inactive:
+        - MoteusHardwareSystem
+      shutdown_on_initial_state_failure: false
+    overruns:
+      print_warnings: ''
+    update_rate: 100.0
+
+    lock_memory: true
+    thread_priority: 99
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster

@@ -11,9 +11,13 @@ def generate_launch_description():
     urdf_file = os.path.join(pkg_description, 'urdf', 'robotarm.urdf.xacro')
     controller_config = os.path.join(pkg_bringup, 'config', 'controllers.yaml')
 
-    xacro_cmd = f"xacro {urdf_file} use_hardware:=false"
-    robot_description_content = Command([xacro_cmd])
-
+    robot_description_content = Command(
+        [
+            FindExecutable(name="xacro"), " ", 
+            urdf_file, " ", 
+            "use_hardware:=false"
+        ]
+    )
     robot_description = {"robot_description": robot_description_content}
 
     control_node = Node(
