@@ -149,7 +149,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     // In active this is done by write() paired with the cmds to ensure only one write cycle per loop at all times 
     if (!is_active_)
     {
-        for (size_t i = 0; i < joints_.size(); ++i)
+        for (size_t i = 0; i < num_joints; ++i)
         {
             command_frames_[i] = joints_[i].controller->MakeStop();
         }
