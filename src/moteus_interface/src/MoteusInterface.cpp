@@ -143,6 +143,19 @@ hardware_interface::return_type MoteusInterface::perform_command_mode_switch(con
 hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time*/, const rclcpp::Duration &/*period*/)
 {
     using namespace mjbots;
+    const size_t num_joints = joints_.size();
+
+    // In inactive only read is called -> read needs query new data
+    // In active this is done by write() paired with the cmds to ensure only one write cycle per loop at all times 
+    if (!is_active_)
+    {
+        for (size_t i = 0; i < joints_.size(); ++i)
+        {
+            command_frames_[i] = joints_[i].controller->MakeStop();
+        }
+        // Blocking at end of each control loop to ensure data coherency and avoid race conditions
+        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    }
     
     if (!parse_result_frames()) return hardware_interface::return_type::ERROR;
 
@@ -156,7 +169,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             i+1, joints_[i].can_id, result.fault);
             return hardware_interface::return_type::ERROR;
         }
-
+        /*
         auto output_position_raw = get_extra_register_value(result, mjbots::moteus::Register::kEncoder1Position);
         if (!output_position_raw.has_value()) 
         {
@@ -174,8 +187,8 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                     "Axis %zu (CAN-ID: %d): Belt slip detected: encoder positions do not match!", i, joints_[i].can_id);
             return hardware_interface::return_type::ERROR;
         }
-
-        hw_states_position_[i] = position;
+        */
+        hw_states_position_[i] = result.position * 2.0 * M_PI;
         hw_states_velocity_[i] = result.velocity * 2.0 * M_PI;
         hw_states_effort_[i]   = result.torque;
     }
@@ -187,7 +200,7 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
-
+    // Older ROS versions call write in state inactive -> include this if to ensure backwards compatability
     if (is_active_)
     {
         for (size_t i = 0; i < num_joints; ++i)
@@ -199,16 +212,9 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
 
             command_frames_[i] = joints_[i].controller->MakePosition(cmd);
         }
+        // Blocking at end of each control loop to ensure data coherency and avoid race conditions
+        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
     }
-    else
-    {
-        for (size_t i = 0; i < num_joints; ++i)
-        {
-            command_frames_[i] = joints_[i].controller->MakeStop();
-        }
-    }
-    // Blocking at end of each control loop to ensure data coherency and avoid race conditions
-    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
 
     return hardware_interface::return_type::OK;
 }
@@ -252,8 +258,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             joints_[i].controller = std::make_shared<mjbots::moteus::Controller>(options);
             command_frames_[i] = joints_[i].controller->MakeStop();
         }
+        // reset controller to ensure defined state on startup
         transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
-
+        
         if (!parse_result_frames()) return hardware_interface::CallbackReturn::ERROR;
         for (size_t i = 0; i < joint_results_.size(); ++i) 
         {
@@ -273,9 +280,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             command_frames_[i] = joints_[i].controller->MakeOutputExact(cmd);
         }
 
-        // Set internal encoder to absolute position and make sure first call of read() does not fail
+        // Set internal encoder to absolute position
         transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
-
+        
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), 
                     "Moteus-Interface configured: %zu controller ready.", num_joints);
 
@@ -295,6 +302,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lif
     using namespace mjbots;
     for (size_t i = 0; i < joints_.size(); ++i)
         {
+            // expects at least one succesful data query before being called
             if (std::isnan(hw_states_position_[i])) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                      "Axis %zu undefined state, no valid position on startup", i+1);
