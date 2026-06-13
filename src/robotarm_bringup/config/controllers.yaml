@@ -66,6 +66,9 @@ controller_manager:
     forward_position_controller:
       type: forward_command_controller/ForwardCommandController
 
+    teleop_controller:
+      type: robotarm_controllers/TeleopController
+
 joint_state_broadcaster:
   ros__parameters:
     publish_rate: 50
@@ -77,3 +80,13 @@ forward_position_controller:
       - axis2
       - axis3
     interface_name: position
+
+teleop_controller:
+  ros__parameters:
+    joints:
+      - axis1
+      - axis2
+      - axis3
+    interface_name:
+      - position
+      - velocity
