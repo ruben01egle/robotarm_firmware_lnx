@@ -16,9 +16,14 @@ class MoteusInterface : public hardware_interface::SystemInterface
 {
 public:
     struct Joint {
+        std::string name;
         int can_id;
         double gear_ratio;
-        double encoder_offset; 
+        double encoder_offset;
+
+        bool pos_active = false;
+        bool vel_active = false;
+        bool effort_active = false;
         
         std::shared_ptr<mjbots::moteus::Controller> controller;
     };

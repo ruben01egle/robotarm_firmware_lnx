@@ -38,6 +38,8 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     {
         if (!check_joint_interface(info_.joints[i])) return hardware_interface::CallbackReturn::ERROR;
 
+        joints_[i].name = info_.joints[i].name;
+
         auto param_it_can = info_.joints[i].parameters.find("can_id");
         if (param_it_can != info_.joints[i].parameters.end())
         {
@@ -135,8 +137,32 @@ hardware_interface::return_type MoteusInterface::prepare_command_mode_switch(con
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &/*start_interfaces*/, const std::vector<std::string> &/*stop_interfaces*/)
+hardware_interface::return_type MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &start_interfaces, const std::vector<std::string> &stop_interfaces)
 {
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        
+        for (const auto& interface : start_interfaces) {
+            if (interface == joints_[i].name + "/position") joints_[i].pos_active = true;
+            if (interface == joints_[i].name + "/velocity") joints_[i].vel_active = true;
+            if (interface == joints_[i].name + "/effort")   joints_[i].effort_active = true;
+        }
+
+        for (const auto& interface : stop_interfaces) {
+            if (interface == joints_[i].name + "/position") joints_[i].pos_active = false;
+            if (interface == joints_[i].name + "/velocity") joints_[i].vel_active = false;
+            if (interface == joints_[i].name + "/effort")   joints_[i].effort_active = false;
+        }
+    }
+
+    for (const auto& joint : joints_) {
+        RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"),
+            "Joint [%s] active interfaces: Pos=%s, Vel=%s, Eff=%s",
+            joint.name.c_str(),
+            joint.pos_active ? "ON" : "OFF",
+            joint.vel_active ? "ON" : "OFF",
+            joint.effort_active ? "ON" : "OFF");
+    }
+
     return hardware_interface::return_type::OK;
 }
 
@@ -165,17 +191,17 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         if (result.fault != 0)
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"),
-                            "HARDWARE FAULT on Axis %zu (CAN-ID: %d)! Error Code: %d", 
-                            i+1, joints_[i].can_id, result.fault);
+                            "HARDWARE FAULT on Joint %s (CAN-ID: %d)! Error Code: %d", 
+                            joints_[i].name.c_str(), joints_[i].can_id, result.fault);
             return hardware_interface::return_type::ERROR;
         }
         /*
-        auto output_position_raw = get_extra_register_value(result, mjbots::moteus::Register::kEncoder1Position);
+        auto output_position_raw = get_extra_register_value(result, moteus::Register::kEncoder1Position);
         if (!output_position_raw.has_value()) 
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                        "Axis %zu (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
-                        "Check your query configuration.", i, joints_[i].can_id);
+                        "Joint %s (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
+                        "Check your query configuration.", joints_[i].name.c_str(), joints_[i].can_id);
             return hardware_interface::return_type::ERROR;
         }
 
@@ -184,7 +210,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         static constexpr double belt_slip_threshold = 0.08;
         if (abs(output_pos - position) > belt_slip_threshold) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                    "Axis %zu (CAN-ID: %d): Belt slip detected: encoder positions do not match!", i, joints_[i].can_id);
+                    "Joint %s (CAN-ID: %d): Belt slip detected: encoder positions do not match!", joints_[i].name.c_str(), joints_[i].can_id);
             return hardware_interface::return_type::ERROR;
         }
         */
@@ -201,20 +227,45 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
     using namespace mjbots;
     const size_t num_joints = joints_.size();
     // Older ROS versions call write in state inactive -> include this if to ensure backwards compatability
-    if (is_active_)
+    if (!is_active_) return hardware_interface::return_type::OK;
+    
+    for (size_t i = 0; i < num_joints; ++i)
     {
-        for (size_t i = 0; i < num_joints; ++i)
-        {
-            moteus::PositionMode::Command cmd;
-            cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
-            cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
-            cmd.feedforward_torque = hw_commands_effort_[i];
+        auto& joint = joints_[i];
+        // standard mode: pos + vel + torque
+        moteus::PositionMode::Command cmd;
+        cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
+        cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
+        cmd.feedforward_torque = hw_commands_effort_[i];
+        cmd.kp_scale = 1.0;
+        cmd.kd_scale = 1.0;
+        cmd.ilimit_scale = 1.0;
 
-            command_frames_[i] = joints_[i].controller->MakePosition(cmd);
+        // pos inactive
+        if (!joint.pos_active) {
+            cmd.position = std::numeric_limits<double>::quiet_NaN();
+            cmd.kp_scale = 0;
         }
-        // Blocking at end of each control loop to ensure data coherency and avoid race conditions
-        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+        // vel inactive
+        if (!joint.vel_active) {
+            cmd.velocity = 0;
+        }
+        // torque inactive
+        if (!joint.effort_active) {
+            cmd.feedforward_torque = 0;
+        }
+        else {
+            // special case: torque only mode
+            if (!joint.pos_active && !joint.vel_active) {
+                cmd.kd_scale = 0;
+                cmd.ilimit_scale = 0;
+            }
+        }
+
+        command_frames_[i] = joint.controller->MakePosition(cmd);
     }
+    // Blocking at end of each control loop to ensure data coherency and avoid race conditions
+    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
 
     return hardware_interface::return_type::OK;
 }
@@ -233,29 +284,32 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        mjbots::moteus::PositionMode::Format write_format;
-        write_format.position = mjbots::moteus::kFloat;
-        write_format.velocity = mjbots::moteus::kFloat;
-        write_format.feedforward_torque = mjbots::moteus::kFloat;
+        moteus::PositionMode::Format write_format;
+        write_format.position = moteus::kFloat;
+        write_format.velocity = moteus::kFloat;
+        write_format.feedforward_torque = moteus::kFloat;
+        write_format.kp_scale = moteus::kFloat;
+        write_format.kd_scale = moteus::kFloat;
+        write_format.ilimit_scale = moteus::kFloat;
 
-        mjbots::moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
-        encoder1.register_number = mjbots::moteus::Register::kEncoder1Position;
-        encoder1.resolution = mjbots::moteus::Resolution::kFloat;
-        mjbots::moteus::Query::Format read_format;
-        read_format.position           = mjbots::moteus::Resolution::kInt16;
-        read_format.velocity           = mjbots::moteus::Resolution::kInt16;
-        read_format.torque             = mjbots::moteus::Resolution::kInt16;
-        read_format.fault              = mjbots::moteus::Resolution::kInt8;
+        moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
+        encoder1.register_number = moteus::Register::kEncoder1Position;
+        encoder1.resolution = moteus::Resolution::kFloat;
+        moteus::Query::Format read_format;
+        read_format.position           = moteus::Resolution::kInt16;
+        read_format.velocity           = moteus::Resolution::kInt16;
+        read_format.torque             = moteus::Resolution::kInt16;
+        read_format.fault              = moteus::Resolution::kInt8;
         read_format.extra[0]           = encoder1;
 
         size_t num_joints = joints_.size();
         for (size_t i = 0; i < num_joints; ++i)
         {
-            mjbots::moteus::Controller::Options options;
+            moteus::Controller::Options options;
             options.id = joints_[i].can_id;
             options.query_format = read_format;
             options.position_format = write_format;
-            joints_[i].controller = std::make_shared<mjbots::moteus::Controller>(options);
+            joints_[i].controller = std::make_shared<moteus::Controller>(options);
             command_frames_[i] = joints_[i].controller->MakeStop();
         }
         // reset controller to ensure defined state on startup
@@ -265,18 +319,19 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         for (size_t i = 0; i < joint_results_.size(); ++i) 
         {
             const auto& result = joint_results_[i];
-            auto output_position_raw = get_extra_register_value(result, mjbots::moteus::Register::kEncoder1Position);
+            auto output_position_raw = get_extra_register_value(result, moteus::Register::kEncoder1Position);
 
             if (!output_position_raw.has_value()) 
             {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                            "Axis %zu (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
-                            "Check your query configuration.", i+1, joints_[i].can_id);
+                            "Joint %s (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
+                            "Check your query configuration.", joints_[i].name.c_str(), joints_[i].can_id);
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
             moteus::OutputExact::Command cmd;
-            cmd.position = *output_position_raw - joints_[i].encoder_offset/(2.0 * M_PI);
+            //cmd.position = *output_position_raw - joints_[i].encoder_offset/(2.0 * M_PI);
+            cmd.position = 0;
             command_frames_[i] = joints_[i].controller->MakeOutputExact(cmd);
         }
 
@@ -305,7 +360,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lif
             // expects at least one succesful data query before being called
             if (std::isnan(hw_states_position_[i])) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                     "Axis %zu undefined state, no valid position on startup", i+1);
+                     "Joint %s undefined state, no valid position on startup", joints_[i].name.c_str());
                 return hardware_interface::CallbackReturn::ERROR;
             }
             hw_commands_position_[i] = hw_states_position_[i];
@@ -380,7 +435,7 @@ bool MoteusInterface::parse_result_frames()
     for (size_t i = 0; i < num_joints; ++i) {
         if (!joint_updated_[i]) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                         "Axis %zu (CAN-ID: %d) did not respond!", i+1, joints_[i].can_id);
+                         "Joint %s (CAN-ID: %d) did not respond!", joints_[i].name.c_str(), joints_[i].can_id);
             ret = false;
         }
     }
