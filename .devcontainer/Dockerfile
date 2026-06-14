@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     ros-${ROS_DISTRO}-controller-manager \
     ros-${ROS_DISTRO}-pluginlib \
     ros-${ROS_DISTRO}-xacro \
+    ros-${ROS_DISTRO}-ruckig \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1

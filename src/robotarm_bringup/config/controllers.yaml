@@ -90,3 +90,7 @@ teleop_controller:
     interface_name:
       - position
       - velocity
+    max_velocity: 1
+    max_acceleration: 1
+    max_jerk: 1
+    sync_joints: false

@@ -12,6 +12,8 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(realtime_tools REQUIRED)
+find_package(ruckig REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/TeleopController.cpp
@@ -26,7 +28,9 @@ target_link_libraries(${PROJECT_NAME}
   controller_interface::controller_interface
   pluginlib::pluginlib
   rclcpp::rclcpp
+  realtime_tools::realtime_tools
   rclcpp_lifecycle::rclcpp_lifecycle
+  ruckig::ruckig
 )
 
 pluginlib_export_plugin_description_file(controller_interface robotarm_controllers_plugins.xml)

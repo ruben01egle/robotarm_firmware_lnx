@@ -20,7 +20,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
     
-    hw_commands_position_.assign(num_joints, 0.0);
+    hw_commands_position_.assign(num_joints, std::numeric_limits<double>::quiet_NaN());
     hw_commands_velocity_.assign(num_joints, 0.0);
     hw_commands_effort_.assign(num_joints, 0.0);
     
@@ -234,9 +234,21 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
         auto& joint = joints_[i];
         // standard mode: pos + vel + torque
         moteus::PositionMode::Command cmd;
-        cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
-        cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
-        cmd.feedforward_torque = hw_commands_effort_[i];
+        if (std::isnan(hw_commands_position_[i])) {
+            cmd.position = std::numeric_limits<double>::quiet_NaN();
+        } else {
+            cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
+        }
+        if (std::isnan(hw_commands_velocity_[i])) {
+            cmd.velocity = 0;
+        } else {
+            cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
+        }
+        if (std::isnan(hw_commands_effort_[i])) {
+            cmd.feedforward_torque = 0;
+        } else {
+            cmd.feedforward_torque = hw_commands_effort_[i];
+        }
         cmd.kp_scale = 1.0;
         cmd.kd_scale = 1.0;
         cmd.ilimit_scale = 1.0;

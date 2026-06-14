@@ -10,6 +10,7 @@
       "includePath": [
         "/opt/ros/jazzy/include/**",
         "/robotarm_firmware_lnx/src/moteus_interface/include/**",
+        "/robotarm_firmware_lnx/src/robotarm_controllers/include/**",
         "/usr/include/**"
       ],
       "browse": {
