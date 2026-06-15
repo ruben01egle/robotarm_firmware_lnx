@@ -14,6 +14,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(ruckig REQUIRED)
+find_package(robotarm_interface REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/TeleopController.cpp
@@ -24,12 +25,16 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+ament_target_dependencies(${PROJECT_NAME}
+  controller_interface
+  pluginlib
+  rclcpp
+  realtime_tools
+  rclcpp_lifecycle
+  robotarm_interface
+)
+
 target_link_libraries(${PROJECT_NAME}
-  controller_interface::controller_interface
-  pluginlib::pluginlib
-  rclcpp::rclcpp
-  realtime_tools::realtime_tools
-  rclcpp_lifecycle::rclcpp_lifecycle
   ruckig::ruckig
 )
 

@@ -1,3 +1,6 @@
 [submodule "src/robotarm_description"]
 	path = src/robotarm_description
 	url = git@github.com:ruben01egle/robotarm_description.git
+[submodule "src/robotarm_interface"]
+	path = src/robotarm_interface
+	url = git@github.com:ruben01egle/robotarm_interface.git

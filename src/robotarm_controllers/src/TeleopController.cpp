@@ -90,6 +90,10 @@ controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp
         rt_command_.set(cmd);
         });
 
+    scale_speed_service_ = get_node()->create_service<robotarm_interface::srv::SetFloat64>(
+        "~/scale_speed",
+        std::bind(&TeleopController::handle_scale_speed, this, std::placeholders::_1, std::placeholders::_2));
+
     RCLCPP_INFO(get_node()->get_logger(), "configure successful");
     return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -166,6 +170,11 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
         ruckig_input_->target_position[i] = joint_commands_.data[i];
         ruckig_input_->target_velocity[i] = 0.0;
+
+        double speed_scale = speed_scale_.load();
+        ruckig_input_->max_velocity[i] = max_velocity_ * speed_scale;
+        ruckig_input_->max_acceleration[i] = max_acceleration_ * speed_scale * speed_scale;
+        ruckig_input_->max_jerk[i] = max_jerk_ * speed_scale * speed_scale * speed_scale;
     }
 
     update_reference_ = false;
@@ -247,9 +256,9 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
     size_t dofs = joint_names_.size();
     try 
     {
-        double max_velocity = node->get_parameter("max_velocity").as_double();
-        double max_acceleration = node->get_parameter("max_acceleration").as_double();
-        double max_jerk = node->get_parameter("max_jerk").as_double();
+        max_velocity_ = node->get_parameter("max_velocity").as_double();
+        max_acceleration_ = node->get_parameter("max_acceleration").as_double();
+        max_jerk_ = node->get_parameter("max_jerk").as_double();
 
         ruckig_ = std::make_unique<ruckig::Ruckig<ruckig::DynamicDOFs>>(dofs);
         ruckig_input_ = std::make_unique<ruckig::InputParameter<ruckig::DynamicDOFs>>(dofs);
@@ -257,9 +266,9 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
 
         for (size_t i = 0; i < dofs; ++i)
         {
-            ruckig_input_->max_velocity[i] = max_velocity;
-            ruckig_input_->max_acceleration[i] = max_acceleration;
-            ruckig_input_->max_jerk[i] = max_jerk;
+            ruckig_input_->max_velocity[i] = max_velocity_;
+            ruckig_input_->max_acceleration[i] = max_acceleration_;
+            ruckig_input_->max_jerk[i] = max_jerk_;
         }
         bool sync_joints = node->get_parameter("sync_joints").as_bool();
         if (sync_joints) {
@@ -278,6 +287,14 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
     }
 
     return controller_interface::CallbackReturn::SUCCESS;
+}
+
+void TeleopController::handle_scale_speed(
+    const std::shared_ptr<robotarm_interface::srv::SetFloat64::Request> request,
+    std::shared_ptr<robotarm_interface::srv::SetFloat64::Response> response)
+{
+    speed_scale_.store(request->data);
+    response->success = true;
 }
 
 }

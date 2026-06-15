@@ -1,22 +1,28 @@
 {
   "configurations": [
     {
-      "name": "ROS",
+      "name": "Controller-Package",
       "compilerPath": "/usr/bin/gcc",
-      "cStandard": "gnu11",
-      "cppStandard": "c++17",
-      "intelliSenseMode": "gcc-x64",
+      "cStandard": "gnu17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "linux-gcc-x64",
+      "compileCommands": "${workspaceFolder}/build/robotarm_controllers/compile_commands.json",
+      "includePath": [
+        "${workspaceFolder}/src/**",
+        "/opt/ros/jazzy/include/**"
+      ]
+    },
+    {
+      "name": "Moteus-Package",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "linux-gcc-x64",
       "compileCommands": "${workspaceFolder}/build/moteus_interface/compile_commands.json",
       "includePath": [
-        "/opt/ros/jazzy/include/**",
-        "/robotarm_firmware_lnx/src/moteus_interface/include/**",
-        "/robotarm_firmware_lnx/src/robotarm_controllers/include/**",
-        "/usr/include/**"
-      ],
-      "browse": {
-        "databaseFilename": "${default}",
-        "limitSymbolsToIncludedHeaders": false
-      }
+        "${workspaceFolder}/src/**",
+        "/opt/ros/jazzy/include/**"
+      ]
     }
   ],
   "version": 4

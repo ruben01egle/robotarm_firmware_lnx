@@ -8,11 +8,13 @@
 #include "rclcpp/subscription.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "realtime_tools/realtime_thread_safe_box.hpp"
+#include "robotarm_interface/srv/set_float64.hpp"
 #include <ruckig/ruckig.hpp>
 
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 namespace teleop_controller {
 
@@ -47,6 +49,9 @@ public:
 private:
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
+    void handle_scale_speed(
+        const std::shared_ptr<robotarm_interface::srv::SetFloat64::Request> request,
+        std::shared_ptr<robotarm_interface::srv::SetFloat64::Response> response);
 
 private:
     std::vector<std::string> joint_names_;
@@ -59,6 +64,12 @@ private:
     std::unique_ptr<ruckig::OutputParameter<ruckig::DynamicDOFs>> ruckig_output_;
 
     bool update_reference_;
+
+    rclcpp::Service<robotarm_interface::srv::SetFloat64>::SharedPtr scale_speed_service_;
+    std::atomic<double> speed_scale_{1.0};
+    double max_velocity_;
+    double max_acceleration_;
+    double max_jerk_;
 
     // the realtime container to exchange the reference from subscriber
     realtime_tools::RealtimeThreadSafeBox<CmdType> rt_command_;

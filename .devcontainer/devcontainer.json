@@ -32,7 +32,8 @@
                 "ms-vscode.cmake-tools",
                 "ms-vscode.cpptools-extension-pack",
                 "redhat.vscode-xml",
-                "redhat.vscode-yaml"
+                "redhat.vscode-yaml",
+                "sanaajani.taskrunnercode"
             ]
         }
     },
