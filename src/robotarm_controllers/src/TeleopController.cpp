@@ -1,5 +1,10 @@
 #include "robotarm_controllers/TeleopController.hpp"
 
+PLUGINLIB_EXPORT_CLASS(
+  teleop_controller::TeleopController, 
+  controller_interface::ControllerInterface
+)
+
 namespace
 {  // utility
 
@@ -93,8 +98,20 @@ controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_
 {
     reset_controller_reference_msg(joint_commands_);
     update_reference_ = true;
-    last_commands_.assign(joint_names_.size()*num_states_per_joint_, std::numeric_limits<double>::quiet_NaN());
     rt_command_.try_set(joint_commands_);
+
+    // --- AB HIER PRINT-LOGIK EINFÜGEN ---
+    RCLCPP_INFO(get_node()->get_logger(), "=== Verfgbare STATE INTERFACES in ros2_control ===");
+    for (size_t i = 0; i < state_interfaces_.size(); ++i) {
+        RCLCPP_INFO(get_node()->get_logger(), "  Index [%zu]: %s", i, state_interfaces_[i].get_name().c_str());
+    }
+
+    RCLCPP_INFO(get_node()->get_logger(), "=== Verfgbare COMMAND INTERFACES in ros2_control ===");
+    for (size_t i = 0; i < command_interfaces_.size(); ++i) {
+        RCLCPP_INFO(get_node()->get_logger(), "  Index [%zu]: %s", i, command_interfaces_[i].get_name().c_str());
+    }
+    RCLCPP_INFO(get_node()->get_logger(), "==================================================");
+    // --- ENDE PRINT-LOGIK ---
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
@@ -154,11 +171,11 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
             ruckig_input_->current_position[i] = pos_opt.value();
             ruckig_input_->current_velocity[i] = vel_opt.value();
+            ruckig_input_->current_acceleration[i] = 0;
         }
         else 
         {
-            ruckig_input_->current_position[i] = last_commands_[pos_state_idx];
-            ruckig_input_->current_velocity[i] = last_commands_[vel_state_idx];
+            ruckig_output_->pass_to_input(*ruckig_input_);
         }
 
         ruckig_input_->target_position[i] = joint_commands_.data[i];
@@ -183,9 +200,6 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
         (void)command_interfaces_[pos_state_idx].set_value(ruckig_output_->new_position[i]);
         (void)command_interfaces_[vel_state_idx].set_value(ruckig_output_->new_velocity[i]);
-
-        last_commands_[pos_state_idx] = ruckig_output_->new_position[i];
-        last_commands_[vel_state_idx] = ruckig_output_->new_velocity[i];
     }
 
     return controller_interface::return_type::OK;
@@ -245,7 +259,6 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
     }
 
     size_t dofs = joint_names_.size();
-    last_commands_.assign(dofs*num_states_per_joint_, std::numeric_limits<double>::quiet_NaN());
     try 
     {
         double max_velocity = node->get_parameter("max_velocity").as_double();

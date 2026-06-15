@@ -118,9 +118,4 @@ private:
 
 }
 
-PLUGINLIB_EXPORT_CLASS(
-  moteus_interface::MoteusInterface, 
-  hardware_interface::SystemInterface
-)
-
 #endif

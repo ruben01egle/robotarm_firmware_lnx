@@ -40,10 +40,10 @@ def generate_launch_description():
         arguments=["joint_state_broadcaster"],
     )
 
-    forward_position_controller_spawner = Node(
+    teleop_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=['forward_position_controller', '--inactive'],
+        arguments=['teleop_controller', '--inactive'],
         output='screen'
     )
 
@@ -51,5 +51,5 @@ def generate_launch_description():
         control_node,
         robot_state_pub_node,
         joint_state_broadcaster_spawner,
-        forward_position_controller_spawner
+        teleop_controller_spawner
     ])

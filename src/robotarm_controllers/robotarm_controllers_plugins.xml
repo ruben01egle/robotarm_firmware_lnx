@@ -1,6 +1,6 @@
-<library path="teleop_controller">
+<library path="robotarm_controllers">
   <class name="robotarm_controllers/TeleopController" 
-         type="robotarm_controllers::TeleopController" 
+         type="teleop_controller::TeleopController" 
          base_class_type="controller_interface::ControllerInterface">
     <description>
       Reactive controller for smooth teleop.

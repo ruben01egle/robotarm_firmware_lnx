@@ -12,6 +12,7 @@
   <depend>rviz2</depend>
   
   <exec_depend>moteus_interface</exec_depend>
+  <exec_depend>robotarm_controllers</exec_depend>
   <exec_depend>robotarm_description</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

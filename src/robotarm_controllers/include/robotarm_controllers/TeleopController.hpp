@@ -59,7 +59,6 @@ private:
     std::unique_ptr<ruckig::OutputParameter<ruckig::DynamicDOFs>> ruckig_output_;
 
     bool update_reference_;
-    std::vector<double> last_commands_;
 
     // the realtime container to exchange the reference from subscriber
     realtime_tools::RealtimeThreadSafeBox<CmdType> rt_command_;
@@ -72,10 +71,5 @@ private:
 };
 
 }
-
-PLUGINLIB_EXPORT_CLASS(
-  teleop_controller::TeleopController, 
-  controller_interface::ControllerInterface
-)
 
 #endif

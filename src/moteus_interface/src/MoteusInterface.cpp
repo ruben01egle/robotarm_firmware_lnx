@@ -1,5 +1,10 @@
 #include "moteus_interface/MoteusInterface.hpp"
 
+PLUGINLIB_EXPORT_CLASS(
+  moteus_interface::MoteusInterface, 
+  hardware_interface::SystemInterface
+)
+
 namespace moteus_interface
 {
 
