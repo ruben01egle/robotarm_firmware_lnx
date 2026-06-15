@@ -100,19 +100,6 @@ controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_
     update_reference_ = true;
     rt_command_.try_set(joint_commands_);
 
-    // --- AB HIER PRINT-LOGIK EINFÜGEN ---
-    RCLCPP_INFO(get_node()->get_logger(), "=== Verfgbare STATE INTERFACES in ros2_control ===");
-    for (size_t i = 0; i < state_interfaces_.size(); ++i) {
-        RCLCPP_INFO(get_node()->get_logger(), "  Index [%zu]: %s", i, state_interfaces_[i].get_name().c_str());
-    }
-
-    RCLCPP_INFO(get_node()->get_logger(), "=== Verfgbare COMMAND INTERFACES in ros2_control ===");
-    for (size_t i = 0; i < command_interfaces_.size(); ++i) {
-        RCLCPP_INFO(get_node()->get_logger(), "  Index [%zu]: %s", i, command_interfaces_[i].get_name().c_str());
-    }
-    RCLCPP_INFO(get_node()->get_logger(), "==================================================");
-    // --- ENDE PRINT-LOGIK ---
-
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -158,7 +145,6 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
         if (update_reference_) 
         {
-            
             auto pos_opt = state_interfaces_[pos_state_idx].get_optional();
             auto vel_opt = state_interfaces_[vel_state_idx].get_optional();
 
@@ -278,9 +264,11 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
         bool sync_joints = node->get_parameter("sync_joints").as_bool();
         if (sync_joints) {
             ruckig_input_->synchronization = ruckig::Synchronization::Time;
+            RCLCPP_INFO(get_node()->get_logger(), "Teleop controller sync joints: ON");
         }
         else {
             ruckig_input_->synchronization = ruckig::Synchronization::None;
+            RCLCPP_INFO(get_node()->get_logger(), "Teleop controller sync joints: OFF");
         }
     }
     catch (const std::exception& e)
