@@ -261,7 +261,6 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
         // pos inactive
         if (!joint.pos_active) {
             cmd.position = std::numeric_limits<double>::quiet_NaN();
-            cmd.kp_scale = 0;
         }
         // vel inactive
         if (!joint.vel_active) {
@@ -274,6 +273,7 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
         else {
             // special case: torque only mode
             if (!joint.pos_active && !joint.vel_active) {
+                cmd.kp_scale = 0;
                 cmd.kd_scale = 0;
                 cmd.ilimit_scale = 0;
             }
