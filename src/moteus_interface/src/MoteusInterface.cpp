@@ -200,7 +200,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             joints_[i].name.c_str(), joints_[i].can_id, result.fault);
             return hardware_interface::return_type::ERROR;
         }
-        /*
+        
         auto output_position_raw = get_extra_register_value(result, moteus::Register::kEncoder1Position);
         if (!output_position_raw.has_value()) 
         {
@@ -211,6 +211,13 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         }
 
         double output_pos = *output_position_raw * 2.0 * M_PI - joints_[i].encoder_offset;
+        /*
+        RCLCPP_INFO(
+            rclcpp::get_logger("MoteusInterface"),
+            "Gelenk %zu - Berechnete Output-Position: %.4f", 
+            i+1, 
+            output_pos
+        );
         double position = result.position * 2.0 * M_PI;
         static constexpr double belt_slip_threshold = 0.08;
         if (abs(output_pos - position) > belt_slip_threshold) {
@@ -371,27 +378,12 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Activating Hardware...");
-    using namespace mjbots;
     for (size_t i = 0; i < joints_.size(); ++i)
         {
-            // expects at least one succesful data query before being called
-            if (std::isnan(hw_states_position_[i])) {
-                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                     "Joint %s undefined state, no valid position on startup", joints_[i].name.c_str());
-                return hardware_interface::CallbackReturn::ERROR;
-            }
-            hw_commands_position_[i] = hw_states_position_[i];
+            hw_commands_position_[i] = std::numeric_limits<double>::quiet_NaN();
             hw_commands_velocity_[i] = 0;
             hw_commands_effort_[i] = 0;
-
-            moteus::PositionMode::Command cmd;
-            cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
-            cmd.velocity = 0;
-            cmd.feedforward_torque = 0;
-
-            command_frames_[i] = joints_[i].controller->MakePosition(cmd);
         }
-    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
     is_active_ = true;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
