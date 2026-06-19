@@ -26,6 +26,7 @@ FetchContent_MakeAvailable(moteus)
 
 add_library(${PROJECT_NAME} SHARED
   src/MoteusInterface.cpp
+  src/Transport.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

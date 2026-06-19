@@ -40,7 +40,7 @@
         {
             "label": "Colcon build",
             "type": "shell",
-            "command": "colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "command": "colcon build --symlink-install",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

@@ -312,9 +312,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         write_format.position = moteus::kFloat;
         write_format.velocity = moteus::kFloat;
         write_format.feedforward_torque = moteus::kFloat;
-        write_format.kp_scale = moteus::kFloat;
-        write_format.kd_scale = moteus::kFloat;
-        write_format.ilimit_scale = moteus::kFloat;
+        write_format.kp_scale = moteus::kInt8;
+        write_format.kd_scale = moteus::kInt8;
+        write_format.ilimit_scale = moteus::kInt8;
 
         moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
         encoder1.register_number = moteus::Register::kEncoder1Position;
