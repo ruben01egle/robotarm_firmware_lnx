@@ -175,20 +175,11 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
-
-    // In inactive only read is called -> read needs query new data
-    // In active this is done by write() paired with the cmds to ensure only one write cycle per loop at all times 
-    if (!is_active_)
-    {
-        for (size_t i = 0; i < num_joints; ++i)
-        {
-            command_frames_[i] = joints_[i].controller->MakeStop();
-        }
-        // Blocking at end of each control loop to ensure data coherency and avoid race conditions
-        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
-    }
     
+    // first ever call expects at least one previous transport::write or transport::cycle call
+    if (!transport_->read(replies_frames_)) return hardware_interface::return_type::ERROR;
     if (!parse_result_frames()) return hardware_interface::return_type::ERROR;
+    replies_frames_.clear();
 
     for (size_t i = 0; i < joint_results_.size(); ++i) 
     {
@@ -200,7 +191,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             joints_[i].name.c_str(), joints_[i].can_id, result.fault);
             return hardware_interface::return_type::ERROR;
         }
-        
+        /*
         auto output_position_raw = get_extra_register_value(result, moteus::Register::kEncoder1Position);
         if (!output_position_raw.has_value()) 
         {
@@ -211,24 +202,28 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         }
 
         double output_pos = *output_position_raw * 2.0 * M_PI - joints_[i].encoder_offset;
-        /*
         RCLCPP_INFO(
             rclcpp::get_logger("MoteusInterface"),
             "Gelenk %zu - Berechnete Output-Position: %.4f", 
             i+1, 
             output_pos
         );
-        double position = result.position * 2.0 * M_PI;
-        static constexpr double belt_slip_threshold = 0.08;
-        if (abs(output_pos - position) > belt_slip_threshold) {
-            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                    "Joint %s (CAN-ID: %d): Belt slip detected: encoder positions do not match!", joints_[i].name.c_str(), joints_[i].can_id);
-            return hardware_interface::return_type::ERROR;
-        }
         */
         hw_states_position_[i] = result.position * 2.0 * M_PI;
         hw_states_velocity_[i] = result.velocity * 2.0 * M_PI;
         hw_states_effort_[i]   = result.torque;
+    }
+
+    // In inactive only read is called -> read needs query new data
+    // In active this is done by write() paired with the cmds to ensure only one write cycle per loop at all times 
+    if (!is_active_)
+    {
+        for (size_t i = 0; i < num_joints; ++i)
+        {
+            command_frames_[i] = joints_[i].controller->MakeStop();
+        }
+        // Blocking at end of each control loop to ensure data coherency and avoid race conditions
+        transport_->write(&command_frames_[0], command_frames_.size());
     }
 
     return hardware_interface::return_type::OK;
@@ -288,8 +283,7 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
 
         command_frames_[i] = joint.controller->MakePosition(cmd);
     }
-    // Blocking at end of each control loop to ensure data coherency and avoid race conditions
-    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    transport_->write(&command_frames_[0], command_frames_.size());
 
     return hardware_interface::return_type::OK;
 }
@@ -300,9 +294,14 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
     try {
         using namespace mjbots;
-        transport_ = moteus::Controller::MakeSingletonTransport({});
+        transport_ = std::make_shared<transport::Transport>();
         if (!transport_)
         {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                         "Moteus-Transport not created!");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        if (!transport_->initialize()) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                          "Moteus-Transport not initialized!");
             return hardware_interface::CallbackReturn::ERROR;
@@ -316,15 +315,17 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         write_format.kd_scale = moteus::kInt8;
         write_format.ilimit_scale = moteus::kInt8;
 
-        moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
-        encoder1.register_number = moteus::Register::kEncoder1Position;
-        encoder1.resolution = moteus::Resolution::kFloat;
         moteus::Query::Format read_format;
         read_format.position           = moteus::Resolution::kInt16;
         read_format.velocity           = moteus::Resolution::kInt16;
         read_format.torque             = moteus::Resolution::kInt16;
         read_format.fault              = moteus::Resolution::kInt8;
-        read_format.extra[0]           = encoder1;
+
+        moteus::Query::Format read_override = read_format;
+        moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
+        encoder1.register_number = moteus::Register::kEncoder1Position;
+        encoder1.resolution = moteus::Resolution::kFloat;
+        read_format.extra[0] = encoder1;
 
         size_t num_joints = joints_.size();
         for (size_t i = 0; i < num_joints; ++i)
@@ -334,10 +335,10 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             options.query_format = read_format;
             options.position_format = write_format;
             joints_[i].controller = std::make_shared<moteus::Controller>(options);
-            command_frames_[i] = joints_[i].controller->MakeStop();
+            command_frames_[i] = joints_[i].controller->MakeStop(&read_override);
         }
         // reset controller to ensure defined state on startup
-        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+        transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, 50000);
         
         if (!parse_result_frames()) return hardware_interface::CallbackReturn::ERROR;
         for (size_t i = 0; i < joint_results_.size(); ++i) 
@@ -360,7 +361,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         }
 
         // Set internal encoder to absolute position
-        transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+        transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, 5000);
         
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), 
                     "Moteus-Interface configured: %zu controller ready.", num_joints);
@@ -395,7 +396,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
     {
         command_frames_[i] = joints_[i].controller->MakeStop();
     }
-    transport_->BlockingCycle(&command_frames_[0], command_frames_.size(), &replies_frames_);
+    transport_->write(&command_frames_[0], command_frames_.size());
     is_active_ = false;
     return hardware_interface::CallbackReturn::SUCCESS;
 }

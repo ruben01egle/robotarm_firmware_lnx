@@ -8,6 +8,7 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
+#include "moteus_interface/Transport.hpp"
 
 namespace moteus_interface
 {
@@ -109,7 +110,7 @@ private:
     std::vector<Joint> joints_;
     std::vector<bool> joint_updated_;
 
-    std::shared_ptr<mjbots::moteus::Transport> transport_;
+    std::shared_ptr<transport::Transport> transport_;
     
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;

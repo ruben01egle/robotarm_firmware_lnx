@@ -86,19 +86,24 @@ bool moteus_interface::transport::Transport::initialize(
 bool moteus_interface::transport::Transport::write(const mjbots::moteus::CanFdFrame *frames, size_t size) {
     for (size_t i = 0; i < size; ++i) {
         struct canfd_frame send_frame = {};
-        
         send_frame.can_id = frames[i].arbitration_id;
         if (send_frame.can_id >= 0x7ff) {
+            // Set the frame format flag if we need an extended ID.
             send_frame.can_id |= (1 << 31);
         }
-        
         send_frame.len = round_up_dlc(frames[i].size);
         std::memcpy(send_frame.data, frames[i].data, frames[i].size);
         if (send_frame.len != frames[i].size) {
-            std::memset(&send_frame.data[frames[i].size], 0x50, send_frame.len - frames[i].size);
+            std::memset(&send_frame.data[frames[i].size], 0x50,
+                    send_frame.len - frames[i].size);
         }
-        
-        send_frame.flags = CANFD_FDF | CANFD_BRS;
+
+        using F = mjbots::moteus::CanFdFrame;
+        send_frame.flags =
+        ((frames[i].fdcan_frame == F::kDefault ||
+          frames[i].fdcan_frame == F::kForceOn) ? CANFD_FDF : 0) |
+        (((frames[i].brs == F::kDefault && !false) ||
+          frames[i].brs == F::kForceOn) ? CANFD_BRS : 0);
         
         if (::write(socket_fd_, &send_frame, sizeof(send_frame)) < 0) {
             RCLCPP_ERROR(logger_, "Failed to write frame for ID 0x%X! Error: %s", 
