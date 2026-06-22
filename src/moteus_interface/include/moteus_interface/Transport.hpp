@@ -23,8 +23,8 @@ public:
                     const uint16_t gateway_port,
                     rclcpp::Logger logger = rclcpp::get_logger("MoteusTransport"));
 
-    bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t timeout_us);
-    bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t timeout_us);
+    bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us);
+    bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t timeout_us=0);
 
     bool cycle(const mjbots::moteus::CanFdFrame *frames, size_t size,
                std::vector<mjbots::moteus::CanFdFrame> & replies,

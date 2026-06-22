@@ -8,6 +8,7 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
+#include "moteus_interface/Transport.hpp"
 
 namespace moteus_interface
 {
@@ -77,6 +78,7 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+    hardware_interface::return_type dispatch_cyclic_commands(const uint32_t bus_timeout_us);
     bool parse_result_frames();
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
 
@@ -96,7 +98,15 @@ private:
     }
 
 private:
+    enum class ExecutionMode : uint8_t
+    {
+        STRICT_SEQUENTIAL = 1,
+        PIPELINED = 2
+    };
+
+private:
     bool is_active_;
+    ExecutionMode execution_mode_;
 
     std::vector<double> hw_commands_position_;
     std::vector<double> hw_commands_velocity_;
@@ -109,11 +119,15 @@ private:
     std::vector<Joint> joints_;
     std::vector<bool> joint_updated_;
 
-    std::shared_ptr<mjbots::moteus::Transport> transport_;
+    std::shared_ptr<transport::Transport> transport_;
     
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
+
+    // TODO: move to urdf
+    const std::string IP_GATEWAY = "192.168.000.200";
+    const uint16_t PORT_GATEWAY = 6666;
 };
 
 }

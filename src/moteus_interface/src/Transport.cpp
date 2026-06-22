@@ -81,7 +81,7 @@ bool moteus_interface::transport::Transport::initialize(
 bool moteus_interface::transport::Transport::write(
         const mjbots::moteus::CanFdFrame *frames,
         size_t size,
-        uint32_t timeout_us) 
+        uint32_t bus_timeout_us) 
 {
     if (!initialized_ || socket_fd_ < 0) {
         RCLCPP_ERROR(logger_, "Transport: write() called before initialize()");
@@ -104,7 +104,7 @@ bool moteus_interface::transport::Transport::write(
     uint8_t tx_buf[kMaxTxPayload];
     auto* header = reinterpret_cast<UdpRequestHeader*>(tx_buf);
 
-    header->timeoutUs = static_cast<uint32_t>(timeout_us);
+    header->timeoutUs = static_cast<uint32_t>(bus_timeout_us);
     header->expectedReplies = expected_replies;
     header->frameCount = static_cast<uint32_t>(size);
 
