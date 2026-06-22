@@ -103,6 +103,11 @@ private:
         STRICT_SEQUENTIAL = 1,
         PIPELINED = 2
     };
+    enum class ControlType : uint8_t 
+    {
+        STANDARD = 1,
+        TORQUE_CONTROL = 2
+    };
 
 private:
     bool is_active_;

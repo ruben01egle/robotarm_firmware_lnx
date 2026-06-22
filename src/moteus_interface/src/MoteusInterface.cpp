@@ -300,9 +300,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         write_format.position = moteus::kFloat;
         write_format.velocity = moteus::kFloat;
         write_format.feedforward_torque = moteus::kFloat;
-        write_format.kp_scale = moteus::kInt8;
-        write_format.kd_scale = moteus::kInt8;
-        write_format.ilimit_scale = moteus::kInt8;
 
         moteus::Query::Format read_format;
         read_format.position           = moteus::Resolution::kInt16;
@@ -414,53 +411,78 @@ hardware_interface::return_type MoteusInterface::dispatch_cyclic_commands(const 
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
+
     for (size_t i = 0; i < num_joints; ++i)
     {
         auto& joint = joints_[i];
-        // standard mode: pos + vel + torque
-        moteus::PositionMode::Command cmd;
-        if (std::isnan(hw_commands_position_[i])) {
-            cmd.position = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
-        }
-        if (std::isnan(hw_commands_velocity_[i])) {
-            cmd.velocity = 0;
-        } else {
-            cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
-        }
-        if (std::isnan(hw_commands_effort_[i])) {
-            cmd.feedforward_torque = 0;
-        } else {
-            cmd.feedforward_torque = hw_commands_effort_[i];
-        }
-        cmd.kp_scale = 1.0;
-        cmd.kd_scale = 1.0;
-        cmd.ilimit_scale = 1.0;
 
-        // pos inactive
-        if (!joint.pos_active) {
+        ControlType control_type = (joint.effort_active && !joint.pos_active && !joint.vel_active)
+                                    ? ControlType::TORQUE_CONTROL
+                                    : ControlType::STANDARD;
+
+        if (control_type == ControlType::STANDARD) {
+            // standard mode: pos + vel + torque
+            moteus::PositionMode::Command cmd;
+            if (std::isnan(hw_commands_position_[i])) {
+                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            } else {
+                cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
+            }
+            if (std::isnan(hw_commands_velocity_[i])) {
+                cmd.velocity = 0;
+            } else {
+                cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
+            }
+            if (std::isnan(hw_commands_effort_[i])) {
+                cmd.feedforward_torque = 0;
+            } else {
+                cmd.feedforward_torque = hw_commands_effort_[i];
+            }
+
+            // pos inactive
+            if (!joint.pos_active) {
+                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            }
+            // vel inactive
+            if (!joint.vel_active) {
+                cmd.velocity = 0;
+            }
+            // torque inactive
+            if (!joint.effort_active) {
+                cmd.feedforward_torque = 0;
+            }
+
+            command_frames_[i] = joint.controller->MakePosition(cmd);
+        }
+        else if (control_type == ControlType::TORQUE_CONTROL) {
+            moteus::PositionMode::Format write_format_override;
+            write_format_override.position = moteus::kIgnore;
+            write_format_override.velocity = moteus::kIgnore;
+            write_format_override.feedforward_torque = moteus::kFloat;
+            write_format_override.kp_scale = moteus::kInt8;
+            write_format_override.kd_scale = moteus::kInt8;
+            write_format_override.ilimit_scale = moteus::kInt8;
+
+            moteus::PositionMode::Command cmd;
             cmd.position = std::numeric_limits<double>::quiet_NaN();
-        }
-        // vel inactive
-        if (!joint.vel_active) {
             cmd.velocity = 0;
-        }
-        // torque inactive
-        if (!joint.effort_active) {
-            cmd.feedforward_torque = 0;
+            if (std::isnan(hw_commands_effort_[i])) {
+                cmd.feedforward_torque = 0;
+            } else {
+                cmd.feedforward_torque = hw_commands_effort_[i];
+            }
+            cmd.kp_scale = 0;
+            cmd.kd_scale = 0;
+            cmd.ilimit_scale = 0;
+
+            command_frames_[i] = joint.controller->MakePosition(cmd, &write_format_override);
         }
         else {
-            // special case: torque only mode
-            if (!joint.pos_active && !joint.vel_active) {
-                cmd.kp_scale = 0;
-                cmd.kd_scale = 0;
-                cmd.ilimit_scale = 0;
-            }
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Unknown control type");
+            return hardware_interface::return_type::ERROR;
         }
-
-        command_frames_[i] = joint.controller->MakePosition(cmd);
     }
+
     if (!transport_->write(&command_frames_[0], command_frames_.size(), bus_timeout_us)) {
         RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
         return hardware_interface::return_type::ERROR;
