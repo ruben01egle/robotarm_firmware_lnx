@@ -138,8 +138,11 @@ After applying these settings and booting into Ubuntu, verify that `/dev/cpu_dma
 ```bash
 sudo cyclictest -l 100000 -m -p 99 -i 1000 -h 500 -S -q
 ```
+No load test:
+![alt text](noload_cyclictest.png)
+
 Full load test (ram, ssd, cpu all cores):
-![alt text](image.png)
+![alt text](load_cyclictest.png)
 
 First test (no load):
 ```
