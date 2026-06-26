@@ -376,7 +376,15 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         }
 
         // Set internal encoder to absolute position
-        transport_->write(&command_frames_[0], command_frames_.size(), 5000);
+        transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, 10000);
+        parse_result_frames();
+        if (!watchdog(true)) return hardware_interface::CallbackReturn::ERROR;
+
+        for (size_t i = 0; i < joints_.size(); ++i)
+        {
+            command_frames_[i] = joints_[i].controller_->MakeStop();
+        }
+        transport_->write(&command_frames_[0], command_frames_.size(), 8000);
         // guarante that transport layer replies before first read() call
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         

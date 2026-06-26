@@ -164,7 +164,7 @@ private:
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
 
     // TODO: move to urdf
-    const std::string IP_GATEWAY = "192.168.000.200";
+    const std::string IP_GATEWAY = "192.168.22.200";
     const uint16_t PORT_GATEWAY = 6666;
 };
 
