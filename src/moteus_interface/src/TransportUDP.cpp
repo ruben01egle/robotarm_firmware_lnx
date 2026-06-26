@@ -1,4 +1,4 @@
-#include "moteus_interface/Transport.hpp"
+#include "moteus_interface/TransportUDP.hpp"
 
 #include "rclcpp/logging.hpp"
 
@@ -13,15 +13,15 @@
 #include <cerrno>
 #include <cstring>
 
-constexpr size_t kMaxWireFrames = moteus_interface::transport::Transport::MAX_FRAMES;
+constexpr size_t kMaxWireFrames = moteus_interface::transport::TransportUDP::MAX_FRAMES;
 constexpr size_t kMaxTxPayload = sizeof(UdpRequestHeader) + kMaxWireFrames * sizeof(MoteusCanFrame);
 constexpr size_t kMaxRxPayload = kMaxWireFrames * sizeof(MoteusCanFrame);
 
-moteus_interface::transport::Transport::Transport(): socket_fd_(-1), logger_(rclcpp::get_logger("MoteusTransport"))
+moteus_interface::transport::TransportUDP::TransportUDP(): socket_fd_(-1), logger_(rclcpp::get_logger("MoteusTransport"))
 {
 }
 
-moteus_interface::transport::Transport::~Transport()
+moteus_interface::transport::TransportUDP::~TransportUDP()
 {
     if (socket_fd_ >= 0) {
         ::close(socket_fd_);
@@ -29,7 +29,7 @@ moteus_interface::transport::Transport::~Transport()
     }
 }
 
-bool moteus_interface::transport::Transport::initialize(
+bool moteus_interface::transport::TransportUDP::initialize(
     const std::string gateway_ip,
     const uint16_t gateway_port,
     rclcpp::Logger logger)
@@ -78,7 +78,7 @@ bool moteus_interface::transport::Transport::initialize(
     return true;
 }
 
-bool moteus_interface::transport::Transport::write(
+bool moteus_interface::transport::TransportUDP::write(
         const mjbots::moteus::CanFdFrame *frames,
         size_t size,
         uint32_t bus_timeout_us) 
@@ -131,7 +131,7 @@ bool moteus_interface::transport::Transport::write(
     return true;
 }
 
-bool moteus_interface::transport::Transport::read(
+bool moteus_interface::transport::TransportUDP::read(
     std::vector<mjbots::moteus::CanFdFrame> & replies,
     uint32_t timeout_us)
 {
@@ -158,25 +158,43 @@ bool moteus_interface::transport::Transport::read(
         }
     }
 
-    uint8_t rx_buf[kMaxRxPayload];
-    const ssize_t received = ::recvfrom(
-        socket_fd_, rx_buf, sizeof(rx_buf), 0, nullptr, nullptr);
-    if (received < 0) {
+    static constexpr size_t MAX_MSG = 5;
+    struct iovec iov[MAX_MSG];
+    struct mmsghdr msgs[MAX_MSG];
+    uint8_t rx_bufs[MAX_MSG][kMaxRxPayload];
+
+    std::memset(msgs, 0, sizeof(msgs));
+    for (size_t i = 0; i < MAX_MSG; ++i) {
+        iov[i].iov_base = rx_bufs[i];
+        iov[i].iov_len = sizeof(rx_bufs[i]);
+        msgs[i].msg_hdr.msg_iov = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+    }
+
+    const ssize_t received = ::recvmmsg(
+        socket_fd_, msgs, MAX_MSG, MSG_DONTWAIT, nullptr);
+    if (received <= 0) {
         RCLCPP_ERROR(logger_, "Transport: recvfrom failed: %s", std::strerror(errno));
         return false;
     }
-    else if (received == 0) return true;
 
-    if (static_cast<size_t>(received) % sizeof(MoteusCanFrame) != 0) {
+    const size_t msg_idx = received-1;
+    ssize_t received_bytes = msgs[msg_idx].msg_len;
+
+    if (received_bytes == 0) {
+        return true; 
+    }
+
+    if (static_cast<size_t>(received_bytes) % sizeof(MoteusCanFrame) != 0) {
         RCLCPP_ERROR(logger_,
                     "Transport: malformed response (%zd bytes, not a multiple "
                     "of %zu)",
-                    received, sizeof(MoteusCanFrame));
+                    received_bytes, sizeof(MoteusCanFrame));
         return false;
     }
 
-    const size_t reply_count = static_cast<size_t>(received) / sizeof(MoteusCanFrame);
-    const auto* wire_replies = reinterpret_cast<const MoteusCanFrame*>(rx_buf);
+    const size_t reply_count = static_cast<size_t>(received_bytes) / sizeof(MoteusCanFrame);
+    const auto* wire_replies = reinterpret_cast<const MoteusCanFrame*>(rx_bufs[msg_idx]);
 
     for (size_t i = 0; i < reply_count; ++i) {
         replies.push_back(decode_frame(wire_replies[i]));
@@ -185,7 +203,7 @@ bool moteus_interface::transport::Transport::read(
     return true;
 }
 
-bool moteus_interface::transport::Transport::cycle(
+bool moteus_interface::transport::TransportUDP::cycle(
     const mjbots::moteus::CanFdFrame *frames,
     size_t size, std::vector<mjbots::moteus::CanFdFrame> &replies,
     uint32_t timeout_us)
@@ -208,7 +226,7 @@ bool moteus_interface::transport::Transport::cycle(
     return true;
 }
 
-MoteusCanFrame moteus_interface::transport::Transport::encode_frame(const mjbots::moteus::CanFdFrame &frame)
+MoteusCanFrame moteus_interface::transport::TransportUDP::encode_frame(const mjbots::moteus::CanFdFrame &frame)
 {
     MoteusCanFrame wire = {};
     wire.id = frame.arbitration_id;
@@ -245,7 +263,7 @@ MoteusCanFrame moteus_interface::transport::Transport::encode_frame(const mjbots
     return wire;
 }
 
-mjbots::moteus::CanFdFrame moteus_interface::transport::Transport::decode_frame(const MoteusCanFrame &wire)
+mjbots::moteus::CanFdFrame moteus_interface::transport::TransportUDP::decode_frame(const MoteusCanFrame &wire)
 {
     using namespace mjbots::moteus;
     CanFdFrame frame;
@@ -271,7 +289,7 @@ mjbots::moteus::CanFdFrame moteus_interface::transport::Transport::decode_frame(
     return frame;
 }
 
-size_t moteus_interface::transport::Transport::round_up_dlc(size_t size)
+size_t moteus_interface::transport::TransportUDP::round_up_dlc(size_t size)
 {
     if (size <= 8) { return size; }
     if (size <= 12) { return 12; }

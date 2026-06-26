@@ -17,35 +17,19 @@ namespace moteus_interface::transport
 class Transport
 {
 public:
-    Transport();
-    ~Transport();
-    bool initialize(const std::string gateway_ip,
+    Transport() = default;
+    virtual ~Transport() = default;
+
+    virtual bool initialize(const std::string gateway_ip,
                     const uint16_t gateway_port,
-                    rclcpp::Logger logger = rclcpp::get_logger("MoteusTransport"));
+                    rclcpp::Logger logger = rclcpp::get_logger("MoteusTransport")) = 0;
 
-    bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us);
-    bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t timeout_us=0);
+    virtual bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us) = 0;
+    virtual bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t timeout_us=0) = 0;
 
-    bool cycle(const mjbots::moteus::CanFdFrame *frames, size_t size,
+    virtual bool cycle(const mjbots::moteus::CanFdFrame *frames, size_t size,
                std::vector<mjbots::moteus::CanFdFrame> & replies,
-               uint32_t timeout_us);
-
-public:
-    static constexpr size_t MAX_FRAMES = 32;
-    static constexpr bool kDefaultDisableBrs = false;
-
-private:
-    MoteusCanFrame encode_frame(const mjbots::moteus::CanFdFrame& frame);
-    mjbots::moteus::CanFdFrame decode_frame(const MoteusCanFrame& wire);
-    size_t round_up_dlc(size_t size);
-
-private:
-    int socket_fd_ = -1;
-    uint32_t gateway_addr_ = 0;
-    uint16_t gateway_port_ = 0;
-    bool initialized_ = false;
-
-    rclcpp::Logger logger_;
+               uint32_t timeout_us) = 0;
 
 };
 

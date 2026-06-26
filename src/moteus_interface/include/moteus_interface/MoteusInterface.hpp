@@ -8,7 +8,7 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
-#include "moteus_interface/Transport.hpp"
+#include "moteus_interface/TransportUDP.hpp"
 
 namespace moteus_interface
 {
@@ -16,18 +16,50 @@ namespace moteus_interface
 class MoteusInterface : public hardware_interface::SystemInterface 
 {
 public:
-    struct Joint {
-        std::string name;
-        int can_id;
-        double gear_ratio;
-        double encoder_offset;
+    using transport_type = transport::TransportUDP;
 
-        bool pos_active = false;
-        bool vel_active = false;
-        bool effort_active = false;
+private:
+    class Joint 
+    {
+    public:
+        std::string name_;
+        int can_id_;
+        double gear_ratio_;
+        double encoder_offset_;
+
+        bool pos_active_ = false;
+        bool vel_active_ = false;
+        bool effort_active_ = false;
+
+        bool is_updated_ = false;
+        size_t consecutive_failures_ = 0;
+        double failure_rate_ = 0.0;
+        static constexpr size_t MAX_CONSECUTIVE_FAILURES = 3;
+        static constexpr double MAX_FAILURE_RATE = 0.10;
+        static constexpr double FILTER_ALPHA = 0.01;
         
-        std::shared_ptr<mjbots::moteus::Controller> controller;
+        std::shared_ptr<mjbots::moteus::Controller> controller_;
+
+    public:
+        void update_status(bool updated) {
+            is_updated_ = updated;
+
+            if (is_updated_) {
+                consecutive_failures_ = 0;
+            }
+            else {
+                consecutive_failures_++;
+            }
+
+            double current_error = is_updated_ ? 0.0 : 1.0;
+            failure_rate_ = (1.0 - FILTER_ALPHA) * failure_rate_ + FILTER_ALPHA * current_error;
+        }
+        bool in_error_state() {
+            return (consecutive_failures_ >= MAX_CONSECUTIVE_FAILURES) ||
+                (failure_rate_ > MAX_FAILURE_RATE);
+        }
     };
+
 public:
     RCLCPP_SHARED_PTR_DEFINITIONS(MoteusInterface)
 
@@ -79,7 +111,8 @@ public:
 
 private:
     hardware_interface::return_type dispatch_cyclic_commands(const uint32_t bus_timeout_us);
-    bool parse_result_frames();
+    void parse_result_frames();
+    bool watchdog(bool strict=false);
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
 
     template <typename T = double>
