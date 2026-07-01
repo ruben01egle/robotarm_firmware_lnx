@@ -8,6 +8,9 @@ PLUGINLIB_EXPORT_CLASS(
 namespace moteus_interface
 {
 
+constexpr uint32_t read_timeout_us = 400;
+
+
 // Parse static parameters from the URDF here.
 // Dynamic/ROS parameters from the YAML configuration require 'get_node()' 
 // and are therefore parsed later in on_configure().
@@ -182,7 +185,6 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     
     // first ever call expects at least one previous transport::write or transport::cycle call
     // small timeout to tolerate overrun instead of crashing over small latency
-    uint32_t read_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000 / 5);
     // for our case this is always true, for more flexibility this could be computed based on the last sent commands
     uint32_t expected_replies = num_joints;
     if (!transport_->read(replies_frames_, expected_replies, read_timeout_us)) return hardware_interface::return_type::ERROR;
@@ -224,7 +226,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 
     // In inactive only read is called -> read needs query new data
     // In active this is done by read() or write() depending on mode
-    uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
+    uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000) - read_timeout_us;
     if (!is_active_)
     {
         for (size_t i = 0; i < num_joints; ++i)
@@ -251,7 +253,7 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
     if (!is_active_) return hardware_interface::return_type::OK;
     
     if (execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL) {
-        uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
+        uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000) - read_timeout_us;
         return dispatch_cyclic_commands(bus_timeout_us);
     }
 

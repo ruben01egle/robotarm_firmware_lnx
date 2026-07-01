@@ -197,9 +197,9 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
                             if (parse_line(line, replies)) {
                                 receieved_replies++;
                             }
-                            else {
-                                RCLCPP_WARN(logger_, "Transport: Corrupt line data discarted.");
-                            }
+                            //else {
+                            //    RCLCPP_WARN(logger_, "Transport: Corrupt line data discarted.");
+                            //}
                         }
                         std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
                         rx_buffer_pos_ -= (scan_pos + 1);
