@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
-# Kopiere hier einfach deine komplette Terminal-Ausgabe zwischen die drei Anführungszeichen
 raw_data = """
 000000 000000	000000	000000	000000
 000001 000000	000000	000000	000000
@@ -504,55 +504,84 @@ raw_data = """
 000499 000000	000000	000000	000000
 """
 
-# Schwellenwert für Ausreißer (in Mikrosekunden)
+raw_stats = """
+# Total: 000100000 000100000 000100000 000100000
+# Min Latencies: 00003 00002 00002 00003
+# Avg Latencies: 00003 00003 00003 00003
+# Max Latencies: 00131 00057 00286 00007
+# Histogram Overflows: 00000 00000 00000 00000
+# Histogram Overflow at cycle number:
+# Thread 0:
+# Thread 1:
+# Thread 2:
+# Thread 3:
+"""
+
 OUTLIER_THRESHOLD = 20
 
-latencies = []
-cores_data = [[] for _ in range(4)]  # Liste für die 4 Kerne
-
 # Daten parsen
+latencies = []
+cores_data = [[] for _ in range(4)]
+max_detected_latency = 0
+
 for line in raw_data.strip().split("\n"):
     parts = line.split()
     if len(parts) == 5:
-        latencies.append(int(parts[0]))
-        for i in range(4):
-            cores_data[i].append(int(parts[i+1]))
+        lat = int(parts[0])
+        vals = [int(p) for p in parts[1:5]]
+        
+        if sum(vals) > 0:
+            latencies.append(lat)
+            for i in range(4):
+                cores_data[i].append(vals[i])
+            if lat > max_detected_latency:
+                max_detected_latency = lat
 
-# Plot mit 4 Subplots untereinander erstellen
-fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+# Listen für die extrahierten Latenzen pro Kern (Index 0=T0, 1=T1...)
+avg_lats = [0, 0, 0, 0]
+max_lats = [0, 0, 0, 0]
+
+for line in raw_stats.strip().split("\n"):
+    if "Avg Latencies" in line:
+        avg_lats = [int(x) for x in line.split()[3:]]
+    elif "Max Latencies" in line:
+        max_lats = [int(x) for x in line.split()[3:]]
+
+# Plot erstellen
+fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=True)
 fig.suptitle('Cyclictest Latency Per Core', fontsize=14, fontweight='bold', y=0.98)
 
 colors = ['#2ca02c' if l <= OUTLIER_THRESHOLD else '#d62728' for l in latencies]
 
+# Dynamische X-Achsenbegrenzung anhand der maximalen Latenz aus den Statistiken
+x_max_limit = max(max_lats) + 10
+
 for i, ax in enumerate(axes):
-    # Einzelne Balken für den jeweiligen Kern zeichnen
-    ax.bar(latencies, cores_data[i], color=colors, width=0.8, edgecolor='black', alpha=0.85)
+    # Histogramm-Balken zeichnen
+    ax.bar(latencies, cores_data[i], color=colors, width=1.2, edgecolor='black', alpha=0.8, linewidth=0.5)
     
-    # Logarithmische Y-Achse
+    # Vertikale Linien für Avg und Max zeichnen
+    avg_line = ax.axvline(x=avg_lats[i], color='#1f77b4', linestyle='--', linewidth=1.5, label=f'Avg: {avg_lats[i]} µs')
+    max_line = ax.axvline(x=max_lats[i], color='#d62728', linestyle=':', linewidth=2, label=f'Max: {max_lats[i]} µs')
+    
+    # Logarithmische Skalierung & Limits
     ax.set_yscale('log')
+    ax.set_ylim(bottom=0.5)
+    ax.set_xlim(left=-2, right=x_max_limit)
     
-    # Achsenbeschriftung und Titel pro Kern
+    # Beschriftungen
     ax.set_ylabel('Occurrences', fontsize=10)
     ax.set_title(f'Thread {i}', fontsize=11, fontweight='bold', loc='left', pad=2)
-    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.grid(True, which="both", linestyle="--", alpha=0.3)
     
     # Rote Jitter-Zone im Hintergrund markieren
-    ax.axvspan(OUTLIER_THRESHOLD, max(latencies) + 5, color='#d62728', alpha=0.05)
+    ax.axvspan(OUTLIER_THRESHOLD, x_max_limit, color='#d62728', alpha=0.02)
     
-    # Y-Achsen-Limits schick machen (damit "0" Einträge auf der Log-Skala nicht clippen)
-    ax.set_ylim(bottom=0.5)
+    # Eigene Legende pro Subplot (zeigt die genauen Werte des Threads)
+    ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
 
-# X-Achse bekommt ganz unten die Beschriftung
+# X-Achse ganz unten benennen
 axes[-1].set_xlabel('Latency (µs)', fontsize=12)
 
-# Custom Legende hinzufügen
-from matplotlib.patches import Patch
-legend_elements = [
-    Patch(facecolor='#2ca02c', edgecolor='black', label='Safe Real-time Range (≤ 20 µs)'),
-    Patch(facecolor='#d62728', edgecolor='black', label='Outliers / Jitter (> 20 µs)')
-]
-fig.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(0.98, 0.96), fontsize=10)
-
-# Layout optimieren, damit nichts überlappt
-plt.tight_layout(rect=[0, 0, 1, 0.94])
+plt.tight_layout(rect=[0, 0, 1, 0.93])
 plt.show()

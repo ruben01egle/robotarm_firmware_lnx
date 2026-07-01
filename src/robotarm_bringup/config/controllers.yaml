@@ -55,7 +55,7 @@ controller_manager:
       shutdown_on_initial_state_failure: false
     overruns:
       print_warnings: true
-    update_rate: 100
+    update_rate: 1000
 
     lock_memory: true
     thread_priority: 99
@@ -65,6 +65,14 @@ controller_manager:
 
     teleop_controller:
       type: robotarm_controllers/TeleopController
+
+moteushardwaresystem:
+  ros__parameters:
+    execution_mode: "pipelined"  # pipelined or strict_sequential
+    transport_mode: "usb"        # "udp" or "usb"
+    udp_ip: "192.168.22.200"
+    udp_port: 6666
+    usb_device: "/dev/fdcanusb"
 
 joint_state_broadcaster:
   ros__parameters:
