@@ -113,41 +113,51 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
     if (size == 0) { return true; }
 
     flush();
-
-    char tx_buf[256];
+    tx_buffer_pos_ = 0;
 
     for (size_t i = 0; i < size; ++i) {
         const auto& frame = frames[i];
 
-        int len = std::snprintf(tx_buf, sizeof(tx_buf), "can send %04x ", frame.arbitration_id);
+        if (sizeof(tx_buffer_) - tx_buffer_pos_ < 200) { 
+            RCLCPP_ERROR(logger_, "Transport: Tx buffer overflow prevention triggered!");
+            return false;
+        }
+
+        tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, 
+                                "can send %04x ", frame.arbitration_id);
 
         const size_t dlc = round_up_dlc(frame.size);
         for (size_t j = 0; j < frame.size; ++j) {
-            len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, "%02x", frame.data[j]);
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "%02x", frame.data[j]);
         }
         for (size_t j = frame.size; j < dlc; ++j) {
-            len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, "50");
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "50");
         }
 
-        if (frame.brs == mjbots::moteus::CanFdFrame::kForceOn) len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, " B");
-        else if (frame.brs == mjbots::moteus::CanFdFrame::kForceOff) len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, " b");
-
-        if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOn) len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, " F");
-        else if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOff) len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, " f");
-
-        len += std::snprintf(tx_buf + len, sizeof(tx_buf) - len, "\n");
-
-
-        size_t written = 0;
-        while (written < static_cast<size_t>(len)) {
-            int ret = ::write(fd_, tx_buf + written, len - written);
-            if (ret < 0) {
-                if (errno == EINTR || errno == EAGAIN) { continue; }
-                RCLCPP_ERROR(logger_, "Transport: Fatal error writing to serial port: %s", std::strerror(errno));
-                return false;
-            }
-            written += ret;
+        if (frame.brs == mjbots::moteus::CanFdFrame::kForceOn) {
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " B");
+        } else if (frame.brs == mjbots::moteus::CanFdFrame::kForceOff) {
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " b");
         }
+
+        if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOn) {
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " F");
+        } else if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOff) {
+            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " f");
+        }
+
+        tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "\n");
+    }
+
+    size_t written = 0;
+    while (written < static_cast<size_t>(tx_buffer_pos_)) {
+        int ret = ::write(fd_, tx_buffer_ + written, tx_buffer_pos_ - written);
+        if (ret < 0) {
+            if (errno == EINTR || errno == EAGAIN) { continue; }
+            RCLCPP_ERROR(logger_, "Transport: Fatal error writing all frames to serial port: %s", std::strerror(errno));
+            return false;
+        }
+        written += ret;
     }
 
     return true;
@@ -168,29 +178,29 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
     size_t receieved_replies = 0;
 
     do {
-        const size_t to_read = sizeof(line_buffer_) - line_buffer_pos_;
+        const size_t to_read = sizeof(rx_buffer_) - rx_buffer_pos_;
         if (to_read == 0) {
             RCLCPP_WARN(logger_, "Transport: Line buffer overflow, resetting buffer.");
-            line_buffer_pos_ = 0;
+            rx_buffer_pos_ = 0;
             continue; 
         }
 
-        int read_ret = ::read(fd_, &line_buffer_[line_buffer_pos_], to_read);
+        int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], to_read);
         
         if (read_ret > 0) {
-            line_buffer_pos_ += read_ret;
+            rx_buffer_pos_ += read_ret;
 
             size_t scan_pos = 0;
-            while (scan_pos < line_buffer_pos_) {
-                if (line_buffer_[scan_pos] == '\r' || line_buffer_[scan_pos] == '\n') {
+            while (scan_pos < rx_buffer_pos_) {
+                if (rx_buffer_[scan_pos] == '\r' || rx_buffer_[scan_pos] == '\n') {
                     if (scan_pos > 0) { 
-                        std::string_view line(&line_buffer_[0], scan_pos);
+                        std::string_view line(&rx_buffer_[0], scan_pos);
                         if (parse_line(line, replies)) {
                             receieved_replies++;
                         }
                     }
-                    std::memmove(&line_buffer_[0], &line_buffer_[scan_pos + 1], line_buffer_pos_ - (scan_pos + 1));
-                    line_buffer_pos_ -= (scan_pos + 1);
+                    std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
+                    rx_buffer_pos_ -= (scan_pos + 1);
                     scan_pos = 0; 
                 } else {
                     scan_pos++;
@@ -268,7 +278,7 @@ void moteus_interface::transport::TransportUSB::flush()
 
     ::tcflush(fd_, TCIFLUSH);
 
-    line_buffer_pos_ = 0;
+    rx_buffer_pos_ = 0;
 }
 
 bool moteus_interface::transport::TransportUSB::parse_line(

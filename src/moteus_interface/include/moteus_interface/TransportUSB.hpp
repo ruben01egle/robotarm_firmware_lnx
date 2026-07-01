@@ -44,8 +44,11 @@ private:
     int fd_;
     std::string device_;
 
-    char line_buffer_[4096] = {};
-    size_t line_buffer_pos_ = 0;
+    char rx_buffer_[4096] = {};
+    size_t rx_buffer_pos_ = 0;
+
+    char tx_buffer_[4096] = {};
+    size_t tx_buffer_pos_ = 0;
 };
 
 }
