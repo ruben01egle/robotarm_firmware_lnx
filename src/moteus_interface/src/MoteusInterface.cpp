@@ -34,8 +34,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     hw_states_effort_.assign(num_joints, 0.0);
 
     joints_.resize(num_joints);
+    joint_updated_.assign(num_joints, false);
     command_frames_.resize(num_joints);
-    replies_frames_.reserve(num_joints);            // reserve instead of resize for clear/pushback in transport cycle
+    replies_frames_.reserve(num_joints*2);            // reserve instead of resize for clear/pushback in transport cycle, some headroom to avoid heap alloc
     joint_results_.resize(num_joints);
 
     for (size_t i = 0; i < num_joints; ++i)
@@ -205,10 +206,11 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     // first ever call expects at least one previous transport::write or transport::cycle call
     // small timeout to tolerate overrun instead of crashing over small latency
     uint32_t read_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000 / 5);
-    if (!transport_->read(replies_frames_, read_timeout_us)) return hardware_interface::return_type::ERROR;
+    // for our case this is always true, for more flexibility this could be computed based on the last sent commands
+    uint32_t expected_replies = num_joints;
+    if (!transport_->read(replies_frames_, expected_replies, read_timeout_us)) return hardware_interface::return_type::ERROR;
     parse_result_frames();
     if (!watchdog()) return hardware_interface::return_type::ERROR;
-    replies_frames_.clear();
 
     for (size_t i = 0; i < joint_results_.size(); ++i) 
     {
@@ -285,14 +287,14 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
     try {
         using namespace mjbots;
-        transport_ = std::make_shared<transport_type>();
+        transport_ = transport_factory_();
         if (!transport_)
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                          "Moteus-Transport not created!");
             return hardware_interface::CallbackReturn::ERROR;
         }
-        if (!transport_->initialize(IP_GATEWAY, PORT_GATEWAY)) {
+        if (!transport_->initialize()) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                          "Moteus-Transport not initialized!");
             return hardware_interface::CallbackReturn::ERROR;
@@ -340,7 +342,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         moteus::Query::ItemFormat encoder1;                 // extra field for secondary encoder
         encoder1.register_number = moteus::Register::kEncoder1Position;
         encoder1.resolution = moteus::Resolution::kFloat;
-        read_format.extra[0] = encoder1;
+        read_override.extra[0] = encoder1;
 
         size_t num_joints = joints_.size();
         for (size_t i = 0; i < num_joints; ++i)
@@ -353,7 +355,13 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             command_frames_[i] = joints_[i].controller_->MakeStop(&read_override);
         }
         // reset controller to ensure defined state on startup
-        transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, 10000);
+        // for our case this is always true, for more flexibility this could be computed based on the last sent commands
+        uint32_t expected_replies = num_joints;
+        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                            "Cycle commands failed");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
         parse_result_frames();
         if (!watchdog(true)) return hardware_interface::CallbackReturn::ERROR;
         for (size_t i = 0; i < joint_results_.size(); ++i) 
@@ -376,7 +384,12 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         }
 
         // Set internal encoder to absolute position
-        transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, 10000);
+        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
+                            "Cycle commands failed");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+            
         parse_result_frames();
         if (!watchdog(true)) return hardware_interface::CallbackReturn::ERROR;
 
@@ -551,6 +564,7 @@ void MoteusInterface::parse_result_frames()
             joint_updated_[joint_index] = true;
         }
     }
+    replies_frames_.clear();
 }
 
 bool MoteusInterface::watchdog(bool strict)

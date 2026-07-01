@@ -1,6 +1,9 @@
 #ifndef MOTEUSINTERFACE_HPP
 #define MOTEUSINTERFACE_HPP
 
+#include <functional>
+#include <string_view>
+
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "rclcpp/macros.hpp"
@@ -13,11 +16,23 @@
 namespace moteus_interface
 {
 
+// TODO: move to urdf
+constexpr std::string_view IP_GATEWAY = "192.168.22.200";
+constexpr uint16_t PORT_GATEWAY = 6666;
+
 class MoteusInterface : public hardware_interface::SystemInterface 
 {
-public:
+private:
     using transport_type = transport::TransportUDP;
+    using TransportFactory = std::function<std::shared_ptr<moteus_interface::transport::Transport>()>;
+    //TransportFactory transport_factory_ = []() { 
+    //    return std::make_shared<moteus_interface::transport::TransportUSB>("/dev/fdcanusb"); 
+    //};
 
+    TransportFactory transport_factory_ = []() { 
+        return std::make_shared<moteus_interface::transport::TransportUDP>(std::string(IP_GATEWAY), PORT_GATEWAY); 
+    };
+    
 private:
     class Joint 
     {
@@ -162,10 +177,6 @@ private:
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
-
-    // TODO: move to urdf
-    const std::string IP_GATEWAY = "192.168.22.200";
-    const uint16_t PORT_GATEWAY = 6666;
 };
 
 }

@@ -17,7 +17,11 @@ constexpr size_t kMaxWireFrames = moteus_interface::transport::TransportUDP::MAX
 constexpr size_t kMaxTxPayload = sizeof(UdpRequestHeader) + kMaxWireFrames * sizeof(MoteusCanFrame);
 constexpr size_t kMaxRxPayload = kMaxWireFrames * sizeof(MoteusCanFrame);
 
-moteus_interface::transport::TransportUDP::TransportUDP(): socket_fd_(-1), logger_(rclcpp::get_logger("MoteusTransport"))
+moteus_interface::transport::TransportUDP::TransportUDP(const std::string gateway_ip, const uint16_t gateway_port):
+    Transport(rclcpp::get_logger("MoteusTransport")),
+    socket_fd_(-1),
+    gateway_ip_(gateway_ip),
+    gateway_port_(gateway_port)
 {
 }
 
@@ -29,26 +33,20 @@ moteus_interface::transport::TransportUDP::~TransportUDP()
     }
 }
 
-bool moteus_interface::transport::TransportUDP::initialize(
-    const std::string gateway_ip,
-    const uint16_t gateway_port,
-    rclcpp::Logger logger)
+bool moteus_interface::transport::TransportUDP::initialize()
 {
-    logger_ = logger;
-
-      if (socket_fd_ >= 0) {
+    if (socket_fd_ >= 0) {
         ::close(socket_fd_);
         socket_fd_ = -1;
     }
 
-      in_addr addr = {};
-    if (::inet_pton(AF_INET, gateway_ip.c_str(), &addr) != 1) {
-    RCLCPP_ERROR(logger_, "Transport: invalid bridge IP address '%s'", gateway_ip.c_str());
+    in_addr addr = {};
+    if (::inet_pton(AF_INET, gateway_ip_.c_str(), &addr) != 1) {
+    RCLCPP_ERROR(logger_, "Transport: invalid bridge IP address '%s'", gateway_ip_.c_str());
         initialized_ = false;
         return false;
     }
     gateway_addr_ = addr.s_addr;
-    gateway_port_ = gateway_port;
 
     socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd_ < 0) {
@@ -73,7 +71,7 @@ bool moteus_interface::transport::TransportUDP::initialize(
     }
 
      RCLCPP_INFO(logger_, "Transport: initialized, gateway=%s:%u",
-              gateway_ip.c_str(), static_cast<unsigned>(gateway_port));
+              gateway_ip_.c_str(), static_cast<unsigned>(gateway_port_));
     initialized_ = true;
     return true;
 }
@@ -133,6 +131,7 @@ bool moteus_interface::transport::TransportUDP::write(
 
 bool moteus_interface::transport::TransportUDP::read(
     std::vector<mjbots::moteus::CanFdFrame> & replies,
+    uint32_t /*expected_replies*/,
     uint32_t timeout_us)
 {
     if (timeout_us > 0) {
@@ -153,8 +152,8 @@ bool moteus_interface::transport::TransportUDP::read(
         }
         else if (poll_result == 0)
         {
-            RCLCPP_ERROR(logger_, "Read timeout: Total budget of %d us expired.", timeout_us);
-            return false;
+            RCLCPP_WARN(logger_, "Read timeout: Total budget of %d us expired.", timeout_us);
+            return true;
         }
     }
 
@@ -206,13 +205,13 @@ bool moteus_interface::transport::TransportUDP::read(
 bool moteus_interface::transport::TransportUDP::cycle(
     const mjbots::moteus::CanFdFrame *frames,
     size_t size, std::vector<mjbots::moteus::CanFdFrame> &replies,
+    uint32_t /*expected_replies*/,
     uint32_t timeout_us)
 {
     char dummy;
     while (::recvfrom(socket_fd_, &dummy, 1, MSG_DONTWAIT | MSG_TRUNC, nullptr, nullptr) >= 0) {
         // clear stale messages
     }
-    replies.clear();
 
     static constexpr uint32_t timeout_network_us = 500; 
     uint32_t timeout_bus_us;
@@ -221,7 +220,7 @@ bool moteus_interface::transport::TransportUDP::cycle(
 
     if (!write(frames, size, timeout_bus_us)) return false;
 
-    if (!read(replies, timeout_us)) return false;
+    if (!read(replies, 0, timeout_us)) return false;
 
     return true;
 }
