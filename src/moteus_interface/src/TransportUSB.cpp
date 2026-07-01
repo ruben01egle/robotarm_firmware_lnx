@@ -175,48 +175,51 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
     pfd.fd = fd_;
     pfd.events = POLLIN;
 
-    size_t receieved_replies = 0;
+    uint32_t receieved_replies = 0;
 
     do {
         const size_t to_read = sizeof(rx_buffer_) - rx_buffer_pos_;
         if (to_read == 0) {
             RCLCPP_WARN(logger_, "Transport: Line buffer overflow, resetting buffer.");
             rx_buffer_pos_ = 0;
-            continue; 
         }
+        else {
+            int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], to_read);
 
-        int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], to_read);
-        
-        if (read_ret > 0) {
-            rx_buffer_pos_ += read_ret;
+            if (read_ret > 0) {
+                rx_buffer_pos_ += read_ret;
 
-            size_t scan_pos = 0;
-            while (scan_pos < rx_buffer_pos_) {
-                if (rx_buffer_[scan_pos] == '\r' || rx_buffer_[scan_pos] == '\n') {
-                    if (scan_pos > 0) { 
-                        std::string_view line(&rx_buffer_[0], scan_pos);
-                        if (parse_line(line, replies)) {
-                            receieved_replies++;
+                size_t scan_pos = 0;
+                while (scan_pos < rx_buffer_pos_) {
+                    if (rx_buffer_[scan_pos] == '\r' || rx_buffer_[scan_pos] == '\n') {
+                        if (scan_pos > 0) {
+                            std::string_view line(&rx_buffer_[0], scan_pos);
+                            if (parse_line(line, replies)) {
+                                receieved_replies++;
+                            }
+                            else {
+                                RCLCPP_WARN(logger_, "Transport: Corrupt line data discarted.");
+                            }
                         }
+                        std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
+                        rx_buffer_pos_ -= (scan_pos + 1);
+                        scan_pos = 0;
+                    } else {
+                        scan_pos++;
                     }
-                    std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
-                    rx_buffer_pos_ -= (scan_pos + 1);
-                    scan_pos = 0; 
-                } else {
-                    scan_pos++;
                 }
             }
-        }
-        else if (read_ret < 0) {
-            if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                RCLCPP_ERROR(logger_, "Transport: Fatal read error: %s", std::strerror(errno));
+            else if (read_ret < 0) {
+                if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    RCLCPP_ERROR(logger_, "Transport: Fatal read error: %s", std::strerror(errno));
+                    return false;
+                }
+            }
+            else if (read_ret == 0) {
+                RCLCPP_ERROR(logger_, "Transport: Device unplugged / connection closed.");
+                initialized_ = false;
                 return false;
             }
-        }
-        else if (read_ret == 0) {
-            RCLCPP_ERROR(logger_, "Transport: Device unplugged / connection closed.");
-            initialized_ = false;
-            return false;
         }
         
         if (receieved_replies >= expected_replies) {
@@ -230,10 +233,10 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         struct timespec current_time;
         ::clock_gettime(CLOCK_MONOTONIC_RAW, &current_time);
         uint32_t elapsed_us = static_cast<uint32_t>(dt_us(start_time, current_time));
-        
+
         if (elapsed_us >= timeout_us) {
             RCLCPP_WARN(logger_,
-                "Transport: Read timeout. Got %zu of %zu replies.", receieved_replies, expected_replies);
+                "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
             return true;
         }
 
@@ -304,6 +307,10 @@ bool moteus_interface::transport::TransportUSB::parse_line(
                                  line.substr(second_space + 1, third_space - (second_space + 1));
 
     if (addr_str.empty() || data_str.empty()) {
+        return false;
+    }
+
+    if (data_str.size() % 2 != 0) {
         return false;
     }
 

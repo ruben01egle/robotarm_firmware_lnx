@@ -31,7 +31,7 @@ public:
                uint32_t timeout_us) override;
 
 public:
-    static constexpr size_t MAX_FRAMES = 32;
+    static constexpr size_t MAX_FRAMES = 12;
     static constexpr bool kDefaultDisableBrs = false;
 
 private:

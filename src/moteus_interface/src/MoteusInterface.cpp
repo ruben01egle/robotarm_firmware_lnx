@@ -8,6 +8,9 @@ PLUGINLIB_EXPORT_CLASS(
 namespace moteus_interface
 {
 
+// Parse static parameters from the URDF here.
+// Dynamic/ROS parameters from the YAML configuration require 'get_node()' 
+// and are therefore parsed later in on_configure().
 hardware_interface::CallbackReturn MoteusInterface::on_init(
     const hardware_interface::HardwareComponentInterfaceParams & params)
 {
@@ -79,32 +82,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Joint %s missing 'gear_ratio' parameter!", info_.joints[i].name.c_str());
             return hardware_interface::CallbackReturn::ERROR;
         }
-    }
-
-    auto mode_it = info_.hardware_parameters.find("execution_mode");
-    if (mode_it != info_.hardware_parameters.end())
-    {
-        if (mode_it->second == "pipelined")
-        {
-            execution_mode_ = ExecutionMode::PIPELINED;
-            RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Execution Mode: PIPELINED");
-        }
-        else if (mode_it->second == "strict_sequential")
-        {
-            execution_mode_ = ExecutionMode::STRICT_SEQUENTIAL;
-            RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Execution Mode: STRICT_SEQUENTIAL");
-        }
-        else
-        {
-            RCLCPP_WARN(rclcpp::get_logger("MoteusInterface"), 
-                        "Unknown execution_mode '%s'. Falling back to STRICT_SEQUENTIAL", mode_it->second.c_str());
-            execution_mode_ = ExecutionMode::STRICT_SEQUENTIAL;
-        }
-    }
-    else
-    {
-        execution_mode_ = ExecutionMode::STRICT_SEQUENTIAL;
-        RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "No execution_mode specified. Using default: STRICT_SEQUENTIAL");
     }
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -284,6 +261,21 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
 hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Configuring moteus interface...");
+
+    if (!read_ros_parameters()) { return hardware_interface::CallbackReturn::ERROR; }
+
+    if (transport_mode_ == TransportMode::UDP)
+    {
+        transport_factory_ = [ip = udp_ip_, port = udp_port_]() {
+            return std::make_shared<moteus_interface::transport::TransportUDP>(ip, port);
+        };
+    }
+    else if (transport_mode_ == TransportMode::USB)
+    {
+        transport_factory_ = [device = usb_device_]() {
+            return std::make_shared<moteus_interface::transport::TransportUSB>(device);
+        };
+    }
 
     try {
         using namespace mjbots;
@@ -468,11 +460,11 @@ hardware_interface::return_type MoteusInterface::dispatch_cyclic_commands(const 
     {
         auto& joint = joints_[i];
 
-        ControlType control_type = (joint.effort_active_ && !joint.pos_active_ && !joint.vel_active_)
-                                    ? ControlType::TORQUE_CONTROL
-                                    : ControlType::STANDARD;
+        ControlMode control_type = (joint.effort_active_ && !joint.pos_active_ && !joint.vel_active_)
+                                    ? ControlMode::TORQUE_CONTROL
+                                    : ControlMode::STANDARD;
 
-        if (control_type == ControlType::STANDARD) {
+        if (control_type == ControlMode::STANDARD) {
             // standard mode: pos + vel + torque
             moteus::PositionMode::Command cmd;
             if (std::isnan(hw_commands_position_[i])) {
@@ -506,7 +498,7 @@ hardware_interface::return_type MoteusInterface::dispatch_cyclic_commands(const 
 
             command_frames_[i] = joint.controller_->MakePosition(cmd);
         }
-        else if (control_type == ControlType::TORQUE_CONTROL) {
+        else if (control_type == ControlMode::TORQUE_CONTROL) {
             moteus::PositionMode::Format write_format_override;
             write_format_override.position = moteus::kIgnore;
             write_format_override.velocity = moteus::kIgnore;
@@ -627,6 +619,97 @@ bool MoteusInterface::check_joint_interface(hardware_interface::ComponentInfo jo
                     "Joint %s invalid state interface! Expected: position, velocity, effort.", joint.name.c_str());
         return false;
     }
+    return true;
+}
+
+bool MoteusInterface::read_ros_parameters()
+{
+    auto node = get_node();
+    if (!node)
+    {
+        RCLCPP_ERROR(get_logger(), "Framework-managed node not available");
+        return false;
+    }
+
+    // declare only once; on subsequent on_configure() calls, just re-read the current value
+    auto declare_or_get = [&node](const std::string & name, auto default_value)
+    {
+        if (!node->has_parameter(name))
+        {
+            return node->declare_parameter(name, default_value);
+        }
+        return node->get_parameter(name).get_value<decltype(default_value)>();
+    };
+
+    std::string transport_mode_str;
+    std::string execution_mode_str;
+
+    try
+    {
+        execution_mode_str = declare_or_get("execution_mode", std::string("auto"));
+        transport_mode_str = declare_or_get("transport_mode", std::string("auto"));
+    }
+    catch (const std::exception & e)
+    {
+        RCLCPP_ERROR(get_logger(), "Error reading parameters: %s", e.what());
+        return false;
+    }
+
+    if (execution_mode_str == "auto") {
+        execution_mode_ = ExecutionMode::STRICT_SEQUENTIAL;
+        RCLCPP_INFO(get_logger(), "No execution_mode specified. Using default: STRICT_SEQUENTIAL");
+    }
+    else if (execution_mode_str == "pipelined") {
+        execution_mode_ = ExecutionMode::PIPELINED;
+        RCLCPP_INFO(get_logger(), "Execution Mode: pipelined");
+    }
+    else if (execution_mode_str == "strict_sequential") {
+        execution_mode_ = ExecutionMode::STRICT_SEQUENTIAL;
+        RCLCPP_INFO(get_logger(), "Execution Mode: strict_sequential");
+    }
+    else {
+        RCLCPP_ERROR(get_logger(),
+            "execution_mode must be 'pipelined' or 'strict_sequential', got '%s'", execution_mode_str.c_str());
+        return false;
+    }
+
+    if (transport_mode_str == "auto") {
+        transport_mode_ = TransportMode::USB;
+        RCLCPP_INFO(get_logger(), "Default Transport Mode USB");
+    }
+    else if (transport_mode_str == "udp") {
+        transport_mode_ = TransportMode::UDP;
+        RCLCPP_INFO(get_logger(), "Transport Mode set to UDP");
+    }
+    else if (transport_mode_str == "usb") {
+        transport_mode_ = TransportMode::USB;
+        RCLCPP_INFO(get_logger(), "Transport Mode set to USB");
+    }
+    else {
+        RCLCPP_ERROR(get_logger(), "transport_mode must be 'udp' or 'usb', got '%s'", transport_mode_str.c_str());
+        return false;
+    }
+
+    try
+    {
+        if (transport_mode_ == TransportMode::UDP)
+        {
+            udp_ip_   = declare_or_get("udp_ip", std::string(""));
+            udp_port_ = declare_or_get("udp_port", 0);
+            RCLCPP_INFO(get_logger(), "UDP Config: %s:%d", udp_ip_.c_str(), udp_port_);
+        }
+        else if (transport_mode_ == TransportMode::USB)
+        {
+            usb_device_ = declare_or_get("usb_device", std::string("/dev/fdcanusb"));
+            RCLCPP_INFO(get_logger(), "USB Config: %s", usb_device_.c_str());
+        }
+    }
+    catch (const std::exception & e)
+    {
+        RCLCPP_ERROR(get_logger(), "Error reading parameters: %s", e.what());
+        return false;
+    }
+
     return true;
 }
 

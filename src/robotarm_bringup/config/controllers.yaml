@@ -66,6 +66,14 @@ controller_manager:
     teleop_controller:
       type: robotarm_controllers/TeleopController
 
+MoteusHardwareSystem:
+  ros__parameters:
+    execution_mode: "pipelined"  # pipelined or strict_sequential
+    transport_mode: "udp"        # "udp" or "usb"
+    udp_ip: "192.168.22.200"
+    udp_port: 6666
+    usb_device: "/dev/fdcanusb"
+
 joint_state_broadcaster:
   ros__parameters:
     publish_rate: 50

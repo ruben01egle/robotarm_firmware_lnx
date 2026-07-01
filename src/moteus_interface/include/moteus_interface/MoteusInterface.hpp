@@ -12,26 +12,15 @@
 #include "moteus.h"
 
 #include "moteus_interface/TransportUDP.hpp"
+#include "moteus_interface/TransportUSB.hpp"
 
 namespace moteus_interface
 {
 
-// TODO: move to urdf
-constexpr std::string_view IP_GATEWAY = "192.168.22.200";
-constexpr uint16_t PORT_GATEWAY = 6666;
-
 class MoteusInterface : public hardware_interface::SystemInterface 
 {
 private:
-    using transport_type = transport::TransportUDP;
     using TransportFactory = std::function<std::shared_ptr<moteus_interface::transport::Transport>()>;
-    //TransportFactory transport_factory_ = []() { 
-    //    return std::make_shared<moteus_interface::transport::TransportUSB>("/dev/fdcanusb"); 
-    //};
-
-    TransportFactory transport_factory_ = []() { 
-        return std::make_shared<moteus_interface::transport::TransportUDP>(std::string(IP_GATEWAY), PORT_GATEWAY); 
-    };
     
 private:
     class Joint 
@@ -129,6 +118,7 @@ private:
     void parse_result_frames();
     bool watchdog(bool strict=false);
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
+    bool read_ros_parameters();
 
     template <typename T = double>
     std::optional<T> get_extra_register_value(
@@ -151,10 +141,15 @@ private:
         STRICT_SEQUENTIAL = 1,
         PIPELINED = 2
     };
-    enum class ControlType : uint8_t 
+    enum class ControlMode : uint8_t 
     {
         STANDARD = 1,
         TORQUE_CONTROL = 2
+    };
+    enum class TransportMode : uint8_t
+    {
+        UDP = 1,
+        USB = 2
     };
 
 private:
@@ -173,6 +168,12 @@ private:
     std::vector<bool> joint_updated_;
 
     std::shared_ptr<transport::Transport> transport_;
+    TransportFactory transport_factory_;
+    TransportMode transport_mode_;
+
+    std::string udp_ip_;
+    int udp_port_;
+    std::string usb_device_;
     
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
