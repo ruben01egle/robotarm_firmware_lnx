@@ -227,6 +227,10 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         }
 
         if (timeout_us == 0) {
+            if (receieved_replies < expected_replies) {
+                RCLCPP_WARN(logger_,
+                    "Transport: Read incomplete. Got %u of %u replies.", receieved_replies, expected_replies);
+            }
             return true; 
         }
 
@@ -252,6 +256,8 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
             return false; 
         }
         else if (poll_result == 0) {
+            RCLCPP_WARN(logger_,
+                "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
             return true;
         }
 
@@ -267,7 +273,6 @@ bool moteus_interface::transport::TransportUSB::cycle(
             uint32_t expected_replies,
             uint32_t timeout_us)
 {
-    flush();
     if (!write(frames, size, 0)) return false;
 
     if (!read(replies, expected_replies, timeout_us)) return false;

@@ -8,7 +8,7 @@ PLUGINLIB_EXPORT_CLASS(
 namespace moteus_interface
 {
 
-constexpr uint32_t read_timeout_us = 400;
+constexpr uint32_t read_timeout_us = 200;
 
 
 // Parse static parameters from the URDF here.
