@@ -170,6 +170,7 @@ private:
     std::shared_ptr<transport::Transport> transport_;
     TransportFactory transport_factory_;
     TransportMode transport_mode_;
+    uint32_t timeout_us_;
     bool transport_timing_;
 
     std::string udp_ip_;

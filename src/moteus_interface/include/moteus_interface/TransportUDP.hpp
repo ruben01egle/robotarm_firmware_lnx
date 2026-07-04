@@ -22,7 +22,7 @@ public:
     virtual ~TransportUDP();
     bool initialize() override;
 
-    bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us) override;
+    bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t timeout_us) override;
     bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t expected_replies, uint32_t timeout_us=0) override;
 
     bool cycle(const mjbots::moteus::CanFdFrame *frames, size_t size,

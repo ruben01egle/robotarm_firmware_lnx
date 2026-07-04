@@ -10,7 +10,10 @@ PLUGINLIB_EXPORT_CLASS(
 namespace moteus_interface
 {
 
-constexpr uint32_t read_timeout_us = 200;
+// Not a real wait budget: in PIPELINED mode replies should already be
+// buffered by the time read() runs. This only absorbs scheduling jitter
+// between arrival and this call
+constexpr uint32_t pipelined_read_timeout_us = 100;
 
 
 // Parse static parameters from the URDF here.
@@ -197,7 +200,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     const bool replies_already_collected = is_active_ && execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL;
 
     if (!replies_already_collected) {
-        if (!transport_->read(replies_frames_, expected_replies, read_timeout_us)) {
+        if (!transport_->read(replies_frames_, expected_replies, pipelined_read_timeout_us)) {
             return hardware_interface::return_type::ERROR;
         }
     }
@@ -239,14 +242,14 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 
     // In inactive only read is called -> read needs query new data
     // In active this is done by read() or write() depending on mode
-    uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000) - read_timeout_us;
+    uint32_t timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
     if (!is_active_)
     {
         for (size_t i = 0; i < num_joints; ++i)
         {
             command_frames_[i] = joints_[i].controller_->MakeStop();
         }
-        if (!transport_->write(&command_frames_[0], command_frames_.size(), bus_timeout_us)) {
+        if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
             return hardware_interface::return_type::ERROR;
         }
@@ -257,7 +260,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                 return hardware_interface::return_type::ERROR;
             }
             // PIPELINED: fire-and-forget
-            if (!transport_->write(&command_frames_[0], command_frames_.size(), bus_timeout_us)) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us)) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
                 return hardware_interface::return_type::ERROR;
             }
@@ -273,14 +276,14 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
     if (!is_active_) return hardware_interface::return_type::OK;
     
     if (execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL) {
-        uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000) - read_timeout_us;
+        uint32_t timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
         
         if (!make_cyclic_commands()) {
             return hardware_interface::return_type::ERROR;
         }
 
         uint32_t expected_replies = joints_.size();
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, bus_timeout_us)) {
+        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, timeout_us)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport cycle failed");
             return hardware_interface::return_type::ERROR;
         }

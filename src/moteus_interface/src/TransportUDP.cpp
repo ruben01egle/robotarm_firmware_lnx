@@ -17,6 +17,8 @@ constexpr size_t kMaxWireFrames = moteus_interface::transport::TransportUDP::MAX
 constexpr size_t kMaxTxPayload = sizeof(UdpRequestHeader) + kMaxWireFrames * sizeof(MoteusCanFrame);
 constexpr size_t kMaxRxPayload = kMaxWireFrames * sizeof(MoteusCanFrame);
 
+constexpr uint32_t timeout_network_us = 300; 
+
 moteus_interface::transport::TransportUDP::TransportUDP(const std::string gateway_ip, const uint16_t gateway_port):
     Transport(rclcpp::get_logger("MoteusTransport")),
     socket_fd_(-1),
@@ -79,7 +81,7 @@ bool moteus_interface::transport::TransportUDP::initialize()
 bool moteus_interface::transport::TransportUDP::write(
         const mjbots::moteus::CanFdFrame *frames,
         size_t size,
-        uint32_t bus_timeout_us) 
+        uint32_t timeout_us) 
 {
     if (!initialized_ || socket_fd_ < 0) {
         RCLCPP_ERROR(logger_, "Transport: write() called before initialize()");
@@ -104,7 +106,11 @@ bool moteus_interface::transport::TransportUDP::write(
     uint8_t tx_buf[kMaxTxPayload];
     auto* header = reinterpret_cast<UdpRequestHeader*>(tx_buf);
 
-    header->timeoutUs = static_cast<uint32_t>(bus_timeout_us);
+    uint32_t timeout_bus_us;
+    if (timeout_us <= timeout_network_us) timeout_bus_us = 0;
+    else timeout_bus_us = timeout_us - timeout_network_us;
+
+    header->timeoutUs = static_cast<uint32_t>(timeout_bus_us);
     header->expectedReplies = expected_replies;
     header->frameCount = static_cast<uint32_t>(size);
 
@@ -232,7 +238,6 @@ bool moteus_interface::transport::TransportUDP::cycle(
         // clear stale messages
     }
 
-    static constexpr uint32_t timeout_network_us = 500; 
     uint32_t timeout_bus_us;
     if (timeout_us <= timeout_network_us) timeout_bus_us = 0;
     else timeout_bus_us = timeout_us - timeout_network_us;
