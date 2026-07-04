@@ -16,8 +16,16 @@ namespace moteus_interface::transport
 {
 
 inline uint64_t transport_dt_us(const struct timespec& start, const struct timespec& end) {
-    return static_cast<uint64_t>(end.tv_sec - start.tv_sec) * 1000000ULL +
-           static_cast<uint64_t>(end.tv_nsec - start.tv_nsec) / 1000ULL;
+    const int64_t sec_diff  = static_cast<int64_t>(end.tv_sec)  - static_cast<int64_t>(start.tv_sec);
+    const int64_t nsec_diff = static_cast<int64_t>(end.tv_nsec) - static_cast<int64_t>(start.tv_nsec);
+    const int64_t total_ns  = sec_diff * 1000000000LL + nsec_diff;
+
+    // Should never happen with CLOCK_MONOTONIC_RAW and correctly-ordered
+    // start/end, but never let a negative diff wrap into a huge uint64_t.
+    if (total_ns < 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(total_ns) / 1000ULL;
 }
 
 // Per-cycle timing instrumentation for a Transport. Meant to be held as a

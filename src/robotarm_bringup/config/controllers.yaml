@@ -55,7 +55,7 @@ controller_manager:
       shutdown_on_initial_state_failure: false
     overruns:
       print_warnings: true
-    update_rate: 1000
+    update_rate: 500
 
     lock_memory: true
     thread_priority: 99
@@ -68,9 +68,9 @@ controller_manager:
 
 moteushardwaresystem:
   ros__parameters:
-    execution_mode: "pipelined"  # pipelined or strict_sequential
+    execution_mode: "strict_sequential"  # pipelined or strict_sequential
     transport_mode: "usb"        # "udp" or "usb"
-    time_transport: "true"
+    time_transport: true
     udp_ip: "192.168.22.200"
     udp_port: 6666
     usb_device: "/dev/fdcanusb"

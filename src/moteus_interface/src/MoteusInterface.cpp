@@ -185,12 +185,22 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
-    
+
     // first ever call expects at least one previous transport::write or transport::cycle call
     // small timeout to tolerate overrun instead of crashing over small latency
     // for our case this is always true, for more flexibility this could be computed based on the last sent commands
     uint32_t expected_replies = num_joints;
-    if (!transport_->read(replies_frames_, expected_replies, read_timeout_us)) return hardware_interface::return_type::ERROR;
+
+    // STRICT_SEQUENTIAL while active: a full transport_->cycle() (write + blocking read)
+    // was called prior and populated replies_frames_
+    // PIPELINED while active: write() fire and forget, collect replies here 
+    const bool replies_already_collected = is_active_ && execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL;
+
+    if (!replies_already_collected) {
+        if (!transport_->read(replies_frames_, expected_replies, read_timeout_us)) {
+            return hardware_interface::return_type::ERROR;
+        }
+    }
     parse_result_frames();
     if (!watchdog()) return hardware_interface::return_type::ERROR;
 
@@ -240,11 +250,18 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
             return hardware_interface::return_type::ERROR;
         }
-        return hardware_interface::return_type::OK;
     }
-    
-    if (execution_mode_ == ExecutionMode::PIPELINED) {
-        return dispatch_cyclic_commands(bus_timeout_us);
+    else {
+        if (execution_mode_ == ExecutionMode::PIPELINED) {
+            if (!make_cyclic_commands()) {
+                return hardware_interface::return_type::ERROR;
+            }
+            // PIPELINED: fire-and-forget
+            if (!transport_->write(&command_frames_[0], command_frames_.size(), bus_timeout_us)) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
+                return hardware_interface::return_type::ERROR;
+            }
+        }
     }
     
     return hardware_interface::return_type::OK;
@@ -257,7 +274,16 @@ hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*tim
     
     if (execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL) {
         uint32_t bus_timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000) - read_timeout_us;
-        return dispatch_cyclic_commands(bus_timeout_us);
+        
+        if (!make_cyclic_commands()) {
+            return hardware_interface::return_type::ERROR;
+        }
+
+        uint32_t expected_replies = joints_.size();
+        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, bus_timeout_us)) {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport cycle failed");
+            return hardware_interface::return_type::ERROR;
+        }
     }
 
     return hardware_interface::return_type::OK;
@@ -441,7 +467,10 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
         return hardware_interface::CallbackReturn::ERROR;
     }
-    
+
+    is_active_ = false;
+
+    // Dump timing log after the hardware is safe
     if (transport_timing_) {
         std::time_t now = std::time(nullptr);
         char ts[32];
@@ -452,7 +481,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Transport timing disabled, log saved to '%s'.", path.c_str());
     }
 
-    is_active_ = false;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -473,7 +501,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_error(const rclcpp_lifecy
     return on_deactivate(previous_state);
 }
 
-hardware_interface::return_type MoteusInterface::dispatch_cyclic_commands(const uint32_t bus_timeout_us)
+bool MoteusInterface::make_cyclic_commands()
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
@@ -545,16 +573,11 @@ hardware_interface::return_type MoteusInterface::dispatch_cyclic_commands(const 
         }
         else {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Unknown control type");
-            return hardware_interface::return_type::ERROR;
+            return false;
         }
     }
 
-    if (!transport_->write(&command_frames_[0], command_frames_.size(), bus_timeout_us)) {
-        RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
-        return hardware_interface::return_type::ERROR;
-    }
-
-    return hardware_interface::return_type::OK;
+    return true;
 }
 
 void MoteusInterface::parse_result_frames()

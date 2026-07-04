@@ -114,7 +114,7 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
-    hardware_interface::return_type dispatch_cyclic_commands(const uint32_t bus_timeout_us);
+    bool make_cyclic_commands();
     void parse_result_frames();
     bool watchdog(bool strict=false);
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
