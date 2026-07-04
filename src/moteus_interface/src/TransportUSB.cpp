@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <cstdio>
 #include <linux/serial.h>
 #include <time.h>
 #include <algorithm>
@@ -112,6 +113,8 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
     }
     if (size == 0) { return true; }
 
+    timing_.mark_write_start();
+
     flush();
     tx_buffer_pos_ = 0;
 
@@ -149,6 +152,8 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
         tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "\n");
     }
 
+    timing_.mark_encode_done();
+
     size_t written = 0;
     while (written < static_cast<size_t>(tx_buffer_pos_)) {
         int ret = ::write(fd_, tx_buffer_ + written, tx_buffer_pos_ - written);
@@ -159,6 +164,8 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
         }
         written += ret;
     }
+
+    timing_.mark_write_done();
 
     return true;
 }
@@ -177,6 +184,9 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
 
     uint32_t receieved_replies = 0;
 
+    bool have_first_byte = false;
+    bool timed_out = false;
+
     do {
         const size_t to_read = sizeof(rx_buffer_) - rx_buffer_pos_;
         if (to_read == 0) {
@@ -187,6 +197,8 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
             int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], to_read);
 
             if (read_ret > 0) {
+                timing_.mark_first_byte_if_needed(have_first_byte);
+
                 rx_buffer_pos_ += read_ret;
 
                 size_t scan_pos = 0;
@@ -223,7 +235,7 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         }
         
         if (receieved_replies >= expected_replies) {
-            return true;
+            break;
         }
 
         if (timeout_us == 0) {
@@ -231,7 +243,8 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
                 RCLCPP_WARN(logger_,
                     "Transport: Read incomplete. Got %u of %u replies.", receieved_replies, expected_replies);
             }
-            return true; 
+            timed_out = (receieved_replies < expected_replies);
+            break;
         }
 
         struct timespec current_time;
@@ -241,7 +254,8 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         if (elapsed_us >= timeout_us) {
             RCLCPP_WARN(logger_,
                 "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
-            return true;
+            timed_out = true;
+            break;
         }
 
         uint32_t remaining_us = timeout_us - elapsed_us;
@@ -258,10 +272,13 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         else if (poll_result == 0) {
             RCLCPP_WARN(logger_,
                 "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
-            return true;
+            timed_out = true;
+            break;
         }
 
     } while (true);
+
+    timing_.record_cycle_end(have_first_byte, expected_replies, receieved_replies, timed_out);
 
     return true;
 }

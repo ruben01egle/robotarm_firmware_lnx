@@ -99,6 +99,8 @@ bool moteus_interface::transport::TransportUDP::write(
         if (frames[i].reply_required) { ++expected_replies; }
     }
 
+    timing_.mark_write_start();
+
     uint8_t tx_buf[kMaxTxPayload];
     auto* header = reinterpret_cast<UdpRequestHeader*>(tx_buf);
 
@@ -113,6 +115,8 @@ bool moteus_interface::transport::TransportUDP::write(
 
     const size_t tx_size = sizeof(UdpRequestHeader) + size * sizeof(MoteusCanFrame);
 
+    timing_.mark_encode_done();
+
     sockaddr_in dest = {};
     dest.sin_family = AF_INET;
     dest.sin_port = htons(gateway_port_);
@@ -125,15 +129,19 @@ bool moteus_interface::transport::TransportUDP::write(
         RCLCPP_ERROR(logger_, "Transport: sendto failed: %s", std::strerror(errno));
         return false;
     }
-    
+
+    timing_.mark_write_done();
+
     return true;
 }
 
 bool moteus_interface::transport::TransportUDP::read(
     std::vector<mjbots::moteus::CanFdFrame> & replies,
-    uint32_t /*expected_replies*/,
+    uint32_t expected_replies,
     uint32_t timeout_us)
 {
+    bool have_first_byte = false;
+
     if (timeout_us > 0) {
         struct pollfd pfd = {};
         pfd.fd = socket_fd_;
@@ -153,6 +161,7 @@ bool moteus_interface::transport::TransportUDP::read(
         else if (poll_result == 0)
         {
             RCLCPP_WARN(logger_, "Read timeout: Total budget of %d us expired.", timeout_us);
+            timing_.record_cycle_end(have_first_byte, expected_replies, 0, /*timed_out=*/true);
             return true;
         }
     }
@@ -170,9 +179,15 @@ bool moteus_interface::transport::TransportUDP::read(
         msgs[i].msg_hdr.msg_iovlen = 1;
     }
 
+    timing_.mark_first_byte_if_needed(have_first_byte);
+
     const ssize_t received = ::recvmmsg(
         socket_fd_, msgs, MAX_MSG, MSG_DONTWAIT, nullptr);
     if (received <= 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            timing_.record_cycle_end(false, expected_replies, 0, /*timed_out=*/false);
+            return true;
+        }
         RCLCPP_ERROR(logger_, "Transport: recvfrom failed: %s", std::strerror(errno));
         return false;
     }
@@ -181,6 +196,7 @@ bool moteus_interface::transport::TransportUDP::read(
     ssize_t received_bytes = msgs[msg_idx].msg_len;
 
     if (received_bytes == 0) {
+        timing_.record_cycle_end(have_first_byte, expected_replies, 0, /*timed_out=*/false);
         return true; 
     }
 
@@ -199,13 +215,16 @@ bool moteus_interface::transport::TransportUDP::read(
         replies.push_back(decode_frame(wire_replies[i]));
     }
 
+    timing_.record_cycle_end(have_first_byte, expected_replies,
+                              static_cast<uint32_t>(reply_count), /*timed_out=*/false);
+
     return true;
 }
 
 bool moteus_interface::transport::TransportUDP::cycle(
     const mjbots::moteus::CanFdFrame *frames,
     size_t size, std::vector<mjbots::moteus::CanFdFrame> &replies,
-    uint32_t /*expected_replies*/,
+    uint32_t expected_replies,
     uint32_t timeout_us)
 {
     char dummy;
@@ -220,7 +239,7 @@ bool moteus_interface::transport::TransportUDP::cycle(
 
     if (!write(frames, size, timeout_bus_us)) return false;
 
-    if (!read(replies, 0, timeout_us)) return false;
+    if (!read(replies, expected_replies, timeout_us)) return false;
 
     return true;
 }

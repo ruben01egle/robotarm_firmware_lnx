@@ -1,5 +1,7 @@
 #include "moteus_interface/MoteusInterface.hpp"
 
+#include <ctime>
+
 PLUGINLIB_EXPORT_CLASS(
   moteus_interface::MoteusInterface, 
   hardware_interface::SystemInterface
@@ -23,6 +25,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     }
 
     is_active_ = false;
+    transport_timing_ = false;
 
     size_t num_joints = info_.joints.size();
     if (num_joints == 0)
@@ -417,6 +420,12 @@ hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lif
             hw_commands_velocity_[i] = 0;
             hw_commands_effort_[i] = 0;
         }
+
+    if (transport_timing_) {
+        transport_->set_timing_enabled(true);
+        RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Transport timing enabled.");
+    }
+
     is_active_ = true;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -429,9 +438,20 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         command_frames_[i] = joints_[i].controller_->MakeStop();
     }
     if (!transport_->write(&command_frames_[0], command_frames_.size(), 1000)) {
-            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
-            return hardware_interface::CallbackReturn::ERROR;
-        }
+        RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+    
+    if (transport_timing_) {
+        std::time_t now = std::time(nullptr);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&now));
+        const std::string path = std::string("transport_timing_") + ts + ".csv";
+        transport_->dump_timing_log(path);
+        transport_->set_timing_enabled(false);
+        RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Transport timing disabled, log saved to '%s'.", path.c_str());
+    }
+
     is_active_ = false;
     return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -705,6 +725,9 @@ bool MoteusInterface::read_ros_parameters()
             usb_device_ = declare_or_get("usb_device", std::string("/dev/fdcanusb"));
             RCLCPP_INFO(get_logger(), "USB Config: %s", usb_device_.c_str());
         }
+
+        transport_timing_ = declare_or_get("time_transport", false);
+        RCLCPP_INFO(get_logger(), "Transport Timing: %s", transport_timing_ ? "true" : "false");
     }
     catch (const std::exception & e)
     {

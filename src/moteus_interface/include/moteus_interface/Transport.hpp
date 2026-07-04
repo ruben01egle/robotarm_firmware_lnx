@@ -10,6 +10,7 @@
 #include "rclcpp/logger.hpp"
 
 #include "CanProtocolTypes.hpp"
+#include "moteus_interface/TransportTiming.hpp"
 
 namespace moteus_interface::transport
 {
@@ -17,7 +18,7 @@ namespace moteus_interface::transport
 class Transport
 {
 public:
-    Transport(rclcpp::Logger logger):logger_(logger) {};
+    Transport(rclcpp::Logger logger): logger_(logger), timing_(logger) {};
     virtual ~Transport() = default;
 
     virtual bool initialize() = 0;
@@ -29,10 +30,15 @@ public:
                std::vector<mjbots::moteus::CanFdFrame> & replies,
                uint32_t expected_replies,
                uint32_t timeout_us) = 0;
+               
+    void set_timing_enabled(bool enabled, size_t capacity = 20000) { timing_.set_enabled(enabled, capacity); }
+    bool timing_enabled() const { return timing_.enabled(); }
+    void reset_timing_log() { timing_.reset(); }
+    bool dump_timing_log(const std::string& path) const { return timing_.dump(path); }
 
-    protected:
-        rclcpp::Logger logger_;
-
+protected:
+    rclcpp::Logger logger_;
+    TransportTiming timing_;
 };
 
 }
