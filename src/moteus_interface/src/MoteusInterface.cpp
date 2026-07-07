@@ -300,14 +300,14 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
     if (transport_mode_ == TransportMode::UDP)
     {
-        transport_factory_ = [ip = udp_ip_, port = udp_port_]() {
-            return std::make_shared<moteus_interface::transport::TransportUDP>(ip, port);
+        transport_factory_ = []() {
+            return std::make_shared<moteus_interface::transport::TransportUDP>();
         };
     }
     else if (transport_mode_ == TransportMode::USB)
     {
-        transport_factory_ = [device = usb_device_]() {
-            return std::make_shared<moteus_interface::transport::TransportUSB>(device);
+        transport_factory_ = []() {
+            return std::make_shared<moteus_interface::transport::TransportUSB>();
         };
     }
 
@@ -318,6 +318,11 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                          "Moteus-Transport not created!");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        if (!transport_->declare_and_read_parameters(get_node()->get_node_parameters_interface()))
+        {
+            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport parameter setup failed");
             return hardware_interface::CallbackReturn::ERROR;
         }
         if (!transport_->initialize()) {
@@ -696,6 +701,9 @@ bool MoteusInterface::read_ros_parameters()
     {
         execution_mode_str = declare_or_get("execution_mode", std::string("auto"));
         transport_mode_str = declare_or_get("transport_mode", std::string("auto"));
+        transport_timing_ = declare_or_get("time_transport", false);
+        timeout_us_ = static_cast<uint32_t>(
+            declare_or_get("timeout_transport_us", 0));
     }
     catch (const std::exception & e)
     {
@@ -738,28 +746,22 @@ bool MoteusInterface::read_ros_parameters()
         return false;
     }
 
-    try
-    {
-        if (transport_mode_ == TransportMode::UDP)
+    if (timeout_us_ == 0) {
+        if (execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL)
         {
-            udp_ip_   = declare_or_get("udp_ip", std::string(""));
-            udp_port_ = declare_or_get("udp_port", 0);
-            RCLCPP_INFO(get_logger(), "UDP Config: %s:%d", udp_ip_.c_str(), udp_port_);
+            RCLCPP_ERROR(get_logger(),
+                "'timeout_transport_us' must be explicitly set in STRICT_SEQUENTIAL mode.");
+            return false;
         }
-        else if (transport_mode_ == TransportMode::USB)
+        else // PIPELINED
         {
-            usb_device_ = declare_or_get("usb_device", std::string("/dev/fdcanusb"));
-            RCLCPP_INFO(get_logger(), "USB Config: %s", usb_device_.c_str());
+            RCLCPP_WARN(get_logger(),
+                "'timeout_transport_us' not set — defaulting to 0. This might be problematic "
+                "depending on the used transport layer! Check the specific behavior!");
         }
+    }
 
-        transport_timing_ = declare_or_get("time_transport", false);
-        RCLCPP_INFO(get_logger(), "Transport Timing: %s", transport_timing_ ? "true" : "false");
-    }
-    catch (const std::exception & e)
-    {
-        RCLCPP_ERROR(get_logger(), "Error reading parameters: %s", e.what());
-        return false;
-    }
+    RCLCPP_INFO(get_logger(), "Transport Timing: %s", transport_timing_ ? "true" : "false");
 
     return true;
 }

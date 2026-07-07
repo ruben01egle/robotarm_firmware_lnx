@@ -39,6 +39,22 @@ moteus_interface::transport::TransportUSB::~TransportUSB()
     }
 }
 
+bool moteus_interface::transport::TransportUSB::declare_and_read_parameters(
+    const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface> &params)
+{
+    auto declare_or_get = [&params](const std::string& name, auto default_value) {
+        if (!params->has_parameter(name)) {
+            return params->declare_parameter(name, rclcpp::ParameterValue(default_value)).get<decltype(default_value)>();
+        }
+        return params->get_parameter(name).get_value<decltype(default_value)>();
+    };
+
+    device_   = declare_or_get("transport.usb_device", std::string("/dev/fdcanusb"));
+    RCLCPP_INFO(logger_, "USB Config: %s", device_.c_str());
+
+    return true;
+}
+
 bool moteus_interface::transport::TransportUSB::initialize()
 {
     if (fd_ >= 0) {

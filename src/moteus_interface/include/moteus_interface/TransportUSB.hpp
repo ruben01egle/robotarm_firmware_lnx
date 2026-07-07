@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "moteus.h"
+#include "rclcpp/node_interfaces/node_parameters_interface.hpp"
 #include "rclcpp/logger.hpp"
 
 #include "Transport.hpp"
@@ -20,6 +21,9 @@ class TransportUSB : public Transport
 public:
     explicit TransportUSB(const std::string device="/dev/fdcanusb");
     virtual ~TransportUSB();
+
+    bool declare_and_read_parameters(
+        const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface>& params) override;
     bool initialize() override;
 
     bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us) override;

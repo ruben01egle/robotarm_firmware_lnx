@@ -17,13 +17,11 @@ constexpr size_t kMaxWireFrames = moteus_interface::transport::TransportUDP::MAX
 constexpr size_t kMaxTxPayload = sizeof(UdpRequestHeader) + kMaxWireFrames * sizeof(MoteusCanFrame);
 constexpr size_t kMaxRxPayload = kMaxWireFrames * sizeof(MoteusCanFrame);
 
-constexpr uint32_t timeout_network_us = 300; 
-
-moteus_interface::transport::TransportUDP::TransportUDP(const std::string gateway_ip, const uint16_t gateway_port):
+moteus_interface::transport::TransportUDP::TransportUDP():
     Transport(rclcpp::get_logger("MoteusTransport")),
     socket_fd_(-1),
-    gateway_ip_(gateway_ip),
-    gateway_port_(gateway_port)
+    gateway_ip_(""),
+    gateway_port_(0)
 {
 }
 
@@ -35,6 +33,28 @@ moteus_interface::transport::TransportUDP::~TransportUDP()
     }
 }
 
+bool moteus_interface::transport::TransportUDP::declare_and_read_parameters(
+    const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface> &params)
+{
+    auto declare_or_get = [&params](const std::string& name, auto default_value) {
+        if (!params->has_parameter(name)) {
+            return params->declare_parameter(name, rclcpp::ParameterValue(default_value)).get<decltype(default_value)>();
+        }
+        return params->get_parameter(name).get_value<decltype(default_value)>();
+    };
+
+    gateway_ip_   = declare_or_get("transport.udp_ip", std::string(""));
+    gateway_port_= declare_or_get("transport.udp_port", 0);
+    network_timeout_us_ = static_cast<uint32_t>(
+        declare_or_get("transport.udp_bus_timeout_us", 300));
+
+    if (gateway_ip_.empty()) {
+        RCLCPP_FATAL(logger_, "Transport UDP: incomplete configuration.");
+        return false;
+    }
+    return true;
+}
+
 bool moteus_interface::transport::TransportUDP::initialize()
 {
     if (socket_fd_ >= 0) {
@@ -44,7 +64,7 @@ bool moteus_interface::transport::TransportUDP::initialize()
 
     in_addr addr = {};
     if (::inet_pton(AF_INET, gateway_ip_.c_str(), &addr) != 1) {
-    RCLCPP_ERROR(logger_, "Transport: invalid bridge IP address '%s'", gateway_ip_.c_str());
+        RCLCPP_ERROR(logger_, "Transport: invalid bridge IP address '%s'", gateway_ip_.c_str());
         initialized_ = false;
         return false;
     }
@@ -107,8 +127,8 @@ bool moteus_interface::transport::TransportUDP::write(
     auto* header = reinterpret_cast<UdpRequestHeader*>(tx_buf);
 
     uint32_t timeout_bus_us;
-    if (timeout_us <= timeout_network_us) timeout_bus_us = 0;
-    else timeout_bus_us = timeout_us - timeout_network_us;
+    if (timeout_us <= network_timeout_us_) timeout_bus_us = 0;
+    else timeout_bus_us = timeout_us - network_timeout_us_;
 
     header->timeoutUs = static_cast<uint32_t>(timeout_bus_us);
     header->expectedReplies = expected_replies;
@@ -239,8 +259,8 @@ bool moteus_interface::transport::TransportUDP::cycle(
     }
 
     uint32_t timeout_bus_us;
-    if (timeout_us <= timeout_network_us) timeout_bus_us = 0;
-    else timeout_bus_us = timeout_us - timeout_network_us;
+    if (timeout_us <= network_timeout_us_) timeout_bus_us = 0;
+    else timeout_bus_us = timeout_us - network_timeout_us_;
 
     if (!write(frames, size, timeout_bus_us)) return false;
 

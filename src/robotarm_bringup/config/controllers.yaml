@@ -51,7 +51,7 @@ controller_manager:
     handle_exceptions: true
     hardware_components_initial_state:
       inactive:
-        - MoteusHardwareSystem
+        - moteus_hardware_system
       shutdown_on_initial_state_failure: false
     overruns:
       print_warnings: true
@@ -66,14 +66,18 @@ controller_manager:
     teleop_controller:
       type: robotarm_controllers/TeleopController
 
-moteushardwaresystem:
+moteus_hardware_system:
   ros__parameters:
     execution_mode: "strict_sequential"  # pipelined or strict_sequential
     transport_mode: "udp"        # "udp" or "usb"
+    timeout_transport_us: 900
     time_transport: true
-    udp_ip: "192.168.22.200"
-    udp_port: 6666
-    usb_device: "/dev/fdcanusb"
+    
+    transport:
+      udp_ip: "192.168.22.200"
+      udp_port: 6666
+      udp_bus_timeout_us: 200
+      usb_device: "/dev/fdcanusb"
 
 joint_state_broadcaster:
   ros__parameters:

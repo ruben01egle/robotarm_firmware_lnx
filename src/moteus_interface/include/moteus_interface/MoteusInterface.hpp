@@ -172,10 +172,6 @@ private:
     TransportMode transport_mode_;
     uint32_t timeout_us_;
     bool transport_timing_;
-
-    std::string udp_ip_;
-    int udp_port_;
-    std::string usb_device_;
     
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;

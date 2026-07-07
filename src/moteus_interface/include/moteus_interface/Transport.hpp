@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "moteus.h"
+#include "rclcpp/node_interfaces/node_parameters_interface.hpp"
 #include "rclcpp/logger.hpp"
 
 #include "CanProtocolTypes.hpp"
@@ -21,6 +22,8 @@ public:
     Transport(rclcpp::Logger logger): logger_(logger), timing_(logger) {};
     virtual ~Transport() = default;
 
+    virtual bool declare_and_read_parameters(
+        const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface>& params) = 0;
     virtual bool initialize() = 0;
 
     virtual bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us) = 0;
