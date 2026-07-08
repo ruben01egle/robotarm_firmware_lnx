@@ -83,6 +83,10 @@ public:
     void reset() { log_.clear(); }
 
     bool dump(const std::string& path) const {
+        if (log_.empty()) {
+            return true;
+        }
+
         FILE* f = std::fopen(path.c_str(), "w");
         if (!f) {
             RCLCPP_ERROR(logger_, "TransportTiming: failed to open log path '%s': %s",

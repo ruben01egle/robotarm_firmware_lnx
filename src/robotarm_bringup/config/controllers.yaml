@@ -69,8 +69,8 @@ controller_manager:
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "strict_sequential"  # pipelined or strict_sequential
-    transport_mode: "udp"        # "udp" or "usb"
-    timeout_transport_us: 900
+    transport_mode: "usb"        # "udp" or "usb"
+    timeout_transport_us: 1700
     time_transport: true
     
     transport:

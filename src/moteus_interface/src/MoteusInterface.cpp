@@ -184,22 +184,20 @@ hardware_interface::return_type MoteusInterface::perform_command_mode_switch(con
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
+hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time*/, const rclcpp::Duration& /*period*/)
 {
     using namespace mjbots;
     const size_t num_joints = joints_.size();
 
-    // first ever call expects at least one previous transport::write or transport::cycle call
-    // small timeout to tolerate overrun instead of crashing over small latency
     // for our case this is always true, for more flexibility this could be computed based on the last sent commands
     uint32_t expected_replies = num_joints;
 
     // STRICT_SEQUENTIAL while active: a full transport_->cycle() (write + blocking read)
     // was called prior and populated replies_frames_
     // PIPELINED while active: write() fire and forget, collect replies here 
-    const bool replies_already_collected = is_active_ && execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL;
-
-    if (!replies_already_collected) {
+    if (execution_mode_ == ExecutionMode::PIPELINED) {
+        // first ever call expects at least one previous transport::write or transport::cycle call
+        // small timeout to tolerate overrun instead of crashing over small latency
         if (!transport_->read(replies_frames_, expected_replies, pipelined_read_timeout_us)) {
             return hardware_interface::return_type::ERROR;
         }
@@ -242,16 +240,25 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 
     // In inactive only read is called -> read needs query new data
     // In active this is done by read() or write() depending on mode
-    uint32_t timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
     if (!is_active_)
     {
         for (size_t i = 0; i < num_joints; ++i)
         {
             command_frames_[i] = joints_[i].controller_->MakeStop();
         }
-        if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us)) {
-            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
-            return hardware_interface::return_type::ERROR;
+
+        if (execution_mode_ == ExecutionMode::PIPELINED) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us_)) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
+                return hardware_interface::return_type::ERROR;
+            }
+        }
+        else {
+            uint32_t expected_replies = joints_.size();
+            if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, timeout_us_)) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport cycle failed");
+                return hardware_interface::return_type::ERROR;
+            }
         }
     }
     else {
@@ -260,7 +267,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                 return hardware_interface::return_type::ERROR;
             }
             // PIPELINED: fire-and-forget
-            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us)) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us_)) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
                 return hardware_interface::return_type::ERROR;
             }
@@ -270,20 +277,18 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
+hardware_interface::return_type MoteusInterface::write(const rclcpp::Time &/*time*/, const rclcpp::Duration& /*period*/)
 {
     // Older ROS versions call write in state inactive -> include this if to ensure backwards compatability
     if (!is_active_) return hardware_interface::return_type::OK;
     
     if (execution_mode_ == ExecutionMode::STRICT_SEQUENTIAL) {
-        uint32_t timeout_us = static_cast<uint32_t>(period.nanoseconds() / 1000);
-        
         if (!make_cyclic_commands()) {
             return hardware_interface::return_type::ERROR;
         }
 
         uint32_t expected_replies = joints_.size();
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, timeout_us)) {
+        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, timeout_us_)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport cycle failed");
             return hardware_interface::return_type::ERROR;
         }
@@ -428,9 +433,21 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         {
             command_frames_[i] = joints_[i].controller_->MakeStop();
         }
-        transport_->write(&command_frames_[0], command_frames_.size(), 8000);
+
         // guarante that transport layer replies before first read() call
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (execution_mode_ == ExecutionMode::PIPELINED) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size(), 1000)) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        else {
+            if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 5000)) {
+                RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport cycle failed");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+        }
         
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), 
                     "Moteus-Interface configured: %zu controller ready.", num_joints);
@@ -466,6 +483,11 @@ hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lif
 
 hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
+    if (!is_active_) {
+        // Already deactivated (e.g. on_shutdown after on_deactivate). Nothing to do.
+        return hardware_interface::CallbackReturn::SUCCESS;
+    }
+
     RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Deactivating Hardware...");
     for (size_t i = 0; i < joints_.size(); ++i)
     {
@@ -486,7 +508,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         const std::string path = std::string("transport_timing_") + ts + ".csv";
         transport_->dump_timing_log(path);
         transport_->set_timing_enabled(false);
-        RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Transport timing disabled, log saved to '%s'.", path.c_str());
     }
 
     return hardware_interface::CallbackReturn::SUCCESS;

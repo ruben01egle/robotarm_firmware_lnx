@@ -23,6 +23,29 @@ inline uint64_t dt_us(const struct timespec& start, const struct timespec& end) 
     return static_cast<uint64_t>(total_ns) / 1000ULL;
 }
 
+constexpr char kHexChars[] = "0123456789abcdef";
+
+struct HexPair { char c[2]; };
+constexpr std::array<HexPair, 256> make_hex_table() {
+    std::array<HexPair, 256> t{};
+    for (int i = 0; i < 256; ++i) {
+        t[i].c[0] = kHexChars[(i >> 4) & 0xf];
+        t[i].c[1] = kHexChars[i & 0xf];
+    }
+    return t;
+}
+constexpr std::array<HexPair, 256> kHexTable = make_hex_table();
+
+inline void append_hex_byte(char* buf, size_t& pos, uint8_t b) {
+    buf[pos++] = kHexTable[b].c[0];
+    buf[pos++] = kHexTable[b].c[1];
+}
+
+inline void append_str(char* buf, size_t& pos, const char* s, size_t n) {
+    std::memcpy(buf + pos, s, n);
+    pos += n;
+}
+
 moteus_interface::transport::TransportUSB::TransportUSB(const std::string device):
     Transport(rclcpp::get_logger("MoteusTransport")),
     initialized_(false),
@@ -126,7 +149,7 @@ bool moteus_interface::transport::TransportUSB::initialize()
     return true;
 }
 
-bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t /*bus_timeout_us*/)
+bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us)
 {
     if (!initialized_ || fd_ < 0) {
         RCLCPP_ERROR(logger_, "Transport: write() called but device is not initialized!");
@@ -139,51 +162,94 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
     flush();
     tx_buffer_pos_ = 0;
 
+    flush();
+    tx_buffer_pos_ = 0;
+
     for (size_t i = 0; i < size; ++i) {
         const auto& frame = frames[i];
 
-        if (sizeof(tx_buffer_) - tx_buffer_pos_ < 200) { 
+        if (sizeof(tx_buffer_) - tx_buffer_pos_ < 200) {
             RCLCPP_ERROR(logger_, "Transport: Tx buffer overflow prevention triggered!");
             return false;
         }
 
-        tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, 
-                                "can send %04x ", frame.arbitration_id);
+        append_str(tx_buffer_, tx_buffer_pos_, "can send ", 9);
 
+        const uint16_t id = static_cast<uint16_t>(frame.arbitration_id);
+        append_hex_byte(tx_buffer_, tx_buffer_pos_, static_cast<uint8_t>(id >> 8));
+        append_hex_byte(tx_buffer_, tx_buffer_pos_, static_cast<uint8_t>(id & 0xff));
+
+        tx_buffer_[tx_buffer_pos_++] = ' ';
+
+        // Payload bytes.
         const size_t dlc = round_up_dlc(frame.size);
         for (size_t j = 0; j < frame.size; ++j) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "%02x", frame.data[j]);
+            append_hex_byte(tx_buffer_, tx_buffer_pos_, static_cast<uint8_t>(frame.data[j]));
         }
+        // Padding bytes (0x50)
         for (size_t j = frame.size; j < dlc; ++j) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "50");
+            append_hex_byte(tx_buffer_, tx_buffer_pos_, 0x50);
         }
 
         if (frame.brs == mjbots::moteus::CanFdFrame::kForceOn) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " B");
+            append_str(tx_buffer_, tx_buffer_pos_, " B", 2);
         } else if (frame.brs == mjbots::moteus::CanFdFrame::kForceOff) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " b");
+            append_str(tx_buffer_, tx_buffer_pos_, " b", 2);
         }
 
         if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOn) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " F");
+            append_str(tx_buffer_, tx_buffer_pos_, " F", 2);
         } else if (frame.fdcan_frame == mjbots::moteus::CanFdFrame::kForceOff) {
-            tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, " f");
+            append_str(tx_buffer_, tx_buffer_pos_, " f", 2);
         }
 
-        tx_buffer_pos_ += std::snprintf(tx_buffer_ + tx_buffer_pos_, sizeof(tx_buffer_) - tx_buffer_pos_, "\n");
+        tx_buffer_[tx_buffer_pos_++] = '\n';
     }
 
     timing_.mark_encode_done();
 
+    struct timespec start_time;
+    ::clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
+
+    struct pollfd pfd = {};
+    pfd.fd = fd_;
+    pfd.events = POLLOUT;
+
     size_t written = 0;
-    while (written < static_cast<size_t>(tx_buffer_pos_)) {
+    while (written < tx_buffer_pos_) {
         int ret = ::write(fd_, tx_buffer_ + written, tx_buffer_pos_ - written);
-        if (ret < 0) {
-            if (errno == EINTR || errno == EAGAIN) { continue; }
-            RCLCPP_ERROR(logger_, "Transport: Fatal error writing all frames to serial port: %s", std::strerror(errno));
-            return false;
+        if (ret > 0) {
+            written += ret;
+            continue;
         }
-        written += ret;
+        if (ret < 0 && errno == EINTR) { continue; }
+        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (bus_timeout_us == 0) {
+                RCLCPP_WARN(logger_, "Transport: write stalled, tty buffer full.");
+                return true;
+            }
+            struct timespec now;
+            ::clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+            uint32_t elapsed = static_cast<uint32_t>(dt_us(start_time, now));
+            if (bus_timeout_us != 0 && elapsed >= bus_timeout_us) {
+                RCLCPP_WARN(logger_, "Transport: write timeout after %u us, %zu/%zu bytes.",
+                            elapsed, written, tx_buffer_pos_);
+                return false;
+            }
+            uint32_t remaining = (bus_timeout_us == 0) ? 1000 : (bus_timeout_us - elapsed);
+            struct timespec ts = {};
+            ts.tv_sec  = remaining / 1000000;
+            ts.tv_nsec = (remaining % 1000000) * 1000;
+            int pr = ::ppoll(&pfd, 1, &ts, nullptr);
+            if (pr < 0 && errno == EINTR) { continue; }
+            if (pr <= 0) {
+                RCLCPP_WARN(logger_, "Transport: write stalled, tty buffer full.");
+                return true;
+            }
+            continue;
+        }
+        RCLCPP_ERROR(logger_, "Transport: fatal write error: %s", std::strerror(errno));
+        return false;
     }
 
     timing_.mark_write_done();
@@ -230,9 +296,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
                             if (parse_line(line, replies)) {
                                 receieved_replies++;
                             }
-                            //else {
-                            //    RCLCPP_WARN(logger_, "Transport: Corrupt line data discarted.");
-                            //}
                         }
                         std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
                         rx_buffer_pos_ -= (scan_pos + 1);
@@ -311,9 +374,20 @@ bool moteus_interface::transport::TransportUSB::cycle(
             uint32_t expected_replies,
             uint32_t timeout_us)
 {
-    if (!write(frames, size, 0)) return false;
+    struct timespec cycle_start;
+    ::clock_gettime(CLOCK_MONOTONIC_RAW, &cycle_start);
 
-    if (!read(replies, expected_replies, timeout_us)) return false;
+    if (!write(frames, size, timeout_us)) return false;
+
+    struct timespec after_write;
+    ::clock_gettime(CLOCK_MONOTONIC_RAW, &after_write);
+    uint32_t write_elapsed_us = static_cast<uint32_t>(dt_us(cycle_start, after_write));
+
+    uint32_t read_budget_us = (write_elapsed_us >= timeout_us)
+                                ? 0
+                                : (timeout_us - write_elapsed_us);
+
+    if (!read(replies, expected_replies, read_budget_us)) return false;
 
     return true;
 }
@@ -357,11 +431,6 @@ bool moteus_interface::transport::TransportUSB::parse_line(
         return false;
     }
 
-    // stoul uses string -> generally speaking not RT loop safe
-    // but string is very short -> sso (optimization to avoid heap for small strings)
-    //uint32_t arbitration_id = 0;
-    //arbitration_id = std::stoul(std::string(addr_str), nullptr, 16);
-    // TODO: validate
     uint32_t arbitration_id = 0;
     for (char c : addr_str) {
         int n = parse_hex_nybble(c);
