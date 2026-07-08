@@ -19,8 +19,13 @@ struct MoteusCanFrame {
 
 struct UdpRequestHeader {
     uint32_t timeoutUs;
+    uint32_t sequence_counter;
     uint32_t expectedReplies;
     uint32_t frameCount;
+};
+
+struct UdpReplyHeader {
+    uint32_t sequence_counter;
 };
 
 #pragma pack(pop)

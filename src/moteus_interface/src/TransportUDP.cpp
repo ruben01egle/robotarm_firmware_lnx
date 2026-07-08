@@ -130,9 +130,14 @@ bool moteus_interface::transport::TransportUDP::write(
     if (timeout_us <= network_timeout_us_) timeout_bus_us = 0;
     else timeout_bus_us = timeout_us - network_timeout_us_;
 
-    header->timeoutUs = static_cast<uint32_t>(timeout_bus_us);
+    static uint32_t sequence_counter = 0;
+
+    header->timeoutUs = timeout_bus_us;
+    header->sequence_counter = sequence_counter;
     header->expectedReplies = expected_replies;
     header->frameCount = static_cast<uint32_t>(size);
+    
+    sequence_counter++;
 
     auto* wire_frames = reinterpret_cast<MoteusCanFrame*>(tx_buf + sizeof(UdpRequestHeader));
     for (size_t i = 0; i < size; ++i) {
@@ -167,36 +172,27 @@ bool moteus_interface::transport::TransportUDP::read(
     uint32_t timeout_us)
 {
     bool have_first_byte = false;
-
     if (timeout_us > 0) {
         struct pollfd pfd = {};
         pfd.fd = socket_fd_;
         pfd.events = POLLIN;
-
         struct timespec timeout_ts = {};
         timeout_ts.tv_sec = timeout_us / 1000000;
         timeout_ts.tv_nsec = (timeout_us % 1000000) * 1000;
-
         int poll_result = ::ppoll(&pfd, 1, &timeout_ts, nullptr);
-
-        if (poll_result < 0)
-        {
-            RCLCPP_ERROR(logger_, "Read failed: System error during ppoll. Error: %s", ::strerror(errno));
-            return false;
-        }
-        else if (poll_result == 0)
-        {
-            RCLCPP_WARN(logger_, "Read timeout: Total budget of %d us expired.", timeout_us);
-            timing_.record_cycle_end(have_first_byte, expected_replies, 0, /*timed_out=*/true);
-            return true;
+        if (poll_result < 0) {
+        RCLCPP_ERROR(logger_, "Read failed: System error during ppoll. Error: %s", ::strerror(errno));
+        return false;
+        } else if (poll_result == 0) {
+        RCLCPP_WARN(logger_, "Read timeout: Total budget of %d us expired.", timeout_us);
+        timing_.record_cycle_end(have_first_byte, expected_replies, 0, /*timed_out=*/true);
+        return true;
         }
     }
-
     static constexpr size_t MAX_MSG = 5;
     struct iovec iov[MAX_MSG];
     struct mmsghdr msgs[MAX_MSG];
     uint8_t rx_bufs[MAX_MSG][kMaxRxPayload];
-
     std::memset(msgs, 0, sizeof(msgs));
     for (size_t i = 0; i < MAX_MSG; ++i) {
         iov[i].iov_base = rx_bufs[i];
@@ -204,46 +200,67 @@ bool moteus_interface::transport::TransportUDP::read(
         msgs[i].msg_hdr.msg_iov = &iov[i];
         msgs[i].msg_hdr.msg_iovlen = 1;
     }
-
     timing_.mark_first_byte_if_needed(have_first_byte);
-
     const ssize_t received = ::recvmmsg(
         socket_fd_, msgs, MAX_MSG, MSG_DONTWAIT, nullptr);
     if (received <= 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            timing_.record_cycle_end(false, expected_replies, 0, /*timed_out=*/false);
-            return true;
+        timing_.record_cycle_end(false, expected_replies, 0, /*timed_out=*/false);
+        return true;
         }
         RCLCPP_ERROR(logger_, "Transport: recvfrom failed: %s", std::strerror(errno));
         return false;
     }
-
-    const size_t msg_idx = received-1;
+    const size_t msg_idx = received - 1;
     ssize_t received_bytes = msgs[msg_idx].msg_len;
-
     if (received_bytes == 0) {
         timing_.record_cycle_end(have_first_byte, expected_replies, 0, /*timed_out=*/false);
-        return true; 
+        return true;
     }
 
-    if (static_cast<size_t>(received_bytes) % sizeof(MoteusCanFrame) != 0) {
+    // Datagram must contain at least the reply header.
+    if (static_cast<size_t>(received_bytes) < sizeof(UdpReplyHeader)) {
         RCLCPP_ERROR(logger_,
-                    "Transport: malformed response (%zd bytes, not a multiple "
-                    "of %zu)",
-                    received_bytes, sizeof(MoteusCanFrame));
+        "Transport: malformed response (%zd bytes, smaller than reply header %zu)",
+        received_bytes, sizeof(UdpReplyHeader));
         return false;
     }
 
-    const size_t reply_count = static_cast<size_t>(received_bytes) / sizeof(MoteusCanFrame);
-    const auto* wire_replies = reinterpret_cast<const MoteusCanFrame*>(rx_bufs[msg_idx]);
+    const auto* reply_header =
+        reinterpret_cast<const UdpReplyHeader*>(rx_bufs[msg_idx]);
 
+    // Optional: validate the sequence counter against what we sent.
+    if (reply_header->sequence_counter == 0) {
+        last_sequence_recieved_ = 0;
+    }
+    else {
+        if (reply_header->sequence_counter - last_sequence_recieved_ != 1) {
+            RCLCPP_WARN(logger_,
+                "Transport: sequence mismatch (got %u, expected %u)",
+                reply_header->sequence_counter, last_sequence_recieved_ + 1);
+        }
+        last_sequence_recieved_ = reply_header->sequence_counter;
+    }
+
+    // Payload after the header must be a whole number of frames.
+    const size_t payload_bytes =
+        static_cast<size_t>(received_bytes) - sizeof(UdpReplyHeader);
+    if (payload_bytes % sizeof(MoteusCanFrame) != 0) {
+        RCLCPP_ERROR(logger_,
+        "Transport: malformed response (%zu payload bytes, not a multiple of %zu)",
+        payload_bytes, sizeof(MoteusCanFrame));
+        return false;
+    }
+
+    const size_t reply_count = payload_bytes / sizeof(MoteusCanFrame);
+    const auto* wire_replies = reinterpret_cast<const MoteusCanFrame*>(
+        rx_bufs[msg_idx] + sizeof(UdpReplyHeader));
     for (size_t i = 0; i < reply_count; ++i) {
         replies.push_back(decode_frame(wire_replies[i]));
     }
-
     timing_.record_cycle_end(have_first_byte, expected_replies,
-                              static_cast<uint32_t>(reply_count), /*timed_out=*/false);
-
+        static_cast<uint32_t>(reply_count), /*timed_out=*/false);
+        
     return true;
 }
 
@@ -258,11 +275,7 @@ bool moteus_interface::transport::TransportUDP::cycle(
         // clear stale messages
     }
 
-    uint32_t timeout_bus_us;
-    if (timeout_us <= network_timeout_us_) timeout_bus_us = 0;
-    else timeout_bus_us = timeout_us - network_timeout_us_;
-
-    if (!write(frames, size, timeout_bus_us)) return false;
+    if (!write(frames, size, timeout_us)) return false;
 
     if (!read(replies, expected_replies, timeout_us)) return false;
 

@@ -50,6 +50,8 @@ private:
     uint32_t gateway_addr_ = 0;
     uint16_t gateway_port_ = 0;
     bool initialized_ = false;
+
+    uint32_t last_sequence_recieved_ = 0;
 };
 
 }
