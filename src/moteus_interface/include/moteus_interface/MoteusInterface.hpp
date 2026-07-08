@@ -176,6 +176,8 @@ private:
     std::vector<mjbots::moteus::Query::Result> joint_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
+
+    std::vector<size_t> send_order_;
 };
 
 }

@@ -1,6 +1,7 @@
 #include "moteus_interface/MoteusInterface.hpp"
 
 #include <ctime>
+#include <numeric>
 
 PLUGINLIB_EXPORT_CLASS(
   moteus_interface::MoteusInterface, 
@@ -13,7 +14,7 @@ namespace moteus_interface
 // Not a real wait budget: in PIPELINED mode replies should already be
 // buffered by the time read() runs. This only absorbs scheduling jitter
 // between arrival and this call
-constexpr uint32_t pipelined_read_timeout_us = 100;
+constexpr uint32_t pipelined_read_timeout_us = 200;
 
 
 // Parse static parameters from the URDF here.
@@ -48,6 +49,8 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     joints_.resize(num_joints);
     joint_updated_.assign(num_joints, false);
     command_frames_.resize(num_joints);
+    send_order_.resize(num_joints);
+    std::iota(send_order_.begin(), send_order_.end(), 0);
     replies_frames_.reserve(num_joints*2);            // reserve instead of resize for clear/pushback in transport cycle, some headroom to avoid heap alloc
     joint_results_.resize(num_joints);
 
@@ -535,9 +538,12 @@ bool MoteusInterface::make_cyclic_commands()
     using namespace mjbots;
     const size_t num_joints = joints_.size();
 
+    std::rotate(send_order_.begin(), send_order_.begin() + 1, send_order_.end());
+
     for (size_t i = 0; i < num_joints; ++i)
     {
         auto& joint = joints_[i];
+        size_t send_idx = send_order_[i];
 
         ControlMode control_type = (joint.effort_active_ && !joint.pos_active_ && !joint.vel_active_)
                                     ? ControlMode::TORQUE_CONTROL
@@ -575,7 +581,7 @@ bool MoteusInterface::make_cyclic_commands()
                 cmd.feedforward_torque = 0;
             }
 
-            command_frames_[i] = joint.controller_->MakePosition(cmd);
+            command_frames_[send_idx] = joint.controller_->MakePosition(cmd);
         }
         else if (control_type == ControlMode::TORQUE_CONTROL) {
             moteus::PositionMode::Format write_format_override;
@@ -598,7 +604,7 @@ bool MoteusInterface::make_cyclic_commands()
             cmd.kd_scale = 0;
             cmd.ilimit_scale = 0;
 
-            command_frames_[i] = joint.controller_->MakePosition(cmd, &write_format_override);
+            command_frames_[send_idx] = joint.controller_->MakePosition(cmd, &write_format_override);
         }
         else {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Unknown control type");

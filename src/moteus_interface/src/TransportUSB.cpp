@@ -149,7 +149,7 @@ bool moteus_interface::transport::TransportUSB::initialize()
     return true;
 }
 
-bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us)
+bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t /*bus_timeout_us*/)
 {
     if (!initialized_ || fd_ < 0) {
         RCLCPP_ERROR(logger_, "Transport: write() called but device is not initialized!");
@@ -208,48 +208,15 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
 
     timing_.mark_encode_done();
 
-    struct timespec start_time;
-    ::clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
-
-    struct pollfd pfd = {};
-    pfd.fd = fd_;
-    pfd.events = POLLOUT;
-
     size_t written = 0;
-    while (written < tx_buffer_pos_) {
+    while (written < static_cast<size_t>(tx_buffer_pos_)) {
         int ret = ::write(fd_, tx_buffer_ + written, tx_buffer_pos_ - written);
-        if (ret > 0) {
-            written += ret;
-            continue;
+        if (ret < 0) {
+            if (errno == EINTR || errno == EAGAIN) { continue; }
+            RCLCPP_ERROR(logger_, "Transport: Fatal error writing all frames to serial port: %s", std::strerror(errno));
+            return false;
         }
-        if (ret < 0 && errno == EINTR) { continue; }
-        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            if (bus_timeout_us == 0) {
-                RCLCPP_WARN(logger_, "Transport: write stalled, tty buffer full.");
-                return true;
-            }
-            struct timespec now;
-            ::clock_gettime(CLOCK_MONOTONIC_RAW, &now);
-            uint32_t elapsed = static_cast<uint32_t>(dt_us(start_time, now));
-            if (bus_timeout_us != 0 && elapsed >= bus_timeout_us) {
-                RCLCPP_WARN(logger_, "Transport: write timeout after %u us, %zu/%zu bytes.",
-                            elapsed, written, tx_buffer_pos_);
-                return false;
-            }
-            uint32_t remaining = (bus_timeout_us == 0) ? 1000 : (bus_timeout_us - elapsed);
-            struct timespec ts = {};
-            ts.tv_sec  = remaining / 1000000;
-            ts.tv_nsec = (remaining % 1000000) * 1000;
-            int pr = ::ppoll(&pfd, 1, &ts, nullptr);
-            if (pr < 0 && errno == EINTR) { continue; }
-            if (pr <= 0) {
-                RCLCPP_WARN(logger_, "Transport: write stalled, tty buffer full.");
-                return true;
-            }
-            continue;
-        }
-        RCLCPP_ERROR(logger_, "Transport: fatal write error: %s", std::strerror(errno));
-        return false;
+        written += ret;
     }
 
     timing_.mark_write_done();

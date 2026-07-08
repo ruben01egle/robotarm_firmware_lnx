@@ -55,7 +55,7 @@ controller_manager:
       shutdown_on_initial_state_failure: false
     overruns:
       print_warnings: true
-    update_rate: 500
+    update_rate: 1000
 
     lock_memory: true
     thread_priority: 99
@@ -68,10 +68,10 @@ controller_manager:
 
 moteus_hardware_system:
   ros__parameters:
-    execution_mode: "strict_sequential"  # pipelined or strict_sequential
+    execution_mode: "pipelined"  # pipelined or strict_sequential
     transport_mode: "usb"        # "udp" or "usb"
-    timeout_transport_us: 1700
-    time_transport: true
+    timeout_transport_us: 1000
+    time_transport: false
     
     transport:
       udp_ip: "192.168.22.200"
