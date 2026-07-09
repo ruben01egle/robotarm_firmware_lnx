@@ -218,24 +218,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             joints_[i].name_.c_str(), joints_[i].can_id_, result.fault);
             return hardware_interface::return_type::ERROR;
         }
-        /*
-        auto output_position_raw = get_extra_register_value(result, moteus::Register::kEncoder1Position);
-        if (!output_position_raw.has_value()) 
-        {
-            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                        "Joint %s (CAN-ID: %d): Required register kEncoder1Position was not found in the extra array! "
-                        "Check your query configuration.", joints_[i].name_.c_str(), joints_[i].can_id_);
-            return hardware_interface::return_type::ERROR;
-        }
-
-        double output_pos = *output_position_raw * 2.0 * M_PI - joints_[i].encoder_offset;
-        RCLCPP_INFO(
-            rclcpp::get_logger("MoteusInterface"),
-            "Gelenk %zu - Berechnete Output-Position: %.4f", 
-            i+1, 
-            output_pos
-        );
-        */
+        
         hw_states_position_[i] = result.position * 2.0 * M_PI;
         hw_states_velocity_[i] = result.velocity * 2.0 * M_PI;
         hw_states_effort_[i]   = result.torque;
@@ -417,8 +400,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             }
 
             moteus::OutputExact::Command cmd;
-            //cmd.position = *output_position_raw - joints_[i].encoder_offset/(2.0 * M_PI);
-            cmd.position = 0;
+            cmd.position = std::remainder(*output_position_raw - joints_[i].encoder_offset_/(2.0 * M_PI), 1.0);
             command_frames_[i] = joints_[i].controller_->MakeOutputExact(cmd);
         }
 
