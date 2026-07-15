@@ -70,7 +70,7 @@ moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
     transport_mode: "usb"        # "udp" or "usb"
-    timeout_transport_us: 4000
+    timeout_transport_us: 1000
     time_transport: false
     
     transport:
