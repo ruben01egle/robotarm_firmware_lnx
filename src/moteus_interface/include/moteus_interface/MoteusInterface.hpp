@@ -1,7 +1,6 @@
 #ifndef MOTEUSINTERFACE_HPP
 #define MOTEUSINTERFACE_HPP
 
-#include <functional>
 #include <string_view>
 
 #include "hardware_interface/system_interface.hpp"
@@ -16,11 +15,8 @@
 namespace moteus_interface
 {
 
-class MoteusInterface : public hardware_interface::SystemInterface 
+class MoteusInterface : public hardware_interface::SystemInterface
 {
-private:
-    using TransportFactory = std::function<std::shared_ptr<moteus_interface::transport::Transport>()>;
-    
 private:
     class Joint 
     {
@@ -145,10 +141,6 @@ private:
         STANDARD = 1,
         TORQUE_CONTROL = 2
     };
-    enum class TransportMode : uint8_t
-    {
-        USB = 1
-    };
 
 private:
     bool is_active_;
@@ -166,8 +158,6 @@ private:
     std::vector<bool> joint_updated_;
 
     std::shared_ptr<transport::Transport> transport_;
-    TransportFactory transport_factory_;
-    TransportMode transport_mode_;
     uint32_t timeout_us_;
     bool transport_timing_;
     

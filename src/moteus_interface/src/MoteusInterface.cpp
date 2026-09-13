@@ -291,22 +291,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
     if (!read_ros_parameters()) { return hardware_interface::CallbackReturn::ERROR; }
 
-    if (transport_mode_ == TransportMode::USB)
-    {
-        transport_factory_ = []() {
-            return std::make_shared<moteus_interface::transport::TransportUSB>();
-        };
-    }
-
     try {
         using namespace mjbots;
-        transport_ = transport_factory_();
-        if (!transport_)
-        {
-            RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                         "Moteus-Transport not created!");
-            return hardware_interface::CallbackReturn::ERROR;
-        }
+        transport_ = std::make_shared<moteus_interface::transport::TransportUSB>();
         if (!transport_->declare_and_read_parameters(get_node()->get_node_parameters_interface()))
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport parameter setup failed");
@@ -369,6 +356,10 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             options.id = joints_[i].can_id_;
             options.query_format = read_format;
             options.position_format = write_format;
+            // options.transport left unset: controller_ is only used to build/parse frames (Make*),
+            // never to send them, so Controller::transport() is never invoked. Do not call
+            // Set*/Async*/Execute* on controller_ -- that would lazily spin up moteus's own
+            // auto-detected transport alongside our custom transport_.
             joints_[i].controller_ = std::make_shared<moteus::Controller>(options);
             command_frames_[i] = joints_[i].controller_->MakeStop(&read_override);
         }
@@ -699,13 +690,11 @@ bool MoteusInterface::read_ros_parameters()
         return node->get_parameter(name).get_value<decltype(default_value)>();
     };
 
-    std::string transport_mode_str;
     std::string execution_mode_str;
 
     try
     {
         execution_mode_str = declare_or_get("execution_mode", std::string("auto"));
-        transport_mode_str = declare_or_get("transport_mode", std::string("auto"));
         transport_timing_ = declare_or_get("time_transport", false);
         timeout_us_ = static_cast<uint32_t>(
             declare_or_get("timeout_transport_us", 0));
@@ -731,19 +720,6 @@ bool MoteusInterface::read_ros_parameters()
     else {
         RCLCPP_ERROR(get_logger(),
             "execution_mode must be 'pipelined' or 'strict_sequential', got '%s'", execution_mode_str.c_str());
-        return false;
-    }
-
-    if (transport_mode_str == "auto") {
-        transport_mode_ = TransportMode::USB;
-        RCLCPP_INFO(get_logger(), "Default Transport Mode USB");
-    }
-    else if (transport_mode_str == "usb") {
-        transport_mode_ = TransportMode::USB;
-        RCLCPP_INFO(get_logger(), "Transport Mode set to USB");
-    }
-    else {
-        RCLCPP_ERROR(get_logger(), "transport_mode must be 'auto' or 'usb', got '%s'", transport_mode_str.c_str());
         return false;
     }
 

@@ -69,7 +69,6 @@ controller_manager:
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
-    transport_mode: "usb"        # "usb"
     timeout_transport_us: 1000
     time_transport: false
     
