@@ -215,7 +215,9 @@ Each joint tracks which of its three command interfaces (`position`, `velocity`,
 
 **strict_sequential**: `write()` builds commands and performs a single blocking `transport_->cycle()` (write, then block for replies up to `timeout_transport_us`); `read()` then just parses whatever `cycle()` already collected.
 
-**pipelined**: command building and the transport write happen inside `read()` (fire-and-forget `transport_->write()`, immediately followed on the *next* `read()` call by `transport_->read()` collecting the replies from the previous cycle's write, bounded by a fixed 200 µs internal timeout meant only to absorb scheduling jitter, not as a real wait budget). `write()` in this mode is a no-op.
+**pipelined**: command building and the transport write happen inside `read()` (fire-and-forget `transport_->write()`, immediately followed on the *next* `read()` call by `transport_->read()` collecting the replies from the previous cycle's write, bounded by a fixed 200 µs internal timeout, `pipelined_read_timeout_us`). `write()` in this mode is a no-op.
+
+That 200 µs figure isn't a real wait budget in the sense of "how long a reply is allowed to take" — replies should already be sitting in the OS's read buffer by the time this `read()` runs, since they were sent in response to the *previous* cycle's write. It exists to let the cycle slightly overshoot: at typical update rates there's usually some slack left in a cycle's period, and that slack can absorb an occasionally-late reply (see [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling)) and let the loop catch back up on the next iteration, rather than dropping the reply outright the instant the nominal period elapses. It's an empirically chosen constant based on commonly observed cycle timings, not a value derived from any particular update rate or hardware configuration — it may need tuning for setups with different timing characteristics.
 
 While the hardware component is loaded but not yet **active**, `read()` still runs every cycle and repeatedly sends `MakeStop()` to every joint (instead of live commands), so an inactive-but-configured interface keeps the hardware safely stopped.
 
@@ -224,7 +226,7 @@ While the hardware component is loaded but not yet **active**, `read()` still ru
 | Mode | Write | Read | Timeout behavior |
 |---|---|---|---|
 | `strict_sequential` (default / `"auto"`) | Blocking write, waits for all replies before returning | Reads whatever the preceding blocking cycle already collected | `timeout_transport_us` **must** be set explicitly (>0); the full write+read cycle is bounded by it |
-| `pipelined` | Fire-and-forget; does not wait for replies | Reads back the previous cycle's replies, bounded by a fixed ~200 µs jitter-absorption timeout | `timeout_transport_us` may be `0`, with a logged warning that this can be problematic depending on the transport |
+| `pipelined` | Fire-and-forget; does not wait for replies | Reads back the previous cycle's replies, bounded by a fixed ~200 µs overshoot allowance | `timeout_transport_us` may be `0`, with a logged warning that this can be problematic depending on the transport |
 
 `strict_sequential` is simpler and deterministic per-cycle but pays the full round-trip latency inline every cycle. `pipelined` overlaps the round-trip with other work at the cost of state (commands and telemetry are always one cycle removed from each other) and requires care around startup ordering (hence the extra flush/sleep at the end of `on_configure()`).
 
