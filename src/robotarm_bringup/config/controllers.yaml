@@ -69,14 +69,11 @@ controller_manager:
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
-    transport_mode: "usb"        # "udp" or "usb"
+    transport_mode: "usb"        # "usb"
     timeout_transport_us: 1000
     time_transport: false
     
     transport:
-      udp_ip: "192.168.22.200"
-      udp_port: 6666
-      udp_bus_timeout_us: 2000
       usb_device: "/dev/fdcanusb"
 
 joint_state_broadcaster:

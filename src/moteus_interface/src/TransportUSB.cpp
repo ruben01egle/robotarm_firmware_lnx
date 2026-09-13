@@ -149,7 +149,7 @@ bool moteus_interface::transport::TransportUSB::initialize()
     return true;
 }
 
-bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t /*bus_timeout_us*/)
+bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanFdFrame *frames, size_t size)
 {
     if (!initialized_ || fd_ < 0) {
         RCLCPP_ERROR(logger_, "Transport: write() called but device is not initialized!");
@@ -344,7 +344,7 @@ bool moteus_interface::transport::TransportUSB::cycle(
     struct timespec cycle_start;
     ::clock_gettime(CLOCK_MONOTONIC_RAW, &cycle_start);
 
-    if (!write(frames, size, timeout_us)) return false;
+    if (!write(frames, size)) return false;
 
     struct timespec after_write;
     ::clock_gettime(CLOCK_MONOTONIC_RAW, &after_write);

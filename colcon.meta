@@ -4,9 +4,7 @@
             "cmake-args": [
                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
             ]
-        }
-    },
-    "names": {
+        },
         "robotarm_controllers": {
             "cmake-args": [
                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"

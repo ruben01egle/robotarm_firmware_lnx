@@ -10,7 +10,6 @@
 #include "rclcpp/node_interfaces/node_parameters_interface.hpp"
 #include "rclcpp/logger.hpp"
 
-#include "CanProtocolTypes.hpp"
 #include "moteus_interface/TransportTiming.hpp"
 
 namespace moteus_interface::transport
@@ -26,7 +25,7 @@ public:
         const std::shared_ptr<rclcpp::node_interfaces::NodeParametersInterface>& params) = 0;
     virtual bool initialize() = 0;
 
-    virtual bool write(const mjbots::moteus::CanFdFrame *frames, size_t size, uint32_t bus_timeout_us) = 0;
+    virtual bool write(const mjbots::moteus::CanFdFrame *frames, size_t size) = 0;
     virtual bool read(std::vector<mjbots::moteus::CanFdFrame> & replies, uint32_t expected_replies, uint32_t timeout_us=0) = 0;
 
     virtual bool cycle(const mjbots::moteus::CanFdFrame *frames, size_t size,

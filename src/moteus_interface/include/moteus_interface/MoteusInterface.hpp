@@ -11,8 +11,7 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
-#include "moteus_interface/TransportUDP.hpp"
-#include "moteus_interface/TransportUSB.hpp"
+#include "moteus_interface/Transport.hpp"
 
 namespace moteus_interface
 {
@@ -148,8 +147,7 @@ private:
     };
     enum class TransportMode : uint8_t
     {
-        UDP = 1,
-        USB = 2
+        USB = 1
     };
 
 private:

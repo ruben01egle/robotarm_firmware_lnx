@@ -1,5 +1,7 @@
 #include "moteus_interface/MoteusInterface.hpp"
 
+#include "moteus_interface/TransportUSB.hpp"
+
 #include <ctime>
 #include <numeric>
 
@@ -234,7 +236,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         }
 
         if (execution_mode_ == ExecutionMode::PIPELINED) {
-            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us_)) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size())) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
                 return hardware_interface::return_type::ERROR;
             }
@@ -253,7 +255,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                 return hardware_interface::return_type::ERROR;
             }
             // PIPELINED: fire-and-forget
-            if (!transport_->write(&command_frames_[0], command_frames_.size(), timeout_us_)) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size())) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
                 return hardware_interface::return_type::ERROR;
             }
@@ -289,13 +291,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
     if (!read_ros_parameters()) { return hardware_interface::CallbackReturn::ERROR; }
 
-    if (transport_mode_ == TransportMode::UDP)
-    {
-        transport_factory_ = []() {
-            return std::make_shared<moteus_interface::transport::TransportUDP>();
-        };
-    }
-    else if (transport_mode_ == TransportMode::USB)
+    if (transport_mode_ == TransportMode::USB)
     {
         transport_factory_ = []() {
             return std::make_shared<moteus_interface::transport::TransportUSB>();
@@ -421,7 +417,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 
         // guarante that transport layer replies before first read() call
         if (execution_mode_ == ExecutionMode::PIPELINED) {
-            if (!transport_->write(&command_frames_[0], command_frames_.size(), 1000)) {
+            if (!transport_->write(&command_frames_[0], command_frames_.size())) {
                 RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
                 return hardware_interface::CallbackReturn::ERROR;
             }
@@ -478,7 +474,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
     {
         command_frames_[i] = joints_[i].controller_->MakeStop();
     }
-    if (!transport_->write(&command_frames_[0], command_frames_.size(), 1000)) {
+    if (!transport_->write(&command_frames_[0], command_frames_.size())) {
         RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed");
         return hardware_interface::CallbackReturn::ERROR;
     }
@@ -742,16 +738,12 @@ bool MoteusInterface::read_ros_parameters()
         transport_mode_ = TransportMode::USB;
         RCLCPP_INFO(get_logger(), "Default Transport Mode USB");
     }
-    else if (transport_mode_str == "udp") {
-        transport_mode_ = TransportMode::UDP;
-        RCLCPP_INFO(get_logger(), "Transport Mode set to UDP");
-    }
     else if (transport_mode_str == "usb") {
         transport_mode_ = TransportMode::USB;
         RCLCPP_INFO(get_logger(), "Transport Mode set to USB");
     }
     else {
-        RCLCPP_ERROR(get_logger(), "transport_mode must be 'udp' or 'usb', got '%s'", transport_mode_str.c_str());
+        RCLCPP_ERROR(get_logger(), "transport_mode must be 'auto' or 'usb', got '%s'", transport_mode_str.c_str());
         return false;
     }
 
