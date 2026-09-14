@@ -27,6 +27,8 @@ FetchContent_MakeAvailable(moteus)
 add_library(${PROJECT_NAME} SHARED
   src/MoteusInterface.cpp
   src/TransportUSB.cpp
+  src/IdentityTransmission.cpp
+  src/DifferentialTransmission.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

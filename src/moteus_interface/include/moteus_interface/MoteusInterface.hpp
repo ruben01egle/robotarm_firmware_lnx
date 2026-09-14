@@ -11,6 +11,7 @@
 #include "moteus.h"
 
 #include "moteus_interface/Transport.hpp"
+#include "moteus_interface/Transmission.hpp"
 
 namespace moteus_interface
 {
@@ -18,13 +19,26 @@ namespace moteus_interface
 class MoteusInterface : public hardware_interface::SystemInterface
 {
 private:
-    class Joint 
+    class Joint
+    {
+    public:
+        std::string name_;
+        double encoder_offset_;
+
+        bool pos_active_ = false;
+        bool vel_active_ = false;
+        bool effort_active_ = false;
+
+        transmission::Handle command_handle_;   // zeigt in hw_commands_*_[i]
+        transmission::Handle state_handle_;     // zeigt in hw_states_*_[i]
+        transmission::Transmission* transmission_;
+    };
+
+    class Actuator 
     {
     public:
         std::string name_;
         int can_id_;
-        double gear_ratio_;
-        double encoder_offset_;
 
         bool pos_active_ = false;
         bool vel_active_ = false;
@@ -38,6 +52,10 @@ private:
         static constexpr double FILTER_ALPHA = 0.01;
         
         std::shared_ptr<mjbots::moteus::Controller> controller_;
+        
+        transmission::Handle command_handle_;   // zeigt in actuator_commands_*_[i]
+        transmission::Handle state_handle_;     // zeigt in actuator_states_*_[i]
+        transmission::Transmission* transmission_;
 
     public:
         void update_status(bool updated) {
@@ -146,6 +164,7 @@ private:
     bool is_active_;
     ExecutionMode execution_mode_;
 
+    // joint space
     std::vector<double> hw_commands_position_;
     std::vector<double> hw_commands_velocity_;
     std::vector<double> hw_commands_effort_;
@@ -154,14 +173,25 @@ private:
     std::vector<double> hw_states_velocity_;
     std::vector<double> hw_states_effort_;
 
+    // actuator space
+    std::vector<double> actuator_commands_position_;
+    std::vector<double> actuator_commands_velocity_;
+    std::vector<double> actuator_commands_effort_;
+
+    std::vector<double> actuator_states_position_;
+    std::vector<double> actuator_states_velocity_;
+    std::vector<double> actuator_states_effort_;
+
     std::vector<Joint> joints_;
-    std::vector<bool> joint_updated_;
+    std::vector<std::unique_ptr<transmission::Transmission>> transmissions_;
+    std::vector<Actuator> actuators_;
+    std::vector<bool> actuators_updated_;
 
     std::shared_ptr<transport::Transport> transport_;
     uint32_t timeout_us_;
     bool transport_timing_;
     
-    std::vector<mjbots::moteus::Query::Result> joint_results_;
+    std::vector<mjbots::moteus::Query::Result> actuator_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;
     std::vector<mjbots::moteus::CanFdFrame> replies_frames_;
 
