@@ -9,16 +9,18 @@ namespace moteus_interface::transmission
 class IdentityTransmission: public Transmission
 {
 public:
-    IdentityTransmission(Handle joint_cmd, Handle joint_state,
-                        Handle actuator_cmd, Handle actuator_state);
+    IdentityTransmission(JointPort joint, ActuatorPort actuator);
     virtual ~IdentityTransmission() = default;
 
     virtual void actuator_to_joint() override;
     virtual void joint_to_actuator() override;
 
+    virtual bool validate_mode_switch() const override;
+    virtual void perform_mode_switch() override;
+
 private:
-    Handle joint_cmd_, joint_state_;
-    Handle actuator_cmd_, actuator_state_;
+    JointPort joint_;
+    ActuatorPort actuator_;
 };
 
 }

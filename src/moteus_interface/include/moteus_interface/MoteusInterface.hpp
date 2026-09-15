@@ -10,6 +10,8 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "moteus.h"
 
+#include <unordered_map>
+
 #include "moteus_interface/Transport.hpp"
 #include "moteus_interface/Transmission.hpp"
 
@@ -186,6 +188,9 @@ private:
     std::vector<std::unique_ptr<transmission::Transmission>> transmissions_;
     std::vector<Actuator> actuators_;
     std::vector<bool> actuators_updated_;
+
+    std::unordered_map<std::string, size_t> joint_name_to_idx_;
+    std::unordered_map<std::string, size_t> actuator_name_to_idx_;
 
     std::shared_ptr<transport::Transport> transport_;
     uint32_t timeout_us_;

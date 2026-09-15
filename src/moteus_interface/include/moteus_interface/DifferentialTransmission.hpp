@@ -9,18 +9,19 @@ namespace moteus_interface::transmission
 class DifferentialTransmission: public Transmission
 {
 public:
-    DifferentialTransmission(Handle joint1_cmd, Handle joint1_state,
-                            Handle joint2_cmd, Handle joint2_state,
-                            Handle actuator_a_cmd, Handle actuator_a_state,
-                            Handle actuator_b_cmd, Handle actuator_b_state);
+    DifferentialTransmission(JointPort joint1, JointPort joint2,
+                            ActuatorPort actuator_a, ActuatorPort actuator_b);
     virtual ~DifferentialTransmission() = default;
 
     virtual void actuator_to_joint() override;
     virtual void joint_to_actuator() override;
 
+    virtual bool validate_mode_switch() const override;
+    virtual void perform_mode_switch() override;
+
 private:
-    Handle joint1_cmd_, joint1_state_, joint2_cmd_, joint2_state_;
-    Handle actuator_a_cmd_, actuator_a_state_, actuator_b_cmd_, actuator_b_state_;
+    JointPort joint1_, joint2_;
+    ActuatorPort actuator_a_, actuator_b_;
 };
 
 }

@@ -53,8 +53,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
 
     joints_.resize(num_joints);
 
-    std::unordered_map<std::string, size_t> joint_name_to_idx;
-
     for (size_t i = 0; i < num_joints; ++i)
     {
         if (!check_joint_interface(info_.joints[i])) return hardware_interface::CallbackReturn::ERROR;
@@ -63,7 +61,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
         joints_[i].command_handle_ = transmission::make_handle(hw_commands_position_, hw_commands_velocity_, hw_commands_effort_, i);
         joints_[i].state_handle_ = transmission::make_handle(hw_states_position_, hw_states_velocity_, hw_states_effort_, i);
 
-        joint_name_to_idx[joints_[i].name_] = i;
+        joint_name_to_idx_[joints_[i].name_] = i;
 
         auto param_it_enc = info_.joints[i].parameters.find("encoder_offset");
         if (param_it_enc != info_.joints[i].parameters.end())
@@ -106,7 +104,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     replies_frames_.reserve(num_actuators*2);            // reserve instead of resize for clear/pushback in transport cycle, some headroom to avoid heap alloc
     actuator_results_.resize(num_actuators);
 
-    std::unordered_map<std::string, size_t> actuator_name_to_idx;
     size_t next_actuator_idx = 0;
     for (const auto& t_info : info_.transmissions)
     {
@@ -127,7 +124,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
             actuators_[idx].command_handle_ = transmission::make_handle(actuator_commands_position_, actuator_commands_velocity_, actuator_commands_effort_, idx);
             actuators_[idx].state_handle_= transmission::make_handle(actuator_states_position_, actuator_states_velocity_, actuator_states_effort_, idx);
 
-            actuator_name_to_idx[act_info.name] = idx;
+            actuator_name_to_idx_[act_info.name] = idx;
 
             RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"),
                 "Actuator %s using CAN-ID: %d registered", act_info.name.c_str(), actuators_[idx].can_id_);
@@ -161,13 +158,14 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            size_t joint_idx = joint_name_to_idx[t_info.joints[0].name];
-            size_t actuator_idx = actuator_name_to_idx[t_info.actuators[0].name];
+            size_t joint_idx = joint_name_to_idx_.at(t_info.joints[0].name);
+            size_t actuator_idx = actuator_name_to_idx_.at(t_info.actuators[0].name);
             auto& joint = joints_[joint_idx];
             auto& actuator = actuators_[actuator_idx];
 
-            t = std::make_unique<transmission::IdentityTransmission>(joint.command_handle_, joint.state_handle_,
-                                                                    actuator.command_handle_, actuator.state_handle_);
+            t = std::make_unique<transmission::IdentityTransmission>(
+                transmission::JointPort{joint.command_handle_, joint.state_handle_, transmission::make_mode_flags(joint)},
+                transmission::ActuatorPort{actuator.command_handle_, actuator.state_handle_, transmission::make_mode_flags(actuator)});
 
             if (!claim_transmission(joint, "Joint", t.get())) return hardware_interface::CallbackReturn::ERROR;
             if (!claim_transmission(actuator, "Actuator", t.get())) return hardware_interface::CallbackReturn::ERROR;
@@ -181,19 +179,20 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            size_t joint_1_idx = joint_name_to_idx[t_info.joints[0].name];
-            size_t joint_2_idx = joint_name_to_idx[t_info.joints[1].name];
-            size_t actuator_a_idx = actuator_name_to_idx[t_info.actuators[0].name];
-            size_t actuator_b_idx = actuator_name_to_idx[t_info.actuators[1].name];
+            size_t joint_1_idx = joint_name_to_idx_.at(t_info.joints[0].name);
+            size_t joint_2_idx = joint_name_to_idx_.at(t_info.joints[1].name);
+            size_t actuator_a_idx = actuator_name_to_idx_.at(t_info.actuators[0].name);
+            size_t actuator_b_idx = actuator_name_to_idx_.at(t_info.actuators[1].name);
             auto& joint_1 = joints_[joint_1_idx];
             auto& joint_2 = joints_[joint_2_idx];
             auto& actuator_a = actuators_[actuator_a_idx];
             auto& actuator_b = actuators_[actuator_b_idx];
 
-            t = std::make_unique<transmission::DifferentialTransmission>(joint_1.command_handle_, joint_1.state_handle_,
-                                                                        joint_2.command_handle_, joint_2.state_handle_,
-                                                                        actuator_a.command_handle_, actuator_a.state_handle_,
-                                                                        actuator_b.command_handle_, actuator_b.state_handle_);
+            t = std::make_unique<transmission::DifferentialTransmission>(
+                transmission::JointPort{joint_1.command_handle_, joint_1.state_handle_, transmission::make_mode_flags(joint_1)},
+                transmission::JointPort{joint_2.command_handle_, joint_2.state_handle_, transmission::make_mode_flags(joint_2)},
+                transmission::ActuatorPort{actuator_a.command_handle_, actuator_a.state_handle_, transmission::make_mode_flags(actuator_a)},
+                transmission::ActuatorPort{actuator_b.command_handle_, actuator_b.state_handle_, transmission::make_mode_flags(actuator_b)});
 
             if (!claim_transmission(joint_1, "Joint", t.get())) return hardware_interface::CallbackReturn::ERROR;
             if (!claim_transmission(joint_2, "Joint", t.get())) return hardware_interface::CallbackReturn::ERROR;
@@ -284,32 +283,76 @@ std::vector<hardware_interface::CommandInterface> MoteusInterface::export_comman
     return command_interfaces;
 }
 
-hardware_interface::return_type MoteusInterface::prepare_command_mode_switch(const std::vector<std::string> &/*start_interfaces*/, const std::vector<std::string> &/*stop_interfaces*/)
+hardware_interface::return_type MoteusInterface::prepare_command_mode_switch(const std::vector<std::string> &start_interfaces, const std::vector<std::string> &stop_interfaces)
 {
-    return hardware_interface::return_type::OK;
-}
+    std::vector<bool> modifiedJoint(joints_.size(), false);
 
-hardware_interface::return_type MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &start_interfaces, const std::vector<std::string> &stop_interfaces)
-{
-    // TODO: after claiming of joints transmission needs to claim the actuators and validate behavior (e.g differential joints must be in same mode)
-    for (size_t i = 0; i < actuators_.size(); ++i) {
-        
-        for (const auto& interface : start_interfaces) {
-            if (interface == actuators_[i].name_ + "/position") actuators_[i].pos_active_ = true;
-            if (interface == actuators_[i].name_ + "/velocity") actuators_[i].vel_active_ = true;
-            if (interface == actuators_[i].name_ + "/effort")   actuators_[i].effort_active_ = true;
-        }
-
-        for (const auto& interface : stop_interfaces) {
-            if (interface == actuators_[i].name_ + "/position") actuators_[i].pos_active_ = false;
-            if (interface == actuators_[i].name_ + "/velocity") actuators_[i].vel_active_ = false;
-            if (interface == actuators_[i].name_ + "/effort")   actuators_[i].effort_active_ = false;
+    for (const auto* interfaces : {&start_interfaces, &stop_interfaces}) {
+        for (const auto& interface : *interfaces) {
+            std::string joint_name = interface.substr(0, interface.rfind('/'));
+            size_t joint_idx = joint_name_to_idx_.at(joint_name);
+            modifiedJoint[joint_idx] = true;
         }
     }
 
-    for (const auto& joint : actuators_) {
+    struct ModeSnapshot
+    {
+        Joint* joint = nullptr;
+        bool pos_active;
+        bool vel_active;
+        bool effort_active;
+    };
+    std::vector<ModeSnapshot> snapshots;
+
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        if (modifiedJoint.at(i)) {
+            ModeSnapshot snapshot;
+            snapshot.joint = &joints_[i];
+            snapshot.pos_active = joints_[i].pos_active_;
+            snapshot.vel_active = joints_[i].vel_active_;
+            snapshot.effort_active = joints_[i].effort_active_;
+            snapshots.push_back(snapshot);
+        }
+    }
+
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        
+        for (const auto& interface : start_interfaces) {
+            if (interface == joints_[i].name_ + "/position") joints_[i].pos_active_ = true;
+            if (interface == joints_[i].name_ + "/velocity") joints_[i].vel_active_ = true;
+            if (interface == joints_[i].name_ + "/effort")   joints_[i].effort_active_ = true;
+        }
+
+        for (const auto& interface : stop_interfaces) {
+            if (interface == joints_[i].name_ + "/position") joints_[i].pos_active_ = false;
+            if (interface == joints_[i].name_ + "/velocity") joints_[i].vel_active_ = false;
+            if (interface == joints_[i].name_ + "/effort")   joints_[i].effort_active_ = false;
+        }
+    }
+
+    for (auto& snapshot : snapshots) {
+        if (!snapshot.joint->transmission_->validate_mode_switch()) {
+            for (auto& recover : snapshots) {
+                recover.joint->pos_active_ = recover.pos_active;
+                recover.joint->vel_active_ = recover.vel_active;
+                recover.joint->effort_active_ = recover.effort_active;
+            }
+            return hardware_interface::return_type::ERROR;
+        }
+    }
+
+    return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type MoteusInterface::perform_command_mode_switch(const std::vector<std::string> &/*start_interfaces*/, const std::vector<std::string> &/*stop_interfaces*/)
+{
+    for (auto& t : transmissions_) {
+        t->perform_mode_switch();
+    }
+
+    for (const auto& joint : joints_) {
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"),
-            "Actuator [%s] active interfaces: Pos=%s, Vel=%s, Eff=%s",
+            "Joint [%s] active interfaces: Pos=%s, Vel=%s, Eff=%s",
             joint.name_.c_str(),
             joint.pos_active_ ? "ON" : "OFF",
             joint.vel_active_ ? "ON" : "OFF",
@@ -340,7 +383,6 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     parse_result_frames();
     if (!watchdog()) return hardware_interface::return_type::ERROR;
 
-    // TODO: read actuator values and use transmission to convert to joint space
     for (size_t i = 0; i < actuator_results_.size(); ++i) 
     {
         const auto& result = actuator_results_[i];
@@ -352,9 +394,13 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
             return hardware_interface::return_type::ERROR;
         }
         
-        hw_states_position_[i] = result.position * 2.0 * M_PI;
-        hw_states_velocity_[i] = result.velocity * 2.0 * M_PI;
-        hw_states_effort_[i]   = result.torque;
+        actuator_states_position_[i] = result.position * 2.0 * M_PI;
+        actuator_states_velocity_[i] = result.velocity * 2.0 * M_PI;
+        actuator_states_effort_[i]   = result.torque;
+    }
+
+    for (const auto& transmission : transmissions_) {
+        transmission->actuator_to_joint();
     }
 
     // In inactive only read is called -> read needs query new data
@@ -569,7 +615,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
 hardware_interface::CallbackReturn MoteusInterface::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "Activating Hardware...");
-    for (size_t i = 0; i < actuators_.size(); ++i)
+    for (size_t i = 0; i < joints_.size(); ++i)
         {
             hw_commands_position_[i] = std::numeric_limits<double>::quiet_NaN();
             hw_commands_velocity_[i] = 0;
@@ -636,13 +682,16 @@ hardware_interface::CallbackReturn MoteusInterface::on_error(const rclcpp_lifecy
 
 bool MoteusInterface::make_cyclic_commands()
 {
-    // TODO: transform joint space commands with transmission to actuator space before using them
     using namespace mjbots;
-    const size_t num_joints = actuators_.size();
+    const size_t num_actuators = actuators_.size();
 
     std::rotate(send_order_.begin(), send_order_.begin() + 1, send_order_.end());
 
-    for (size_t i = 0; i < num_joints; ++i)
+    for (const auto& transmission : transmissions_) {
+        transmission->joint_to_actuator();
+    }
+
+    for (size_t i = 0; i < num_actuators; ++i)
     {
         auto& joint = actuators_[i];
         size_t send_idx = send_order_[i];
@@ -654,20 +703,20 @@ bool MoteusInterface::make_cyclic_commands()
         if (control_type == ControlMode::STANDARD) {
             // standard mode: pos + vel + torque
             moteus::PositionMode::Command cmd;
-            if (std::isnan(hw_commands_position_[i])) {
+            if (std::isnan(actuator_commands_position_[i])) {
                 cmd.position = std::numeric_limits<double>::quiet_NaN();
             } else {
-                cmd.position = hw_commands_position_[i] / (2.0 * M_PI);
+                cmd.position = actuator_commands_position_[i] / (2.0 * M_PI);
             }
-            if (std::isnan(hw_commands_velocity_[i])) {
+            if (std::isnan(actuator_commands_velocity_[i])) {
                 cmd.velocity = 0;
             } else {
-                cmd.velocity = hw_commands_velocity_[i] / (2.0 * M_PI);
+                cmd.velocity = actuator_commands_velocity_[i] / (2.0 * M_PI);
             }
-            if (std::isnan(hw_commands_effort_[i])) {
+            if (std::isnan(actuator_commands_effort_[i])) {
                 cmd.feedforward_torque = 0;
             } else {
-                cmd.feedforward_torque = hw_commands_effort_[i];
+                cmd.feedforward_torque = actuator_commands_effort_[i];
             }
 
             // pos inactive
@@ -697,10 +746,10 @@ bool MoteusInterface::make_cyclic_commands()
             moteus::PositionMode::Command cmd;
             cmd.position = std::numeric_limits<double>::quiet_NaN();
             cmd.velocity = 0;
-            if (std::isnan(hw_commands_effort_[i])) {
+            if (std::isnan(actuator_commands_effort_[i])) {
                 cmd.feedforward_torque = 0;
             } else {
-                cmd.feedforward_torque = hw_commands_effort_[i];
+                cmd.feedforward_torque = actuator_commands_effort_[i];
             }
             cmd.kp_scale = 0;
             cmd.kd_scale = 0;
