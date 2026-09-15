@@ -33,19 +33,24 @@ inline ModeFlags make_mode_flags(T& owner)
     return ModeFlags{&owner.pos_active_, &owner.vel_active_, &owner.effort_active_};
 }
 
-template <typename Tag>
-struct Port
+struct JointPort
 {
     Handle command;
     Handle state;
     ModeFlags mode;
 };
 
-struct JointTag {};
-struct ActuatorTag {};
-
-using JointPort = Port<JointTag>;
-using ActuatorPort = Port<ActuatorTag>;
+struct ActuatorPort
+{
+    Handle command;
+    Handle state;
+    ModeFlags mode;
+    // Homing-only scratch: raw kEncoder1Position reading in, corrected/combined actuator-space
+    // home command out (see Actuator::home_position_ for the dual-use explanation). Joint-space
+    // calibration data doesn't need an equivalent -- it's passed into the Transmission
+    // constructor by value instead.
+    double* home = nullptr;
+};
 
 class Transmission
 {
@@ -63,6 +68,13 @@ public:
     // Commit: propagate the (already-validated) joint-space mode onto the
     // actuator-space ModeFlags this transmission owns.
     virtual void perform_mode_switch() = 0;
+
+    // One-shot startup calculation: reads the raw, uncorrected absolute encoder reading(s)
+    // staged in ActuatorPort::home, offset-corrects them using per-joint calibration data
+    // supplied at construction, and overwrites ActuatorPort::home in place with the
+    // resulting absolute actuator-space command(s). Position-only, no velocity/effort/mode
+    // involvement, entirely separate from command/state.
+    virtual void home() = 0;
 };
 
 }

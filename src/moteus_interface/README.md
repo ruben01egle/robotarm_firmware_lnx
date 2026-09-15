@@ -79,7 +79,7 @@ Building `moteus_interface` alone will transitively fetch and build the vendored
 
 ## Usage
 
-Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Each joint needs exactly three command interfaces (`position`, `velocity`, `effort`) and three state interfaces (`position`, `velocity`, `effort`), plus the `can_id` and `encoder_offset` parameters:
+Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Each joint needs exactly three command interfaces (`position`, `velocity`, `effort`) and three state interfaces (`position`, `velocity`, `effort`), plus the `encoder_offset` parameter; each joint is paired with one (or, for a differential joint pair, two) actuator(s) via a `<transmission>`, which is where `can_id` is declared per actuator (and, for a `differential` transmission, `joint1_encoder_actuator`/`joint2_encoder_actuator` — see [Configuration Reference](#configuration-reference)):
 
 ```xml
 <?xml version="1.0"?>
@@ -104,9 +104,15 @@ Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Ea
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
-        <param name="can_id">1</param>
         <param name="encoder_offset">0.0</param>
       </joint>
+
+      <transmission name="axis1_transmission">
+        <plugin>identity</plugin>
+        <joint name="axis1"/>
+        <actuator name="axis1_motor"/>
+        <param name="axis1_motor.can_id">1</param>
+      </transmission>
 
       <!-- additional joints follow the same pattern, one per moteus controller -->
     </ros2_control>
@@ -168,10 +174,26 @@ The hardware component name in your controller YAML (`moteus_hardware_system` ab
 
 | Name | Type | Default | Required | Meaning |
 |---|---|---|:---:|---|
-| `can_id` | int | — | **Yes** | The moteus controller's CAN arbitration ID for this joint. Used to route outgoing command frames and to match incoming reply frames back to the joint by their CAN source address. |
-| `encoder_offset` | double (radians) | — | **Yes** | Offset applied when re-zeroing the controller's internal absolute position from the secondary encoder register at `on_configure()`. See [Non-standard secondary-encoder homing](#non-standard-secondary-encoder-homing). |
+| `encoder_offset` | double (radians) | — | **Yes** | Field-calibration trim, in joint space: if the measured joint angle is off by some amount, enter the correction here rather than re-homing hardware directly. Applied when re-zeroing the controller(s)' internal absolute position from the secondary encoder register(s) at `on_configure()`. See [Non-standard secondary-encoder homing](#non-standard-secondary-encoder-homing). |
 
-Both parameters are read in `on_init()`; the hardware component fails to initialize (`CallbackReturn::ERROR`) if either is missing on any joint.
+Read in `on_init()`; the hardware component fails to initialize (`CallbackReturn::ERROR`) if this is missing on any joint.
+
+### Per-actuator URDF/xacro `<transmission>` `<param>`s
+
+| Name | Type | Default | Required | Meaning |
+|---|---|---|:---:|---|
+| `<actuator_name>.can_id` | int | — | **Yes** | The moteus controller's CAN arbitration ID for this actuator. Used to route outgoing command frames and to match incoming reply frames back to the actuator by their CAN source address. |
+
+Read in `on_init()` from each `<transmission>`'s parameters, one per `<actuator>` it declares; the hardware component fails to initialize if any actuator is missing its `can_id`.
+
+### Per-`differential`-transmission URDF/xacro `<param>`s
+
+| Name | Type | Default | Required | Meaning |
+|---|---|---|:---:|---|
+| `joint1_encoder_actuator` | string | — | **Yes** (differential only) | Names which of this transmission's two `<actuator>`s the first joint's dedicated absolute secondary encoder is physically wired through. |
+| `joint2_encoder_actuator` | string | — | **Yes** (differential only) | Names which of this transmission's two `<actuator>`s the second joint's dedicated absolute secondary encoder is physically wired through. Must name the transmission's *other* actuator from `joint1_encoder_actuator`. |
+
+Only relevant for a `differential` transmission, where either joint's dedicated encoder could physically be wired to either actuator's board and the mapping can't be derived structurally. An `identity` transmission has exactly one joint and one actuator, so there's nothing to disambiguate and no param is needed. Read in `on_init()` from the `<transmission>`'s own parameters (not from either `<joint>`); the hardware component fails to initialize if either is missing on a `differential` transmission, or if together they don't name that transmission's two actuators one each.
 
 ### Node ROS parameters (declared in `on_configure()`)
 
@@ -187,7 +209,7 @@ Both parameters are read in `on_init()`; the hardware component fails to initial
 |---|---|---|:---:|---|
 | `transport.usb_device` | string | `"/dev/fdcanusb"` | No | Path to the serial device backing the fdcanusb-protocol USB-CAN adapter. |
 
-> Only `can_id` and `encoder_offset` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
+> Only `can_id`, `encoder_offset`, and (for `differential` transmissions) `joint1_encoder_actuator`/`joint2_encoder_actuator` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
 
 ## Behavior / How It Works
 
@@ -198,7 +220,7 @@ On `on_configure()`, the interface:
 1. Reads the ROS parameters above and instantiates `TransportUSB`, then calls its `declare_and_read_parameters()` and `initialize()` (which opens and configures the serial device: raw/non-canonical mode, low-latency ASYNC flag, no flow control).
 2. Builds fixed wire formats: commands are sent as `position`/`velocity`/`feedforward_torque` floats (everything else on the command side — kp/kd scale, torque/velocity/accel limits, voltage/current overrides, position bounds — is left at the controller's own defaults and not overridden per cycle). Query replies are read back as `int16` position/velocity/torque plus an `int8` fault code; everything else is ignored, except one extra register added specifically for the startup homing step: `kEncoder1Position` (secondary/output encoder), read as a float.
 3. Sends an initial `MakeStop()` to every joint (with the extra encoder register attached) via a blocking `cycle()` (10 ms timeout) to get a first telemetry snapshot, then runs the watchdog in **strict** mode — any joint that doesn't answer or that reports a fault aborts configuration.
-4. For each joint, reads back the `kEncoder1Position` extra register from that snapshot, computes a wrapped position (`remainder(encoder_value - encoder_offset/2π, 1.0)`), and issues `MakeOutputExact` to directly overwrite the moteus controller's internal absolute output position — this is the non-standard homing step described in detail below.
+4. For each actuator, reads back its raw `kEncoder1Position` extra register value and stages it; once every actuator has a value staged, each transmission's `home()` picks out the raw reading(s) belonging to its own joint(s), offset-corrects them (`remainder(encoder_value - encoder_offset/2π, 1.0)`) and combines them into actuator-space command(s), and `MakeOutputExact` is issued per actuator to directly overwrite that moteus controller's internal absolute output position — this is the non-standard homing step described in detail below.
 5. Cycles those `OutputExact` commands (10 ms timeout), re-checks the watchdog in strict mode.
 6. Sends a final `MakeStop()` to every joint before returning success, so the hardware is guaranteed to be in a safe, stopped state before the first `read()`/`write()` call from the controller manager. In `pipelined` mode this is a fire-and-forget write followed by a 5 ms sleep (to make sure a reply is buffered before the first `read()`); in `strict_sequential` mode it's a blocking 5 ms-timeout cycle.
 
@@ -257,14 +279,14 @@ On any `ERROR` return, or on `on_shutdown()`/`on_error()`, the interface calls i
 
 > **This is a project-specific workaround, not a general recommendation.** If your setup uses a standard moteus homing flow (index search, absolute encoder wired as the primary commutation encoder, `d rezero`, etc.), you can remove this step entirely and go straight from the initial `MakeStop()` telemetry cycle to normal operation.
 
-Because of restrictions in the author's hardware/mounting setup, this interface does not rely on the moteus controller's own built-in homing procedure. Instead, during every `on_configure()` call, it:
+Because of restrictions in the author's hardware/mounting setup, this interface does not rely on the moteus controller's own built-in homing procedure. Each joint has its own dedicated absolute secondary encoder, wired into one of its actuator's moteus boards — not into the motor's own commutation encoder — so correcting a joint's measured position is a matter of entering a plain joint-space trim (`encoder_offset`), not reasoning about individual motors. Which actuator's board a given joint's encoder is wired through only matters for a `differential` transmission (see `joint1_encoder_actuator`/`joint2_encoder_actuator` in [Configuration Reference](#configuration-reference)) — a 1:1 (`identity`) joint has only one actuator to begin with, so there's nothing to name. Instead, during every `on_configure()` call, it:
 
-1. Queries an **extra register**, `kEncoder1Position` — moteus's secondary/output encoder position — by adding it to the `Query::Format` as an extra float field on the initial `MakeStop()` telemetry request.
-2. Reads that raw value back out of the reply's `extra[]` array (failing configuration outright if the register isn't present in the reply, which would indicate a query-format mismatch).
-3. Computes `remainder(encoder1_value - encoder_offset / (2π), 1.0)` — i.e. the encoder reading corrected by the joint's configured `encoder_offset` and wrapped into a single revolution.
-4. Sends that value via `MakeOutputExact`, which tells the moteus controller to directly overwrite its internal absolute output position estimate with this value, rather than deriving it from an index search or the primary encoder's own calibrated absolute reading.
+1. Queries an **extra register**, `kEncoder1Position` — moteus's secondary/output encoder position — by adding it to the `Query::Format` as an extra float field on the initial `MakeStop()` telemetry request, for every actuator.
+2. For every actuator, reads the raw value back out of its own reply `extra[]` array (failing configuration outright if the register isn't present in the reply, which would indicate a query-format mismatch) and stages it. No offset correction or joint-space math happens yet — this step is purely per-actuator.
+3. Each transmission's `home()` then picks out, from the actuators it owns, whichever raw reading(s) belong to its own joint(s) — trivial for a 1:1 (`identity`) joint (its one actuator), or resolved via `joint1_encoder_actuator`/`joint2_encoder_actuator` for a differential pair — offset-corrects each with `remainder(encoder1_value - encoder_offset / (2π), 1.0)`, and combines them into the corresponding actuator-space value(s): a straight passthrough for `identity`, or the same sum/difference relationship `joint_to_actuator()` already uses for a differential pair.
+4. Sends each resulting actuator-space value via `MakeOutputExact`, which tells that moteus controller to directly overwrite its internal absolute output position estimate with this value, rather than deriving it from an index search or the primary encoder's own calibrated absolute reading.
 
-This happens on *every* `on_configure()` — not just once at first power-up — so the secondary encoder must be an absolute (not incremental) sensor for this to make sense: the interface re-derives absolute position from it every time the hardware component configures, rather than trusting the moteus controller to retain or recompute it independently.
+This happens on *every* `on_configure()` — not just once at first power-up — so every joint's secondary encoder must be an absolute (not incremental) sensor for this to make sense: the interface re-derives absolute position from it every time the hardware component configures, rather than trusting the moteus controller(s) to retain or recompute it independently.
 
 If you don't need this — e.g. you have a standard absolute commutation encoder setup that moteus can home on its own — this whole step (and the `kEncoder1Position` extra-register plumbing around it) can simply be deleted from `on_configure()`, leaving the ordinary post-`MakeStop()` configuration flow.
 

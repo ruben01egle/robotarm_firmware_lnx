@@ -33,7 +33,7 @@ private:
 
         transmission::Handle command_handle_;   // zeigt in hw_commands_*_[i]
         transmission::Handle state_handle_;     // zeigt in hw_states_*_[i]
-        transmission::Transmission* transmission_;
+        transmission::Transmission* transmission_ = nullptr;
     };
 
     class Actuator 
@@ -41,6 +41,12 @@ private:
     public:
         std::string name_;
         int can_id_;
+        // Dual-use homing scratch: on_configure() first writes the raw kEncoder1Position
+        // reading here for every actuator, then each transmission's home() reads it back
+        // (via ActuatorPort::home, which points at this field), offset-corrects/combines
+        // it in joint space, and overwrites this same field in place with the final
+        // actuator-space value that gets sent via MakeOutputExact. Never used outside homing.
+        double home_position_ = 0.0;
 
         bool pos_active_ = false;
         bool vel_active_ = false;
@@ -55,9 +61,9 @@ private:
         
         std::shared_ptr<mjbots::moteus::Controller> controller_;
         
-        transmission::Handle command_handle_;   // zeigt in actuator_commands_*_[i]
-        transmission::Handle state_handle_;     // zeigt in actuator_states_*_[i]
-        transmission::Transmission* transmission_;
+        transmission::Handle command_handle_;   // points to actuator_commands_*_[i]
+        transmission::Handle state_handle_;     // points to actuator_states_*_[i]
+        transmission::Transmission* transmission_ = nullptr;
 
     public:
         void update_status(bool updated) {
@@ -129,6 +135,10 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+    void apply_interfaces_to_joint_flags(
+        const std::vector<std::string> & start_interfaces,
+        const std::vector<std::string> & stop_interfaces);
+
     bool make_cyclic_commands();
     void parse_result_frames();
     bool watchdog(bool strict=false);
