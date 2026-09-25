@@ -28,14 +28,12 @@ void moteus_interface::transmission::IdentityTransmission::joint_to_actuator()
 
 bool moteus_interface::transmission::IdentityTransmission::validate_mode_switch() const
 {
-    return true;
+    return joint_.interfaces->valid();
 }
 
 void moteus_interface::transmission::IdentityTransmission::perform_mode_switch()
 {
-    *actuator_.mode.pos_active = *joint_.mode.pos_active;
-    *actuator_.mode.vel_active = *joint_.mode.vel_active;
-    *actuator_.mode.effort_active = *joint_.mode.effort_active;
+    *actuator_.mode = *joint_.mode;
 }
 
 void moteus_interface::transmission::IdentityTransmission::home()

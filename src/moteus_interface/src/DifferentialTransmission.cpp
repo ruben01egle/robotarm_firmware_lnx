@@ -48,20 +48,14 @@ void moteus_interface::transmission::DifferentialTransmission::joint_to_actuator
 
 bool moteus_interface::transmission::DifferentialTransmission::validate_mode_switch() const
 {
-    return *joint1_.mode.pos_active == *joint2_.mode.pos_active &&
-           *joint1_.mode.vel_active == *joint2_.mode.vel_active &&
-           *joint1_.mode.effort_active == *joint2_.mode.effort_active;
+    return joint1_.interfaces->valid() && joint2_.interfaces->valid() &&
+           *joint1_.interfaces == *joint2_.interfaces;
 }
 
 void moteus_interface::transmission::DifferentialTransmission::perform_mode_switch()
 {
-    *actuator_a_.mode.pos_active = *joint1_.mode.pos_active;
-    *actuator_a_.mode.vel_active = *joint1_.mode.vel_active;
-    *actuator_a_.mode.effort_active = *joint1_.mode.effort_active;
-
-    *actuator_b_.mode.pos_active = *actuator_a_.mode.pos_active;
-    *actuator_b_.mode.vel_active = *actuator_a_.mode.vel_active;
-    *actuator_b_.mode.effort_active = *actuator_a_.mode.effort_active;
+    *actuator_a_.mode = *joint1_.mode;
+    *actuator_b_.mode = *joint2_.mode;
 }
 
 void moteus_interface::transmission::DifferentialTransmission::home()

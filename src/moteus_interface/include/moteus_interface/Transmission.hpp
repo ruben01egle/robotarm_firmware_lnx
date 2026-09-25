@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstddef>
 
+#include "moteus_interface/CommandMode.hpp"
+
 namespace moteus_interface::transmission
 {
 
@@ -20,31 +22,19 @@ inline Handle make_handle(std::vector<double>& pos, std::vector<double>& vel,
     return Handle{&pos[idx], &vel[idx], &eff[idx]};
 }
 
-struct ModeFlags
-{
-    bool* pos_active = nullptr;
-    bool* vel_active = nullptr;
-    bool* effort_active = nullptr;
-};
-
-template <typename T>
-inline ModeFlags make_mode_flags(T& owner)
-{
-    return ModeFlags{&owner.pos_active_, &owner.vel_active_, &owner.effort_active_};
-}
-
 struct JointPort
 {
     Handle command;
     Handle state;
-    ModeFlags mode;
+    CommandMode* mode = nullptr;
+    ActiveInterfaces* interfaces = nullptr;
 };
 
 struct ActuatorPort
 {
     Handle command;
     Handle state;
-    ModeFlags mode;
+    CommandMode* mode = nullptr;
     // Homing-only scratch: raw kEncoder1Position reading in, corrected/combined actuator-space
     // home command out (see Actuator::home_position_ for the dual-use explanation). Joint-space
     // calibration data doesn't need an equivalent -- it's passed into the Transmission

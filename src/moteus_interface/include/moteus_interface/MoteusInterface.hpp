@@ -12,11 +12,15 @@
 
 #include <unordered_map>
 
+#include "moteus_interface/CommandMode.hpp"
 #include "moteus_interface/Transport.hpp"
 #include "moteus_interface/Transmission.hpp"
 
 namespace moteus_interface
 {
+
+constexpr char HW_IF_TORQUE_FF[] = "torque_ff";
+
 
 class MoteusInterface : public hardware_interface::SystemInterface
 {
@@ -26,13 +30,15 @@ private:
     public:
         std::string name_;
         double encoder_offset_;
+        // URDF limits, parsed by hardware_interface into info_.limits. max_effort is used to clamp
+        // torque_ff by hand, since the controller_manager's limiter does not know custom interfaces
+        joint_limits::JointLimits limits_;
 
-        bool pos_active_ = false;
-        bool vel_active_ = false;
-        bool effort_active_ = false;
+        CommandMode cmd_mode_ = CommandMode::IDLE;
+        ActiveInterfaces interfaces_;
 
-        transmission::Handle command_handle_;   // zeigt in hw_commands_*_[i]
-        transmission::Handle state_handle_;     // zeigt in hw_states_*_[i]
+        transmission::Handle command_handle_;   // points to joint_commands_*_[i]
+        transmission::Handle state_handle_;     // points to hw_states_*_[i]
         transmission::Transmission* transmission_ = nullptr;
     };
 
@@ -48,9 +54,7 @@ private:
         // actuator-space value that gets sent via MakeOutputExact. Never used outside homing.
         double home_position_ = 0.0;
 
-        bool pos_active_ = false;
-        bool vel_active_ = false;
-        bool effort_active_ = false;
+        CommandMode cmd_mode_ = CommandMode::IDLE;
 
         bool is_updated_ = false;
         size_t consecutive_failures_ = 0;
@@ -135,6 +139,7 @@ public:
         const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+    void joint_interface_to_joint_physical();
     void apply_interfaces_to_joint_flags(
         const std::vector<std::string> & start_interfaces,
         const std::vector<std::string> & stop_interfaces);
@@ -166,33 +171,39 @@ private:
         STRICT_SEQUENTIAL = 1,
         PIPELINED = 2
     };
-    enum class ControlMode : uint8_t 
-    {
-        STANDARD = 1,
-        TORQUE_CONTROL = 2
-    };
 
 private:
     bool is_active_;
     ExecutionMode execution_mode_;
 
-    // joint space
+    // joint space interfaces
+    // group position-velocity control
     std::vector<double> hw_commands_position_;
     std::vector<double> hw_commands_velocity_;
+    std::vector<double> hw_commands_torque_ff_;
+
+    // group torque control
     std::vector<double> hw_commands_effort_;
 
+    // joint state interfaces
     std::vector<double> hw_states_position_;
     std::vector<double> hw_states_velocity_;
     std::vector<double> hw_states_effort_;
 
-    // actuator space
+    // joint space physical
+    std::vector<double> joint_commands_position_;
+    std::vector<double> joint_commands_velocity_;
+    std::vector<double> joint_commands_torque_;
+
+    // actuator space physical
     std::vector<double> actuator_commands_position_;
     std::vector<double> actuator_commands_velocity_;
-    std::vector<double> actuator_commands_effort_;
+    std::vector<double> actuator_commands_torque_;
 
+    // actuator state physical
     std::vector<double> actuator_states_position_;
     std::vector<double> actuator_states_velocity_;
-    std::vector<double> actuator_states_effort_;
+    std::vector<double> actuator_states_torque_;
 
     std::vector<Joint> joints_;
     std::vector<std::unique_ptr<transmission::Transmission>> transmissions_;
