@@ -24,6 +24,9 @@ constexpr char HW_IF_TORQUE_FF[] = "torque_ff";
 
 class MoteusInterface : public hardware_interface::SystemInterface
 {
+    // test fixture in test/test_mode_switch.cpp, reads the internal mode state
+    friend class MoteusInterfaceTest;
+
 private:
     class Joint
     {

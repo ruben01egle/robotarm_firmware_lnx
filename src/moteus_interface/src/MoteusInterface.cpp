@@ -375,7 +375,22 @@ hardware_interface::return_type MoteusInterface::prepare_command_mode_switch(con
 
     auto ret = hardware_interface::return_type::OK;
     for (auto& snapshot : snapshots) {
-        if (!snapshot.joint->transmission_->validate_mode_switch()) {
+        const auto* transmission = snapshot.joint->transmission_;
+        if (!transmission->validate_mode_switch()) {
+            // the transmission only says no, so report every joint it owns with its requested set
+            for (const auto& joint : joints_) {
+                if (joint.transmission_ != transmission) continue;
+                RCLCPP_ERROR(rclcpp::get_logger("MoteusInterface"),
+                    "Rejecting mode switch on joint [%s]: target {%s%s%s%s } %s",
+                    joint.name_.c_str(),
+                    joint.interfaces_.position  ? " position"  : "",
+                    joint.interfaces_.velocity  ? " velocity"  : "",
+                    joint.interfaces_.torque_ff ? " torque_ff" : "",
+                    joint.interfaces_.effort    ? " effort"    : "",
+                    joint.interfaces_.valid()
+                        ? "differs from the other joint(s) of its transmission, which must claim identical interfaces"
+                        : "mixes interface groups");
+            }
             ret = hardware_interface::return_type::ERROR;
             break;
         }
@@ -991,7 +1006,7 @@ bool MoteusInterface::check_joint_interface(hardware_interface::ComponentInfo jo
         joint.command_interfaces[3].name != hardware_interface::HW_IF_EFFORT)
     {
         RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
-                    "Joint %s invalid command interface! Expected: position, velocity, effort.", joint.name.c_str());
+                    "Joint %s invalid command interface! Expected: position, velocity, torque_ff, effort.", joint.name.c_str());
         return false;
     }
 
