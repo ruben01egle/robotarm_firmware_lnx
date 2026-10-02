@@ -32,10 +32,15 @@ controller_interface::InterfaceConfiguration TeleopController::command_interface
 {
     controller_interface::InterfaceConfiguration command_interfaces_config;
     command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-    command_interfaces_config.names = command_interface_types_;
+    for (const auto & joint : joint_names_)
+    {
+        command_interfaces_config.names.push_back(joint + "/position");
+        command_interfaces_config.names.push_back(joint + "/velocity");
+    }
 
     return command_interfaces_config;
 }
+
 controller_interface::InterfaceConfiguration TeleopController::state_interface_configuration() const
 {
     controller_interface::InterfaceConfiguration state_interfaces_config;
@@ -76,10 +81,9 @@ controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp
         "~/commands", rclcpp::SystemDefaultsQoS(),
         [this](const CmdType::SharedPtr msg)
         {
-        const auto cmd = *msg;
 
         if (!std::all_of(
-                cmd.data.cbegin(), cmd.data.cend(),
+                msg->data.cbegin(), msg->data.cend(),
                 [](const auto & value) { return std::isfinite(value); }))
         {
             RCLCPP_WARN_THROTTLE(
@@ -87,7 +91,7 @@ controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp
             "Non-finite value received. Dropping message");
             return;
         }
-        rt_command_.set(cmd);
+        rt_command_.set(*msg);
         });
 
     scale_speed_service_ = get_node()->create_service<robotarm_interface::srv::SetFloat64>(
@@ -100,6 +104,22 @@ controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp
 
 controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
+    // make sure hw is in defined state when claiming interfaces
+    for (size_t i = 0; i < joint_names_.size(); ++i)
+    {
+        size_t pos_idx = i * num_states_per_joint_ + 0;
+        size_t vel_idx = i * num_states_per_joint_ + 1;
+
+        auto pos_opt = state_interfaces_[pos_idx].get_optional();
+        if (!pos_opt.has_value())
+        {
+            RCLCPP_ERROR(get_node()->get_logger(), "Could not read position of %s", joint_names_[i].c_str());
+            return controller_interface::CallbackReturn::ERROR;   // refuse to activate rather than command garbage
+        }
+        (void)command_interfaces_[pos_idx].set_value(pos_opt.value());
+        (void)command_interfaces_[vel_idx].set_value(0.0);
+    }
+
     reset_controller_reference_msg(joint_commands_);
     update_reference_ = true;
     rt_command_.try_set(joint_commands_);
@@ -110,19 +130,12 @@ controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_
 
 controller_interface::CallbackReturn TeleopController::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
-    reset_controller_reference_msg(joint_commands_);
-    rt_command_.try_set(joint_commands_);
-
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type TeleopController::update(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
 {
-    auto joint_commands_op = rt_command_.try_get();
-    if (joint_commands_op.has_value())
-    {
-        joint_commands_ = joint_commands_op.value();
-    }
+    rt_command_.try_get([this](const CmdType & msg){joint_commands_.data = msg.data;});
 
     // no command received yet
     if (
@@ -140,6 +153,11 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
         "command size (%zu) does not match number of joints (%zu)", joint_commands_.data.size(),
         joint_names_.size());
         return controller_interface::return_type::ERROR;
+    }
+
+    if (!update_reference_)
+    {
+        ruckig_output_->pass_to_input(*ruckig_input_);
     }
 
     for (size_t i = 0; i < joint_names_.size(); ++i) 
@@ -162,10 +180,6 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
             ruckig_input_->current_position[i] = pos_opt.value();
             ruckig_input_->current_velocity[i] = vel_opt.value();
             ruckig_input_->current_acceleration[i] = 0;
-        }
-        else 
-        {
-            ruckig_output_->pass_to_input(*ruckig_input_);
         }
 
         ruckig_input_->target_position[i] = joint_commands_.data[i];
@@ -205,7 +219,6 @@ void TeleopController::declare_parameters()
     auto node = get_node();
 
     node->declare_parameter<std::vector<std::string>>("joints", std::vector<std::string>());
-    node->declare_parameter<std::vector<std::string>>("command_interfaces", std::vector<std::string>());
 
     node->declare_parameter<double>("max_velocity", 1.5);       // in rad/s
     node->declare_parameter<double>("max_acceleration", 2.0);   // in rad/s²
@@ -220,37 +233,12 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
 
     // Read parameters from YAML
     joint_names_ = node->get_parameter("joints").as_string_array();
-    std::vector<std::string> command_interfaces = node->get_parameter("command_interfaces").as_string_array();
 
     // Validate that lists are not empty
     if (joint_names_.empty())
     {
         RCLCPP_ERROR(node->get_logger(), "The 'joints' parameter list cannot be empty!");
         return controller_interface::CallbackReturn::FAILURE;
-    }
-
-    if (command_interfaces.empty())
-    {
-        RCLCPP_ERROR(node->get_logger(), "The 'command_interfaces' parameter list cannot be empty!");
-        return controller_interface::CallbackReturn::FAILURE;
-    }
-
-    // Explicitly verify that both required interfaces are present
-    bool has_position = std::find(command_interfaces.begin(), command_interfaces.end(), "position") != command_interfaces.end();
-    bool has_velocity = std::find(command_interfaces.begin(), command_interfaces.end(), "velocity") != command_interfaces.end();
-
-    if (!has_position || !has_velocity)
-    {
-        RCLCPP_ERROR(node->get_logger(), 
-            "Missing required command interfaces! This controller strictly expects both 'position' and 'velocity'.");
-        return controller_interface::CallbackReturn::FAILURE;
-    }
-
-    command_interface_types_.clear();
-    for (const auto & joint : joint_names_)
-    {
-        command_interface_types_.push_back(joint + "/position");
-        command_interface_types_.push_back(joint + "/velocity");
     }
 
     size_t dofs = joint_names_.size();
@@ -266,6 +254,7 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
 
         for (size_t i = 0; i < dofs; ++i)
         {
+
             ruckig_input_->max_velocity[i] = max_velocity_;
             ruckig_input_->max_acceleration[i] = max_acceleration_;
             ruckig_input_->max_jerk[i] = max_jerk_;

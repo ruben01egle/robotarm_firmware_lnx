@@ -14,10 +14,14 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(ruckig REQUIRED)
+find_package(eigen3_cmake_module REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(robotarm_interface REQUIRED)
+find_package(robotarm_rbd REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/TeleopController.cpp
+  src/CartesianJogController.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -31,11 +35,14 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   realtime_tools
   rclcpp_lifecycle
+  Eigen3
   robotarm_interface
+  robotarm_rbd
 )
 
 target_link_libraries(${PROJECT_NAME}
   ruckig::ruckig
+  Eigen3::Eigen
 )
 
 pluginlib_export_plugin_description_file(controller_interface robotarm_controllers_plugins.xml)

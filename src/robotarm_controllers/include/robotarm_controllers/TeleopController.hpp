@@ -1,5 +1,5 @@
-#ifndef TELEOPCONTROLLER_HPP
-#define TELEOPCONTROLLER_HPP
+#ifndef ROBOTARM_CONTROLLERS_TELEOPCONTROLLER_HPP
+#define ROBOTARM_CONTROLLERS_TELEOPCONTROLLER_HPP
 
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
@@ -55,9 +55,6 @@ private:
 
 private:
     std::vector<std::string> joint_names_;
-    std::string interface_name_;
-
-    std::vector<std::string> command_interface_types_;
 
     std::unique_ptr<ruckig::Ruckig<ruckig::DynamicDOFs>> ruckig_;
     std::unique_ptr<ruckig::InputParameter<ruckig::DynamicDOFs>> ruckig_input_;

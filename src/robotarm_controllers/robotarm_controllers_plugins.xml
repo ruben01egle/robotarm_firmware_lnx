@@ -6,4 +6,12 @@
       Reactive controller for smooth teleop.
     </description>
   </class>
+
+  <class name="robotarm_controllers/CartesianJogController" 
+         type="cartesian_jog_controller::CartesianJogController" 
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Cartesian joint jogging and position increments.
+    </description>
+  </class>
 </library>
