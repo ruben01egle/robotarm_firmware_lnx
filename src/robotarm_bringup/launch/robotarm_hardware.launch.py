@@ -47,9 +47,18 @@ def generate_launch_description():
         output='screen'
     )
 
+    # MoveIt trajectory execution; inactive until control_center activates it for a mission
+    joint_trajectory_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['joint_trajectory_controller', '--inactive'],
+        output='screen'
+    )
+
     return LaunchDescription([
         control_node,
         robot_state_pub_node,
         joint_state_broadcaster_spawner,
-        teleop_controller_spawner
+        teleop_controller_spawner,
+        joint_trajectory_controller_spawner
     ])
