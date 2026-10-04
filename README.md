@@ -27,8 +27,7 @@ This repo is for anyone building or maintaining the actual hardware-interfacing
 firmware: the `ros2_control` hardware plugin, the motion controllers, and the
 launch/config that brings them up on the real-time PC.
 
-**Current state:** the arm currently has 3 configured joints (`axis1`/`axis2`/
-`axis3`), but nothing here is hardcoded to that number — `moteus_interface`,
+**Current state:** the arm has 6 configured joints (`axis1` … `axis6`), but nothing here is hardcoded to that number — `moteus_interface`,
 `robotarm_controllers`, and `robotarm_bringup` are all written generically
 against whatever joints are declared in the URDF and config. Adding an axis is
 meant to be a matter of adding a joint to `robotarm_description`'s URDF/Xacro and
@@ -43,7 +42,7 @@ More joints and more controller options are expected as the arm grows — see
 | [`moteus_interface`](src/moteus_interface) | Native | `ros2_control` `SystemInterface` hardware plugin that drives mjbots moteus brushless controllers over CAN-FD via the official fdcanusb USB adapter, using a from-scratch transport layer built for deterministic RT cycles. **[See its own README for the full deep dive](src/moteus_interface/README.md).** |
 | [`robotarm_controllers`](src/robotarm_controllers) | Native | Custom `ros2_control` controllers. Currently ships `TeleopController`: a reactive controller that runs incoming joint position targets through [Ruckig](https://ruckig.com/) for jerk-limited online trajectory smoothing, with a runtime speed-scale service. |
 | [`robotarm_bringup`](src/robotarm_bringup) | Native | ROS 2 launch files and `controller_manager` YAML configuration that bring the arm up, either against real hardware (`moteus_interface`) or a mocked system (`mock_components/GenericSystem`) for development without hardware attached. |
-| [`robotarm_description`](src/robotarm_description) | **Git submodule** | URDF/Xacro, the `<ros2_control>` tag definitions, and STL meshes describing the arm's kinematics and geometry — currently 3 joints (`axis1`/`axis2`/`axis3`), with more to be added here as the arm grows. The single source of truth for the robot's shape, shared with the high-level repo. |
+| [`robotarm_description`](src/robotarm_description) | **Git submodule** | URDF/Xacro, the `<ros2_control>` tag definitions, and STL meshes describing the arm's kinematics and geometry — 6 joints (`axis1` … `axis6`). The single source of truth for the robot's shape, shared with the high-level repo. |
 | [`robotarm_interface`](src/robotarm_interface) | **Git submodule** | Custom ROS 2 message/service/action definitions — interface contracts with no application logic of their own, shared between this repo and the high-level repo. Some (e.g. `SetFloat64`) are consumed here; others (`CANFDTunnel.srv`, `Mission`/`ConfigMotor`/`PlanCSV`/`PlanJointSpace`/`ReadMotorConfigs` actions) are consumed by the high-level repo rather than by anything in this one. |
 
 `robotarm_description` and `robotarm_interface` are the only two submodules; `moteus_interface`,
@@ -138,10 +137,15 @@ graph TD
 - `joint_state_broadcaster` (stock `ros2_controllers` package) — publishes
   `/joint_states` at a configurable rate.
 
-There is currently no trajectory-following controller (e.g. a standard
-`joint_trajectory_controller`) wired up in this repo — motion today is driven
-through the reactive `TeleopController` only. More controller options are
-expected as the project develops.
+- `joint_trajectory_controller` (stock `ros2_controllers` package) — executes
+  joint trajectories received on the `~/follow_joint_trajectory` action
+  (`control_msgs/action/FollowJointTrajectory`), e.g. planned by MoveIt on the
+  high-level PC. Claims `position`+`velocity` like `TeleopController`, so only
+  one of the two can be active. Aborts a goal if the tracking error exceeds the
+  `constraints` in `controllers.yaml`.
+
+`TeleopController` and `joint_trajectory_controller` are spawned inactive and are
+activated by the high-level PC (control_center) when a mission starts.
 
 ## Usage / Getting Started
 
@@ -193,8 +197,9 @@ ros2 launch robotarm_bringup robotarm_hardware.launch.py
 ```
 
 Both start `ros2_control_node`, `robot_state_publisher`, and spawn
-`joint_state_broadcaster` and `teleop_controller` (inactive by default — activate
-it explicitly once you're ready to send motion commands). VS Code users can also
+`joint_state_broadcaster`, plus `teleop_controller` and `joint_trajectory_controller`
+(both inactive by default — activate one of them explicitly once you're ready to
+send motion commands). VS Code users can also
 use the provided [tasks](.vscode/tasks.json): **Colcon build**, **Run Robot**,
 **Run Mock**.
 
@@ -232,10 +237,10 @@ carries several honest rough edges:
   (official mjbots fdcanusb only, no SocketCAN), no retry/checksum logic, and a
   project-specific secondary-encoder homing workaround. Details and caveats are
   in its own README.
-- **Only one controller exists today** (`TeleopController`); there's no
-  trajectory-following controller in this repo yet, and more controller options
-  are planned as the project develops.
-- **Joint count is a current-state fact, not a design limit.** The arm has 3
+- **Two motion controllers exist today**: `TeleopController` (reactive) and the
+  stock `joint_trajectory_controller` (MoveIt trajectories); more controller
+  options are planned as the project develops.
+- **Joint count is a current-state fact, not a design limit.** The arm has 6
   configured joints today; `moteus_interface`, `robotarm_controllers`, and
   `robotarm_bringup` are all written to be driven by whatever's declared in the
   URDF and `controllers.yaml`, and more joints are expected to be added as the
