@@ -118,5 +118,7 @@ cartesian_jog_controller:
 
     max_tracking_error: 0.1         # rad, |q_cmd - q_meas| per joint before stopping
 
+    joint_velocity_scale: 0.2       # fraction of the urdf joint velocity limits used while jogging
+
     joint_limit_zone: 0.2           # rad, slow down zone in front of a position limit
     joint_limit_margin: 0.02        # rad, stop this far before a position limit

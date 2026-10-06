@@ -108,7 +108,7 @@ private:
     // custom rigid body dynamics class
     robotarm_rbd::RobotarmRbd rbd_;
     robotarm_rbd::RobotarmRbd::Config rbd_cfg_;
-    std::vector<robotarm_rbd::RobotarmRbd::Limits> rbd_limits_;
+    std::vector<robotarm_rbd::RobotarmRbd::Limits> joint_limits_;  // from urdf, velocity scaled by joint_velocity_scale_
     std::vector<std::string> rbd_joint_names_;
     std::string rbd_tcp_name_;
 
@@ -122,6 +122,7 @@ private:
     CartesianLimits cartesian_limits_;
     CorrectionParams correction_;
     double max_tracking_error_ = 0.0;   // rad, max |q_cmd - q_meas| per joint before stopping
+    double joint_velocity_scale_ = 1.0; // fraction of the urdf joint velocity limits used while jogging
     PositionLimitParams position_limit_;
 
     rclcpp::Subscription<CmdTypeTwist>::SharedPtr twist_cmd_subscriber_;

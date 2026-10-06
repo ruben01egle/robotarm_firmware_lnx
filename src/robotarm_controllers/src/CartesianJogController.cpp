@@ -129,11 +129,15 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
         return controller_interface::CallbackReturn::ERROR;
     }
     if (!rbd_.get_joint_names(rbd_joint_names_) ||
-        !rbd_.get_joint_limits(rbd_limits_) ||
+        !rbd_.get_joint_limits(joint_limits_) ||
         !rbd_.get_tcp_link_name(rbd_tcp_name_))
     {
         RCLCPP_ERROR(get_node()->get_logger(), "rbd not properly initialized: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
+    }
+    // urdf velocity limits are hardware limits, way too fast for jogging
+    for (auto & lim : joint_limits_) {
+        lim.velocity *= joint_velocity_scale_;
     }
     data_.resize(rbd_joint_names_.size());
 
@@ -211,6 +215,7 @@ controller_interface::CallbackReturn CartesianJogController::on_deactivate(const
 // TODO:
 // - singularity detection and avoidance/slow down
 // - watchdog
+// - base/tcp switch
 controller_interface::return_type CartesianJogController::update(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
 {
     // get and validate input
@@ -245,8 +250,8 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
          twist_cmd_.angular.x, twist_cmd_.angular.y, twist_cmd_.angular.z;
 
     data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target;
-    const double scale_vel = velocity_scale(data_.tmp.dq_pred, rbd_limits_);
-    const double scale_pos = position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, rbd_limits_,
+    const double scale_vel = velocity_scale(data_.tmp.dq_pred, joint_limits_);
+    const double scale_pos = position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, joint_limits_,
                                                   position_limit_.zone, position_limit_.margin);
     dx_target *= std::min(scale_vel, scale_pos);
 
@@ -290,7 +295,7 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
 
     // calculate dq_cmd and limit/scale joint space as last resort
     data_.ref.dq_cmd.noalias() = data_.tmp.j_inv * dx_cmd;
-    double scale = velocity_scale(data_.ref.dq_cmd, rbd_limits_);
+    double scale = velocity_scale(data_.ref.dq_cmd, joint_limits_);
     data_.ref.dq_cmd = scale * data_.ref.dq_cmd;
     // part of dx_ff the damped inverse actually realizes (J·J⁺·dx_ff). Near singularities the
     // rest cannot be followed and must not wind up in x_ref
@@ -308,7 +313,7 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     // known limitation: the clamp is not represented in x_ref -> winds up while active,
     // acceptable because position_limit_scale should prevent it from ever triggering
     for (Eigen::Index i = 0; i < data_.ref.q_cmd.size(); ++i) {
-        const auto & lim = rbd_limits_[i];
+        const auto & lim = joint_limits_[i];
         if (lim.max <= lim.min) continue;   // no position limits
         if (data_.ref.q_cmd[i] > lim.max || data_.ref.q_cmd[i] < lim.min) {
             data_.ref.q_cmd[i] = std::clamp(data_.ref.q_cmd[i], lim.min, lim.max);
@@ -364,6 +369,8 @@ void CartesianJogController::declare_parameters()
 
     node->declare_parameter<double>("max_tracking_error", 0.1);         // rad, |q_cmd - q_meas| per joint
 
+    node->declare_parameter<double>("joint_velocity_scale", 0.2);       // fraction of the urdf joint velocity limits
+
     node->declare_parameter<double>("joint_limit_zone", 0.2);           // rad, slow down zone in front of a position limit
     node->declare_parameter<double>("joint_limit_margin", 0.02);        // rad, stop this far before a position limit
 }
@@ -390,6 +397,13 @@ controller_interface::CallbackReturn CartesianJogController::read_parameters()
     if (!std::isfinite(max_tracking_error_) || max_tracking_error_ <= 0.0) {
         RCLCPP_ERROR(node->get_logger(), "Parameter max_tracking_error must be finite and > 0, got %f",
                      max_tracking_error_);
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
+    joint_velocity_scale_ = node->get_parameter("joint_velocity_scale").as_double();
+    if (!std::isfinite(joint_velocity_scale_) || joint_velocity_scale_ <= 0.0 || joint_velocity_scale_ > 1.0) {
+        RCLCPP_ERROR(node->get_logger(), "Parameter joint_velocity_scale must be in (0, 1], got %f",
+                     joint_velocity_scale_);
         return controller_interface::CallbackReturn::ERROR;
     }
 
