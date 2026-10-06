@@ -234,6 +234,10 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
         RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
         return controller_interface::return_type::ERROR;
     }
+    if (!rbd_.calculate_jacobian(data_.ref.q_cmd, rbd_tcp_name_, data_.tmp.j)) {
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return controller_interface::return_type::ERROR;
+    }
 
     // predict and scale down motion before ruckig for smooth motion
     Eigen::Matrix<double, 6, 1> dx_target;
@@ -288,11 +292,21 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     data_.ref.dq_cmd.noalias() = data_.tmp.j_inv * dx_cmd;
     double scale = velocity_scale(data_.ref.dq_cmd, rbd_limits_);
     data_.ref.dq_cmd = scale * data_.ref.dq_cmd;
+    // part of dx_ff the damped inverse actually realizes (J·J⁺·dx_ff). Near singularities the
+    // rest cannot be followed and must not wind up in x_ref
+    // tradeoff: the damping error of J⁺ is no longer corrected, but x_ref cannot run away
+    Eigen::Matrix<double, 6, 1> dx_ff_realized = scale * data_.tmp.j * data_.tmp.j_inv * dx_ff;
     
     // update q_cmd and x_ref
     data_.ref.q_cmd += data_.ref.dq_cmd * period.seconds();
 
+    data_.ref.x_ref.translation() += dx_ff_realized.head<3>() * period.seconds();
+    Eigen::Vector3d dx_ref_rot = dx_ff_realized.tail<3>() * period.seconds();
+    data_.ref.x_ref.linear() = Eigen::AngleAxisd(dx_ref_rot.norm(), dx_ref_rot.normalized()) * data_.ref.x_ref.linear();
+
     // hard position limit as last resort, should never trigger with the position limit scaling above
+    // known limitation: the clamp is not represented in x_ref -> winds up while active,
+    // acceptable because position_limit_scale should prevent it from ever triggering
     for (Eigen::Index i = 0; i < data_.ref.q_cmd.size(); ++i) {
         const auto & lim = rbd_limits_[i];
         if (lim.max <= lim.min) continue;   // no position limits
@@ -303,9 +317,6 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
                                 "Joint %s clamped to its hard position limit", rbd_joint_names_[i].c_str());
         }
     }
-    data_.ref.x_ref.translation() += scale * dx_ff.head<3>() * period.seconds(); // update reference derived purely from cartesian dx_ff
-    Eigen::Vector3d dx_ff_rot = scale * dx_ff.tail<3>() * period.seconds();
-    data_.ref.x_ref.linear() = Eigen::AngleAxisd(dx_ff_rot.norm(), dx_ff_rot.normalized()) * data_.ref.x_ref.linear();
 
     // update ruckig for next cycle
     if (scale < 1.0) {

@@ -289,7 +289,8 @@ TEST(MallocCounter, CounterDetectsAllocation)
         }), 0u);
     EXPECT_GT(malloc_counter::count_allocations([] {
             auto p = std::make_unique<double>(1.0);
-            (void)p;
+            // an unused new/delete pair may be elided under optimization (C++14), this keeps it
+            asm volatile("" : : "g"(p.get()) : "memory");
         }), 0u);
 
     // and nothing is counted while disarmed
