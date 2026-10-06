@@ -66,6 +66,9 @@ controller_manager:
     teleop_controller:
       type: robotarm_controllers/TeleopController
 
+    cartesian_jog_controller:
+      type: robotarm_controllers/CartesianJogController
+
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
@@ -85,6 +88,9 @@ teleop_controller:
       - axis1
       - axis2
       - axis3
+      - axis4
+      - axis5
+      - axis6
     command_interfaces:
       - position
       - velocity
@@ -92,3 +98,25 @@ teleop_controller:
     max_acceleration: 4.0
     max_jerk: 10.0
     sync_joints: false
+
+cartesian_jog_controller:
+  ros__parameters:
+    lambda: 0.01                    # damping of the damped least squares jacobian inverse
+
+    max_linear_velocity: 0.1        # m/s
+    max_linear_acceleration: 0.5    # m/s²
+    max_linear_jerk: 5.0            # m/s³
+
+    max_angular_velocity: 0.5       # rad/s
+    max_angular_acceleration: 2.0   # rad/s²
+    max_angular_jerk: 20.0          # rad/s³
+
+    kp_linear: 10.0                 # 1/s, ik drift correction, kp / update_rate must be < 1
+    kp_angular: 10.0                # 1/s
+    max_correction_linear: 0.01     # m/s
+    max_correction_angular: 0.05    # rad/s
+
+    max_tracking_error: 0.1         # rad, |q_cmd - q_meas| per joint before stopping
+
+    joint_limit_zone: 0.2           # rad, slow down zone in front of a position limit
+    joint_limit_margin: 0.02        # rad, stop this far before a position limit

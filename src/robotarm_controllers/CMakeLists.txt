@@ -76,6 +76,33 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_index_cpp REQUIRED)
+  find_package(hardware_interface REQUIRED)
+  find_package(lifecycle_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
+
+  # Allocation check of CartesianJogController::update(). malloc is interposed in the test executable
+  # (test/malloc_counter.cpp), so allocations inside the normally linked controller library, rclcpp,
+  # ruckig and Eigen are counted too. Own main() (rclcpp::init), so gtest_main is not linked.
+  ament_add_gtest(test_cartesian_jog_rt_alloc
+    test/test_cartesian_jog_rt_alloc.cpp
+    test/malloc_counter.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_cartesian_jog_rt_alloc PRIVATE test)
+  target_link_libraries(test_cartesian_jog_rt_alloc
+    ${PROJECT_NAME}
+    ament_index_cpp::ament_index_cpp
+    Eigen3::Eigen
+  )
+  ament_target_dependencies(test_cartesian_jog_rt_alloc
+    controller_interface
+    hardware_interface
+    lifecycle_msgs
+    geometry_msgs
+    rclcpp
+  )
 endif()
 
 ament_package()

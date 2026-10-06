@@ -125,16 +125,15 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
     std::string urdf_string = get_robot_description();
 
     if (!rbd_.initialize(urdf_string, rbd_cfg_)) {
-        fprintf(stderr, "rbd failed to init: %s \n", rbd_.last_error());
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd failed to init: %s", rbd_.last_error());
+        return controller_interface::CallbackReturn::ERROR;
     }
-    if (!rbd_.get_joint_names(rbd_joint_names_)) {
-        fprintf(stderr, "rbd not properly initialized: %s \n", rbd_.last_error());
-    }
-    if (!rbd_.get_joint_limits(rbd_limits_)) {
-        fprintf(stderr, "rbd not properly initialized: %s \n", rbd_.last_error());
-    }
-    if (!rbd_.get_tcp_link_name(rbd_tcp_name_)) {
-        fprintf(stderr, "rbd not properly initialized: %s \n", rbd_.last_error());
+    if (!rbd_.get_joint_names(rbd_joint_names_) ||
+        !rbd_.get_joint_limits(rbd_limits_) ||
+        !rbd_.get_tcp_link_name(rbd_tcp_name_))
+    {
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd not properly initialized: %s", rbd_.last_error());
+        return controller_interface::CallbackReturn::ERROR;
     }
     data_.resize(rbd_joint_names_.size());
 
