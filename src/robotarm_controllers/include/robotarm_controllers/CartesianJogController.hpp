@@ -11,8 +11,8 @@
 
 #include <string>
 #include <vector>
-#include <memory>
 #include <ruckig/ruckig.hpp>
+#include <Eigen/Geometry>
 
 #include "robotarm_rbd/RobotarmRbd.hpp"
 
@@ -24,11 +24,52 @@ using CmdTypeTwist = geometry_msgs::msg::Twist;
 class CartesianJogController : public controller_interface::ControllerInterface
 {
 public:
+    struct Measured {
+        Eigen::VectorXd q, dq;
+        void resize(size_t n) { q.resize(n); dq.resize(n); }
+    };
+
+    struct Reference {                       // persistent, reset on activate
+        Eigen::VectorXd q_cmd;
+        Eigen::VectorXd dq_cmd;
+        Eigen::Isometry3d x_ref = Eigen::Isometry3d::Identity();
+        void resize(size_t n) { q_cmd.resize(n); dq_cmd.resize(n); }
+    };
+
+    struct Scratch {                        // per cycle only
+        Eigen::VectorXd dq_pred;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> j;
+        Eigen::Matrix<double, Eigen::Dynamic, 6> j_inv;
+        void resize(size_t n) { dq_pred.resize(n); j.resize(6, n); j_inv.resize(n, 6); }
+    };
+
+    struct RobotarmData {
+        Measured state;
+        Reference ref;
+        Scratch  tmp;
+        void resize(size_t n) { state.resize(n); ref.resize(n); tmp.resize(n); }
+    };
+
     struct CartesianLimits
     {
         struct Bounds { double velocity, acceleration, jerk; };
         Bounds linear;   // m/s, m/s², m/s³
         Bounds angular;  // rad/s, rad/s², rad/s³
+    };
+
+    // P-correction of the drift between x_ref and FK(q_cmd)
+    struct CorrectionParams
+    {
+        struct Gains { double kp, max; };
+        Gains linear;    // kp in 1/s, max in m/s
+        Gains angular;   // kp in 1/s, max in rad/s
+    };
+
+    // one sided slow down in front of joint position limits
+    struct PositionLimitParams
+    {
+        double zone = 0.0;      // rad, width of the slow down zone
+        double margin = 0.0;    // rad, stop distance before the limit
     };
 
 public:
@@ -58,6 +99,10 @@ public:
 private:
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
+    // all joints or fail, for a valid start in on_activate
+    bool fetch_robotarm_state_strict();
+    // best effort, missed reads keep their last value
+    void fetch_robotarm_state();
 
 private:
     // custom rigid body dynamics class
@@ -65,13 +110,19 @@ private:
     robotarm_rbd::RobotarmRbd::Config rbd_cfg_;
     std::vector<robotarm_rbd::RobotarmRbd::Limits> rbd_limits_;
     std::vector<std::string> rbd_joint_names_;
+    std::string rbd_tcp_name_;
+
+    RobotarmData data_;
 
     // cartesian space ruckig
-    std::unique_ptr<ruckig::Ruckig<6>> ruckig_;
-    std::unique_ptr<ruckig::InputParameter<6>> ruckig_input_;
-    std::unique_ptr<ruckig::OutputParameter<6>> ruckig_output_;
+    ruckig::Ruckig<6> ruckig_;
+    ruckig::InputParameter<6> ruckig_input_;
+    ruckig::OutputParameter<6> ruckig_output_;
 
     CartesianLimits cartesian_limits_;
+    CorrectionParams correction_;
+    double max_tracking_error_ = 0.0;   // rad, max |q_cmd - q_meas| per joint before stopping
+    PositionLimitParams position_limit_;
 
     rclcpp::Subscription<CmdTypeTwist>::SharedPtr twist_cmd_subscriber_;
 

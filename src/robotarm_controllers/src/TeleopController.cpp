@@ -195,10 +195,10 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
     ruckig_->delta_time = period.seconds();
     auto result = ruckig_->update(*ruckig_input_, *ruckig_output_);
-    if (result == ruckig::Result::ErrorInvalidInput)
+    if (result < 0)
     {
         RCLCPP_ERROR_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000, 
-                            "Ruckig: invalid input!");
+                            "Ruckig: runtime error!");
         return controller_interface::return_type::ERROR;
     }
 
