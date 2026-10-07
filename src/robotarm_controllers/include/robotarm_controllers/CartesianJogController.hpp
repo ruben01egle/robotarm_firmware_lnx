@@ -12,14 +12,13 @@
 #include <string>
 #include <vector>
 #include <ruckig/ruckig.hpp>
+#include <chrono>
 #include <Eigen/Geometry>
 
 #include "robotarm_rbd/RobotarmRbd.hpp"
 
 namespace cartesian_jog_controller
 {
-
-using CmdTypeTwist = geometry_msgs::msg::Twist;
 
 class CartesianJogController : public controller_interface::ControllerInterface
 {
@@ -72,6 +71,18 @@ public:
         double margin = 0.0;    // rad, stop distance before the limit
     };
 
+    // local timestamp to each twist cmd for watchdog
+    struct TwistCmd
+    {
+        geometry_msgs::msg::Twist twist{};
+        size_t seq = 0;
+    };
+    struct TwistCmdStamped
+    {
+        TwistCmd cmd;
+        rclcpp::Time stamp;
+    };
+
 public:
     RCLCPP_SHARED_PTR_DEFINITIONS(CartesianJogController)
 
@@ -97,6 +108,7 @@ public:
         const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
+    void watchdog(const rclcpp::Time &time);
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
     // all joints or fail, for a valid start in on_activate
@@ -125,11 +137,12 @@ private:
     double joint_velocity_scale_ = 1.0; // fraction of the urdf joint velocity limits used while jogging
     PositionLimitParams position_limit_;
 
-    rclcpp::Subscription<CmdTypeTwist>::SharedPtr twist_cmd_subscriber_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_cmd_subscriber_;
 
     // the realtime container to exchange the reference from subscriber
-    realtime_tools::RealtimeThreadSafeBox<CmdTypeTwist> rt_command_twist_;
-    CmdTypeTwist twist_cmd_;
+    realtime_tools::RealtimeThreadSafeBox<TwistCmd> rt_command_twist_;
+    TwistCmdStamped twist_cmd_;
+    rclcpp::Duration twist_cmd_timeout_ = {std::chrono::milliseconds(250)};
 
     static constexpr size_t num_states_per_joint_ = 2;
 };

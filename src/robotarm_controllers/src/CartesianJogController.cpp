@@ -12,18 +12,19 @@ PLUGINLIB_EXPORT_CLASS(
 namespace
 {  // utility
 
-void reset_controller_reference_msg(cartesian_jog_controller::CmdTypeTwist& msg)
-{
-    msg = cartesian_jog_controller::CmdTypeTwist();
-}
-
 bool is_finite(const geometry_msgs::msg::Vector3 & v)
 {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
+bool is_zero(const geometry_msgs::msg::Twist & msg)
+{
+    return msg.linear.x == 0.0 && msg.linear.y == 0.0 && msg.linear.z == 0.0 &&
+           msg.angular.x == 0.0 && msg.angular.y == 0.0 && msg.angular.z == 0.0;
+}
+
 void clamp_twist(
-    cartesian_jog_controller::CmdTypeTwist& msg,
+    geometry_msgs::msg::Twist& msg,
     const cartesian_jog_controller::CartesianJogController::CartesianLimits& limits)
 {
     msg.linear.x = std::clamp(msg.linear.x, -limits.linear.velocity, limits.linear.velocity);
@@ -141,9 +142,9 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
     }
     data_.resize(rbd_joint_names_.size());
 
-    twist_cmd_subscriber_ = get_node()->create_subscription<CmdTypeTwist>(
+    twist_cmd_subscriber_ = get_node()->create_subscription<geometry_msgs::msg::Twist>(
         "~/twist_cmds", rclcpp::SystemDefaultsQoS(),
-        [this](const CmdTypeTwist::SharedPtr msg)
+        [this](const geometry_msgs::msg::Twist::SharedPtr msg)
         {
 
         if (!is_finite(msg->linear) || !is_finite(msg->angular)) {
@@ -151,7 +152,11 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
                                 "Non-finite value received. Dropping message");
             return;
         }
-        rt_command_twist_.set(*msg);
+        rt_command_twist_.set([&msg](TwistCmd& cmd) {
+            cmd.twist = *msg;
+            ++cmd.seq;
+        });
+
         });
 
     RCLCPP_INFO(get_node()->get_logger(), "configure successful");
@@ -181,7 +186,7 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
     }
 
     ruckig_input_.control_interface = ruckig::ControlInterface::Velocity;
-    ruckig_input_.synchronization = ruckig::Synchronization::None;
+    ruckig_input_.synchronization = ruckig::Synchronization::Phase;
     for(size_t i=0; i<3; ++i) {
         ruckig_input_.max_velocity[i] = cartesian_limits_.linear.velocity;
         ruckig_input_.max_acceleration[i] = cartesian_limits_.linear.acceleration;
@@ -199,8 +204,8 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
         ruckig_input_.target_acceleration[i] = 0;
     }
 
-    reset_controller_reference_msg(twist_cmd_);
-    rt_command_twist_.set(twist_cmd_);
+    rt_command_twist_.set(TwistCmd{});
+    twist_cmd_.cmd = TwistCmd{};
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
@@ -214,13 +219,23 @@ controller_interface::CallbackReturn CartesianJogController::on_deactivate(const
 
 // TODO:
 // - singularity detection and avoidance/slow down
-// - watchdog
 // - base/tcp switch
-controller_interface::return_type CartesianJogController::update(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
+controller_interface::return_type CartesianJogController::update(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
     // get and validate input
-    rt_command_twist_.try_get([this](const CmdTypeTwist & msg){twist_cmd_ = msg;});
-    clamp_twist(twist_cmd_, cartesian_limits_);
+    TwistCmd box_twist_cmd = twist_cmd_.cmd;
+    rt_command_twist_.try_get([&box_twist_cmd](const TwistCmd& cmd){box_twist_cmd = cmd;});
+
+    // adopt new cmd or watchdog
+    if (box_twist_cmd.seq == twist_cmd_.cmd.seq) {
+        watchdog(time);
+    }
+    else {
+        twist_cmd_.cmd = box_twist_cmd;
+        twist_cmd_.stamp = time;
+    }
+
+    clamp_twist(twist_cmd_.cmd.twist, cartesian_limits_);
 
     fetch_robotarm_state();
 
@@ -245,9 +260,10 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     }
 
     // predict and scale down motion before ruckig for smooth motion
+    auto& twist_target = twist_cmd_.cmd.twist;
     Eigen::Matrix<double, 6, 1> dx_target;
-    dx_target << twist_cmd_.linear.x,  twist_cmd_.linear.y,  twist_cmd_.linear.z,
-         twist_cmd_.angular.x, twist_cmd_.angular.y, twist_cmd_.angular.z;
+    dx_target << twist_target.linear.x,  twist_target.linear.y,  twist_target.linear.z,
+         twist_target.angular.x, twist_target.angular.y, twist_target.angular.z;
 
     data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target;
     const double scale_vel = velocity_scale(data_.tmp.dq_pred, joint_limits_);
@@ -346,6 +362,19 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     }
 
     return controller_interface::return_type::OK;
+}
+
+void CartesianJogController::watchdog(const rclcpp::Time &time)
+{
+    if (is_zero(twist_cmd_.cmd.twist)) return;
+
+    const rclcpp::Duration twist_cmd_age = time - twist_cmd_.stamp;
+    if (twist_cmd_age > twist_cmd_timeout_)
+    {
+        RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                "Non zero twist timed out: watchdog set twist to zero");
+        twist_cmd_.cmd.twist = geometry_msgs::msg::Twist();
+    }
 }
 
 void CartesianJogController::declare_parameters()
