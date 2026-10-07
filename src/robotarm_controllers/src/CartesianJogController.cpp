@@ -68,6 +68,12 @@ double position_limit_scale(
     return s;
 }
 
+// rotates the linear and angular half of a 6d twist like vector with the same R
+void rotate_twist(const Eigen::Matrix3d & R, Eigen::Ref<Eigen::Matrix<double, 6, 1>> v)
+{
+    v.head<3>() = R * v.head<3>();
+    v.tail<3>() = R * v.tail<3>();
+}
 
 }  // namespace
 
@@ -129,31 +135,49 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
         RCLCPP_ERROR(get_node()->get_logger(), "rbd failed to init: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
     }
+    std::vector<std::string> rbd_links;
     if (!rbd_.get_joint_names(rbd_joint_names_) ||
         !rbd_.get_joint_limits(joint_limits_) ||
-        !rbd_.get_tcp_link_name(rbd_tcp_name_))
+        !rbd_.get_tcp_link_name(rbd_tcp_name_) ||
+        !rbd_.get_link_names(rbd_links))
     {
         RCLCPP_ERROR(get_node()->get_logger(), "rbd not properly initialized: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
     }
+    rbd_base_name_ = rbd_links[0];
     // urdf velocity limits are hardware limits, way too fast for jogging
     for (auto & lim : joint_limits_) {
         lim.velocity *= joint_velocity_scale_;
     }
     data_.resize(rbd_joint_names_.size());
 
-    twist_cmd_subscriber_ = get_node()->create_subscription<geometry_msgs::msg::Twist>(
+    twist_cmd_subscriber_ = get_node()->create_subscription<geometry_msgs::msg::TwistStamped>(
         "~/twist_cmds", rclcpp::SystemDefaultsQoS(),
-        [this](const geometry_msgs::msg::Twist::SharedPtr msg)
+        [this](const geometry_msgs::msg::TwistStamped::SharedPtr msg)
         {
 
-        if (!is_finite(msg->linear) || !is_finite(msg->angular)) {
+        if (!is_finite(msg->twist.linear) || !is_finite(msg->twist.angular)) {
             RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
                                 "Non-finite value received. Dropping message");
             return;
         }
-        rt_command_twist_.set([&msg](TwistCmd& cmd) {
-            cmd.twist = *msg;
+        // empty frame_id defaults to base
+        Frame frame = Frame::BASE;
+        const auto & frame_id = msg->header.frame_id;
+        if (!frame_id.empty() && frame_id != rbd_base_name_) {
+            if (frame_id == rbd_tcp_name_) {
+                frame = Frame::TOOL;
+            }
+            else {
+                RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                    "Unknown frame_id '%s', expected '%s' or '%s'. Dropping message",
+                                    frame_id.c_str(), rbd_base_name_.c_str(), rbd_tcp_name_.c_str());
+                return;
+            }
+        }
+        rt_command_twist_.set([&msg, &frame](TwistCmd& cmd) {
+            cmd.twist = msg->twist;
+            cmd.frame = frame;
             ++cmd.seq;
         });
 
@@ -186,7 +210,7 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
     }
 
     ruckig_input_.control_interface = ruckig::ControlInterface::Velocity;
-    ruckig_input_.synchronization = ruckig::Synchronization::Phase;
+    ruckig_input_.synchronization = ruckig::Synchronization::None;
     for(size_t i=0; i<3; ++i) {
         ruckig_input_.max_velocity[i] = cartesian_limits_.linear.velocity;
         ruckig_input_.max_acceleration[i] = cartesian_limits_.linear.acceleration;
@@ -206,6 +230,7 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
 
     rt_command_twist_.set(TwistCmd{});
     twist_cmd_.cmd = TwistCmd{};
+    ruckig_frame_ = Frame::BASE;
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
@@ -219,7 +244,6 @@ controller_interface::CallbackReturn CartesianJogController::on_deactivate(const
 
 // TODO:
 // - singularity detection and avoidance/slow down
-// - base/tcp switch
 controller_interface::return_type CartesianJogController::update(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
     // get and validate input
@@ -261,15 +285,41 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
 
     // predict and scale down motion before ruckig for smooth motion
     auto& twist_target = twist_cmd_.cmd.twist;
+    auto& twist_target_frame = twist_cmd_.cmd.frame;
     Eigen::Matrix<double, 6, 1> dx_target;
     dx_target << twist_target.linear.x,  twist_target.linear.y,  twist_target.linear.z,
          twist_target.angular.x, twist_target.angular.y, twist_target.angular.z;
 
-    data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target;
+    // always use J/J_inv in base frame
+    Eigen::Matrix3d R_base_frame = Eigen::Matrix3d::Identity();
+    if (twist_target_frame == Frame::TOOL) R_base_frame = data_.ref.x_ref.linear();
+
+    Eigen::Matrix<double, 6, 1> dx_target_base = dx_target;
+    rotate_twist(R_base_frame, dx_target_base);
+    data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target_base;
     const double scale_vel = velocity_scale(data_.tmp.dq_pred, joint_limits_);
     const double scale_pos = position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, joint_limits_,
                                                   position_limit_.zone, position_limit_.margin);
     dx_target *= std::min(scale_vel, scale_pos);
+
+    // update ruckig frame
+    if (ruckig_frame_ != twist_target_frame) {
+        Eigen::Matrix3d R_new_old = Eigen::Matrix3d::Identity();
+        switch (twist_target_frame) {
+            case Frame::BASE:
+                R_new_old = data_.ref.x_ref.linear();
+                break;
+            case Frame::TOOL:
+                R_new_old = data_.ref.x_ref.linear().transpose();
+                break;
+        }
+        // acceleration: the omega x v term of the rotating frame is ignored, small jump of |w|*|v|
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> vel(ruckig_input_.current_velocity.data());
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> acc(ruckig_input_.current_acceleration.data());
+        rotate_twist(R_new_old, vel);
+        rotate_twist(R_new_old, acc);
+        ruckig_frame_ = twist_target_frame;
+    }
 
     // update cartesian space ruckig
     for(size_t i=0; i<6; ++i) {
@@ -284,11 +334,12 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
         return controller_interface::return_type::ERROR;
     }
 
-    // convert cartesian ruckig output to joint space
+    // convert cartesian ruckig output to base frame
     Eigen::Matrix<double, 6, 1> dx_ff;
     for(size_t i=0; i<6; ++i) {
         dx_ff[i] = ruckig_output_.new_velocity[i];
     }
+    rotate_twist(R_base_frame, dx_ff);
 
     // calc ik correction
     Eigen::Matrix<double, 6, 1> dx_ik_corr;
@@ -309,8 +360,9 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     // apply ik drift correction
     Eigen::Matrix<double, 6, 1> dx_cmd = dx_ff + dx_ik_corr;
 
-    // calculate dq_cmd and limit/scale joint space as last resort
+    // convert to joint space and calculate dq_cmd
     data_.ref.dq_cmd.noalias() = data_.tmp.j_inv * dx_cmd;
+    // limit/scale joint space as last resort
     double scale = velocity_scale(data_.ref.dq_cmd, joint_limits_);
     data_.ref.dq_cmd = scale * data_.ref.dq_cmd;
     // part of dx_ff the damped inverse actually realizes (J·J⁺·dx_ff). Near singularities the

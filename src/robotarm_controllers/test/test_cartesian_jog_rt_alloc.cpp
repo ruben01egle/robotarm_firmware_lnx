@@ -9,6 +9,9 @@
 //
 // CounterDetectsAllocation is the negative control: without it, a counter that is silently not
 // linked in would let all other checks pass.
+//
+// The tool frame tests also check the frame handling itself (direction of motion, continuity across
+// a frame switch), because those can't be seen in the allocation count.
 
 #include <gtest/gtest.h>
 
@@ -23,10 +26,11 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include "controller_interface/controller_interface_params.hpp"
-#include "geometry_msgs/msg/twist.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
@@ -42,7 +46,7 @@ namespace
 {
 
 using cartesian_jog_controller::CartesianJogController;
-using geometry_msgs::msg::Twist;
+using geometry_msgs::msg::TwistStamped;
 using hardware_interface::CommandInterface;
 using hardware_interface::StateInterface;
 
@@ -74,16 +78,24 @@ std::string real_urdf()
     return cached;
 }
 
-Twist make_twist(double vx, double vy, double vz, double wx, double wy, double wz)
+// empty frame_id is the base frame
+TwistStamped make_twist(double vx, double vy, double vz, double wx, double wy, double wz,
+                        const std::string & frame_id = "")
 {
-    Twist t;
-    t.linear.x = vx;
-    t.linear.y = vy;
-    t.linear.z = vz;
-    t.angular.x = wx;
-    t.angular.y = wy;
-    t.angular.z = wz;
+    TwistStamped t;
+    t.header.frame_id = frame_id;
+    t.twist.linear.x = vx;
+    t.twist.linear.y = vy;
+    t.twist.linear.z = vz;
+    t.twist.angular.x = wx;
+    t.twist.angular.y = wy;
+    t.twist.angular.z = wz;
     return t;
+}
+
+TwistStamped make_twist(const Eigen::Vector3d & v, const Eigen::Vector3d & w, const std::string & frame_id)
+{
+    return make_twist(v.x(), v.y(), v.z(), w.x(), w.y(), w.z(), frame_id);
 }
 
 // Counts log messages whose format string contains a marker and forwards everything to the handler
@@ -178,11 +190,18 @@ protected:
 
         ASSERT_EQ(controller_->get_node()->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
 
+        // own kinematic model for frame names and FK, same source as the controller
+        ASSERT_TRUE(rbd_.initialize(real_urdf(), robotarm_rbd::RobotarmRbd::Config{})) << rbd_.last_error();
+        std::vector<std::string> links;
+        ASSERT_TRUE(rbd_.get_link_names(links));
+        ASSERT_TRUE(rbd_.get_tcp_link_name(tcp_frame_));
+        base_frame_ = links[0];
+
         pub_node_ = std::make_shared<rclcpp::Node>("twist_publisher");
         const std::string topic = std::string("/") + controller_name + "/twist_cmds";
-        twist_pub_ = pub_node_->create_publisher<Twist>(topic, rclcpp::SystemDefaultsQoS());
-        echo_sub_ = pub_node_->create_subscription<Twist>(topic, rclcpp::SystemDefaultsQoS(),
-                                                          [this](Twist::ConstSharedPtr) {++echo_count_;});
+        twist_pub_ = pub_node_->create_publisher<TwistStamped>(topic, rclcpp::SystemDefaultsQoS());
+        echo_sub_ = pub_node_->create_subscription<TwistStamped>(topic, rclcpp::SystemDefaultsQoS(),
+                                                                 [this](TwistStamped::ConstSharedPtr) {++echo_count_;});
         executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
         executor_->add_node(controller_->get_node()->get_node_base_interface());
         executor_->add_node(pub_node_);
@@ -190,7 +209,7 @@ protected:
 
     // publishes over the real subscription and spins until it is delivered, outside of any
     // measured window
-    void send_twist(const Twist & t)
+    void send_twist(const TwistStamped & t)
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (twist_pub_->get_subscription_count() < 2) {   // controller + echo
@@ -249,6 +268,32 @@ protected:
         return m;
     }
 
+    Eigen::VectorXd q_cmd_vec() const
+    {
+        Eigen::VectorXd q(cmd_.size() / 2);
+        for (Eigen::Index j = 0; j < q.size(); ++j) {
+            q[j] = q_cmd(j);
+        }
+        return q;
+    }
+
+    Eigen::VectorXd dq_cmd_vec() const
+    {
+        Eigen::VectorXd dq(cmd_.size() / 2);
+        for (Eigen::Index j = 0; j < dq.size(); ++j) {
+            dq[j] = dq_cmd(j);
+        }
+        return dq;
+    }
+
+    // FK of the commanded joint position, outside of any measured window
+    Eigen::Isometry3d tcp_pose()
+    {
+        Eigen::Isometry3d T;
+        EXPECT_TRUE(rbd_.calculate_link_transform(q_cmd_vec(), tcp_frame_, T)) << rbd_.last_error();
+        return T;
+    }
+
     static std::pair<std::string, std::string> split(const std::string & full)
     {
         const size_t slash = full.rfind('/');
@@ -262,9 +307,13 @@ protected:
     std::vector<CommandInterface::SharedPtr> cmd_;
     std::vector<StateInterface::SharedPtr> state_;
 
+    robotarm_rbd::RobotarmRbd rbd_;
+    std::string base_frame_;
+    std::string tcp_frame_;
+
     rclcpp::Node::SharedPtr pub_node_;
-    rclcpp::Publisher<Twist>::SharedPtr twist_pub_;
-    rclcpp::Subscription<Twist>::SharedPtr echo_sub_;
+    rclcpp::Publisher<TwistStamped>::SharedPtr twist_pub_;
+    rclcpp::Subscription<TwistStamped>::SharedPtr echo_sub_;
     int echo_count_ = 0;
     std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
 
@@ -325,14 +374,14 @@ TEST_F(CartesianJogRtAllocTest, NewCommandPickupDoesNotAllocate)
 {
     // a fresh message in the realtime box is copied out by try_get() inside update()
     start(regular_pose());
-    const Twist cmds[] = {
+    const TwistStamped cmds[] = {
         make_twist(0.05, 0.0, 0.0, 0.0, 0.0, 0.0),
         make_twist(0.0, 0.05, 0.0, 0.0, 0.0, 0.2),
         make_twist(-0.05, 0.0, 0.03, 0.2, 0.0, 0.0),
         make_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     };
     for (int round = 0; round < 3; ++round) {
-        for (const Twist & t : cmds) {
+        for (const TwistStamped & t : cmds) {
             SCOPED_TRACE("round " + std::to_string(round));
             send_twist(t);
             const StepResult r = step(200);
@@ -340,6 +389,92 @@ TEST_F(CartesianJogRtAllocTest, NewCommandPickupDoesNotAllocate)
             EXPECT_NO_RT_ALLOCATIONS(r);
         }
     }
+}
+
+TEST_F(CartesianJogRtAllocTest, ToolFrameAndFrameSwitchDoNotAllocate)
+{
+    // alternating frames while moving runs the ruckig state transform inside update()
+    start(regular_pose());
+    const std::string frames[] = {tcp_frame_, base_frame_, tcp_frame_, ""};
+    for (int round = 0; round < 2; ++round) {
+        for (const std::string & frame : frames) {
+            SCOPED_TRACE("round " + std::to_string(round) + " frame '" + frame + "'");
+            send_twist(make_twist(0.04, -0.02, 0.03, 0.2, -0.1, 0.3, frame));
+            const StepResult r = step(100);
+            EXPECT_TRUE(r.ok);
+            EXPECT_NO_RT_ALLOCATIONS(r);
+            EXPECT_GT(max_abs_dq_cmd(), 1e-3);
+        }
+    }
+}
+
+TEST_F(CartesianJogRtAllocTest, ToolFrameTranslationMovesAlongToolAxis)
+{
+    start(regular_pose());
+    const Eigen::Isometry3d T0 = tcp_pose();
+
+    send_twist(make_twist(0.0, 0.0, 0.05, 0.0, 0.0, 0.0, tcp_frame_));
+    EXPECT_TRUE(step(240).ok);
+    EXPECT_TRUE(step(500).ok);    // watchdog zeroes the twist, ruckig brakes to rest
+
+    const Eigen::Isometry3d T1 = tcp_pose();
+    const Eigen::Vector3d dp = T1.translation() - T0.translation();
+    const Eigen::Vector3d z_tool = T0.linear().col(2);
+    ASSERT_GT(dp.norm(), 1e-3) << "arm did not move";
+    // straight along +z of the tool, orientation unchanged
+    EXPECT_GT(dp.dot(z_tool), 0.0);
+    EXPECT_LT((dp - dp.dot(z_tool) * z_tool).norm(), 0.01 * dp.norm());
+    EXPECT_LT(Eigen::AngleAxisd(T0.linear().transpose() * T1.linear()).angle(), 1e-3);
+}
+
+TEST_F(CartesianJogRtAllocTest, ToolFrameRotationTurnsAboutToolAxisAtTcp)
+{
+    start(regular_pose());
+    const Eigen::Isometry3d T0 = tcp_pose();
+
+    send_twist(make_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.3, tcp_frame_));
+    EXPECT_TRUE(step(240).ok);
+    EXPECT_TRUE(step(500).ok);
+
+    const Eigen::Isometry3d T1 = tcp_pose();
+    // relative rotation in tool coordinates is a positive rotation about tool z
+    const Eigen::AngleAxisd aa(T0.linear().transpose() * T1.linear());
+    ASSERT_GT(aa.angle(), 0.01) << "tool did not rotate";
+    EXPECT_GT(aa.axis().dot(Eigen::Vector3d::UnitZ()), 0.999);
+    // the reference point of the twist is the TCP, so it stays in place
+    EXPECT_LT((T1.translation() - T0.translation()).norm(), 1e-3);
+}
+
+TEST_F(CartesianJogRtAllocTest, FrameSwitchKeepsVelocityContinuous)
+{
+    // the same physical (pure translation) motion is commanded in the other frame at full speed. If
+    // ruckig's state is transformed correctly, the switch is invisible in the joint velocities,
+    // otherwise they jump by roughly the full jogging speed.
+    start(regular_pose());
+    const Eigen::Vector3d v_tool(0.03, 0.02, -0.04);
+    const Eigen::Vector3d zero = Eigen::Vector3d::Zero();
+
+    send_twist(make_twist(v_tool, zero, tcp_frame_));
+    EXPECT_TRUE(step(240).ok);      // reach steady state, within the watchdog timeout
+    const Eigen::Matrix3d R = tcp_pose().linear();
+    ASSERT_GT((R - Eigen::Matrix3d::Identity()).norm(), 0.1) << "tool frame too close to base for this test";
+
+    // tool -> base
+    Eigen::VectorXd dq_before = dq_cmd_vec();
+    send_twist(make_twist(R * v_tool, zero, base_frame_));
+    StepResult r = step(1);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    EXPECT_LT((dq_cmd_vec() - dq_before).norm(), 1e-3) << "joint velocity jumped on tool -> base";
+
+    // base -> tool
+    EXPECT_TRUE(step(100).ok);
+    dq_before = dq_cmd_vec();
+    send_twist(make_twist(v_tool, zero, tcp_frame_));
+    r = step(1);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    EXPECT_LT((dq_cmd_vec() - dq_before).norm(), 1e-3) << "joint velocity jumped on base -> tool";
 }
 
 TEST_F(CartesianJogRtAllocTest, JogIntoJointLimitDoesNotAllocate)
@@ -383,13 +518,13 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
     });
 
     LogMarkerCounter clipping("Joint space clipping");
-    const Twist cmds[] = {
+    const TwistStamped cmds[] = {
         make_twist(0.0, 0.0, 0.0, 3.0, 0.0, 0.0),
         make_twist(0.0, 0.0, 0.0, 0.0, 3.0, 0.0),
         make_twist(0.0, 0.0, 0.0, 0.0, 0.0, 3.0),
         make_twist(1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     };
-    for (const Twist & t : cmds) {
+    for (const TwistStamped & t : cmds) {
         send_twist(t);
         const StepResult r = step(500);
         EXPECT_TRUE(r.ok);

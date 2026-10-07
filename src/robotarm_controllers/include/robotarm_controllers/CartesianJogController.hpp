@@ -4,7 +4,7 @@
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "rclcpp/subscription.hpp"
-#include "geometry_msgs/msg/twist.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "realtime_tools/realtime_thread_safe_box.hpp"
 #include "controller_interface/controller_interface.hpp"
@@ -71,10 +71,13 @@ public:
         double margin = 0.0;    // rad, stop distance before the limit
     };
 
+    enum class Frame { BASE, TOOL };
+
     // local timestamp to each twist cmd for watchdog
     struct TwistCmd
     {
-        geometry_msgs::msg::Twist twist{};
+        geometry_msgs::msg::Twist twist{};     // no string (frame_id), copied in update()
+        Frame frame = Frame::BASE;
         size_t seq = 0;
     };
     struct TwistCmdStamped
@@ -122,6 +125,7 @@ private:
     robotarm_rbd::RobotarmRbd::Config rbd_cfg_;
     std::vector<robotarm_rbd::RobotarmRbd::Limits> joint_limits_;  // from urdf, velocity scaled by joint_velocity_scale_
     std::vector<std::string> rbd_joint_names_;
+    std::string rbd_base_name_;
     std::string rbd_tcp_name_;
 
     RobotarmData data_;
@@ -130,6 +134,7 @@ private:
     ruckig::Ruckig<6> ruckig_;
     ruckig::InputParameter<6> ruckig_input_;
     ruckig::OutputParameter<6> ruckig_output_;
+    Frame ruckig_frame_ = Frame::BASE;
 
     CartesianLimits cartesian_limits_;
     CorrectionParams correction_;
@@ -137,7 +142,7 @@ private:
     double joint_velocity_scale_ = 1.0; // fraction of the urdf joint velocity limits used while jogging
     PositionLimitParams position_limit_;
 
-    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_cmd_subscriber_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr twist_cmd_subscriber_;
 
     // the realtime container to exchange the reference from subscriber
     realtime_tools::RealtimeThreadSafeBox<TwistCmd> rt_command_twist_;

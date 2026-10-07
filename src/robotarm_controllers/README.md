@@ -67,20 +67,34 @@ It does four things:
 |---|---|---|
 | Command interfaces | `<joint>/position`, `<joint>/velocity` | for every joint of the kinematic chain, interleaved per joint |
 | State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
-| Subscription | `~/twist_cmds` (`geometry_msgs/msg/Twist`) | i.e. `/cartesian_jog_controller/twist_cmds` |
+| Subscription | `~/twist_cmds` (`geometry_msgs/msg/TwistStamped`) | i.e. `/cartesian_jog_controller/twist_cmds`, `header.frame_id` selects the frame |
 
 The joint names, joint limits and the TCP are **not** parameters. They come from the URDF
 (`robot_description`) through `robotarm_rbd`. That way the controller cannot disagree with the
 kinematic model.
 
 **Twist convention:** `linear` is the velocity of the **TCP origin** in m/s, `angular` the angular
-velocity in rad/s, both expressed in the **base frame**. Each component is clamped to
-`max_linear_velocity` / `max_angular_velocity` (a per-axis box, see
-[limitations](#known-limitations-and-roadmap)). Non-finite messages are dropped.
+velocity in rad/s. The frame the components are expressed in is selected by `header.frame_id`:
+
+| `header.frame_id` | Frame |
+|---|---|
+| empty, or the root link of the chain (`Base_1`) | **base frame** |
+| the TCP link (`tcp`) | **tool frame**: axes of the TCP, rotate about the TCP |
+| anything else | message dropped (throttled warning) |
+
+Both names come from the URDF through `robotarm_rbd`, like the joints. In both frames the reference
+point is the TCP, so a pure rotation turns the tool in place. Each component is clamped to
+`max_linear_velocity` / `max_angular_velocity` **in the commanded frame** (a per-axis box, see
+[limitations](#known-limitations-and-roadmap)), so every axis of the operator interface has the
+same limit, whatever the orientation of the tool. Non-finite messages are dropped.
+
+The `header.stamp` is not used (see the watchdog below), so sender and controller clocks don't need
+to be synchronized.
 
 **Command timeout (watchdog):** a non-zero twist that is older than 250 ms (no new message) is
-set to zero, so Ruckig brakes smoothly. A publisher therefore has to keep sending at > 4 Hz while
-jogging. The age is measured with the controller manager's `time` from the cycle in which the
+set to zero, so Ruckig brakes smoothly (the frame is kept, so a timeout never causes a frame
+switch). A publisher therefore has to keep sending at > 4 Hz while jogging, also while a value is
+held constant. The age is measured with the controller manager's `time` from the cycle in which the
 message is first seen (a receive counter in the realtime box detects new messages), so there is
 no clock mixing with the subscriber thread. On activation, the box and the local command are
 reset, so a twist received while inactive is never replayed.
@@ -158,8 +172,15 @@ ros2 control switch_controllers --activate cartesian_jog_controller --deactivate
 Send a twist, e.g. 2 cm/s along base x:
 
 ```bash
-ros2 topic pub -r 50 /cartesian_jog_controller/twist_cmds geometry_msgs/msg/Twist \
-  "{linear: {x: 0.02, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+ros2 topic pub -r 50 /cartesian_jog_controller/twist_cmds geometry_msgs/msg/TwistStamped \
+  "{header: {frame_id: ''}, twist: {linear: {x: 0.02, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}"
+```
+
+or 2 cm/s along the tool z axis (e.g. towards the workpiece):
+
+```bash
+ros2 topic pub -r 50 /cartesian_jog_controller/twist_cmds geometry_msgs/msg/TwistStamped \
+  "{header: {frame_id: 'tcp'}, twist: {linear: {x: 0.0, y: 0.0, z: 0.02}, angular: {x: 0.0, y: 0.0, z: 0.0}}}"
 ```
 
 The example publishes at 50 Hz (`-r 50`). A single `--once` message only moves the arm for 250 ms
@@ -194,13 +215,17 @@ which re-seeds everything.
 
 In code order (`update()` in [src/CartesianJogController.cpp](src/CartesianJogController.cpp)):
 
-1. Take the latest twist from the realtime box (stamped with `time` if new), run the **watchdog**
-   (zero a non-zero twist older than 250 ms) and clamp it per axis.
+1. Take the latest twist and its frame from the realtime box (stamped with `time` if new), run the
+   **watchdog** (zero a non-zero twist older than 250 ms) and clamp it per axis in the commanded
+   frame $F$.
 2. Read the joint state (best effort) and run the **tracking check** $\lvert q_{cmd} - q_{meas}\rvert$.
 3. Compute $J^+$ and $J$ at $q_{cmd}$.
-4. **Pre-scaling:** predict $\dot q_{pred} = J^+ \dot x_{target}$, compute the joint velocity factor and the
-   one-sided position limit factor, and scale the target twist by their minimum.
-5. **Ruckig** smooths the scaled target into the feedforward twist $\dot x_{ff}$.
+4. **Pre-scaling:** rotate the target into base, predict $\dot q_{pred} = J^+ R_{base,F}\,\dot x_{target}$,
+   compute the joint velocity factor and the one-sided position limit factor, and scale the target
+   twist (still in $F$) by their minimum.
+5. **Ruckig** runs in $F$. If $F$ changed, its state is rotated into the new frame first. It
+   smooths the scaled target, and the output is rotated into base: the feedforward twist $\dot x_{ff}$.
+   Everything from here on is in base.
 6. **Drift correction:** pose error between `x_ref` and $FK(q_{cmd})$, times gain, norm clamped.
 7. $\dot q_{cmd} = J^+(\dot x_{ff} + \dot x_{corr})$, then the **post-scaling** factor $s$ as a backstop.
 8. Integrate $q_{cmd}$, advance `x_ref` by the realized feedforward $s\,J J^+ \dot x_{ff}$.
@@ -232,8 +257,10 @@ coordinates** (Pinocchio calls this `LOCAL_WORLD_ALIGNED`). This is the natural 
 
 The commanded twist has to use the same convention:
 
-- **Tool-frame jogging** (on the roadmap): rotate the incoming twist into base axes,
-  $v_{base} = R\,v_{tool}$, $\omega_{base} = R\,\omega_{tool}$, with $R$ the TCP orientation.
+- **Tool-frame jogging**: rotate the twist into base axes,
+  $v_{base} = R\,v_{tool}$, $\omega_{base} = R\,\omega_{tool}$, with $R$ the TCP orientation. Only
+  the axes change, the reference point stays the TCP. Where exactly this rotation happens matters
+  for smoothness, see [Ruckig in the commanded frame](#ruckig-in-the-commanded-frame).
 - **Another reference point** $p$: the linear part changes, the angular part doesn't:
   $v_{tcp} = v_p + \omega \times (p_{tcp} - p)$.
 
@@ -381,6 +408,51 @@ Points that matter:
   right choice for position increments or direction-type inputs (spacemouse), not for per-axis
   sliders.
 - Limits are **per DOF**: a diagonal xyz jog can reach $\sqrt{3}\times$ the per-axis speed.
+
+#### Ruckig in the commanded frame
+
+Ruckig runs in the frame of the current command ($F$ = base or tool), not always in base. Its
+output is rotated into base afterwards with $R_{base,F}$ (identity for base, `x_ref.linear()` for
+tool, both at the start of the cycle):
+
+```cpp
+dx_ff = R_base_F * output.new_velocity;          // linear and angular half separately
+```
+
+Why not rotate the tool twist into base *before* Ruckig? A constant tool-frame twist with
+translation **and** rotation is a screw motion: in base its linear part keeps turning ($\dot v_{base}
+= \omega \times v_{base}$). Ruckig only sees the current target and chases it, so the velocity
+trails slightly behind the target (about $a^2/2j$, roughly 0.15° at the default limits). In the
+commanded frame the target is constant, Ruckig sits exactly on it, and the rotation into base is
+applied exactly. It also keeps the per-axis limits and the synchronization on the axes the operator
+actually moves.
+
+The scaling factors are computed in base (the Jacobian is in base) but are scalars, and a scalar
+times a twist is the same in every frame. So only the *prediction* uses the rotated twist; the
+target handed to Ruckig stays in $F$. The `s < 1` re-sync and `pass_to_input` work in $F$ unchanged.
+
+**Frame switch.** When a command arrives in a different frame than Ruckig's state, the state is
+rotated into the new frame before the update, with $R_{new,old} = R$ (tool → base) or $R^T$
+(base → tool):
+
+```cpp
+current_velocity     = R_new_old * current_velocity;      // linear and angular half separately
+current_acceleration = R_new_old * current_acceleration;
+```
+
+The velocity is exact (a snapshot, just new coordinates). The acceleration isn't quite: Ruckig's
+acceleration is the derivative of its velocity *coordinates*, and the tool frame turns. With
+$v_{base} = R\,v_{tool}$ and $\dot R = R\,[\omega_{tool}]_\times$:
+
+$$
+\dot v_{tool} = R^T a_{base} - \omega_{tool}\times v_{tool}
+$$
+
+The $\omega \times v$ term is dropped. This is a jump of $\lvert\omega\rvert\lvert v\rvert$ in the
+starting acceleration of the next plan (0.05 m/s² at the default limits, a tenth of the
+acceleration limit), only when switching while translating *and* rotating. The angular part is
+exact ($\omega \times \omega = 0$). With jog sliders that snap back to zero, switches usually happen
+at rest, where nothing is rotated at all.
 
 #### What smooth Cartesian motion does *not* guarantee in joint space
 
@@ -687,6 +759,9 @@ values. A failed activation is harmless: just activate again.
   Joint-space vectors therefore always stay `VectorXd`.
 - `robotarm_rbd` is allocation-free after `initialize()` (it has its own scratch buffers and
   error buffer).
+- The realtime box holds a `geometry_msgs/Twist` plus a `Frame` enum, not the `TwistStamped`:
+  `header.frame_id` is a `std::string`, and copying it in `update()` can allocate. The string is
+  matched to the enum in the subscriber callback, outside the realtime thread.
 - `test_cartesian_jog_rt_alloc` enforces all of this from the very first cycle after activation.
 
 ### Known limitations and roadmap
@@ -696,7 +771,8 @@ values. A failed activation is harmless: just activate again.
 | ~~Command timeout (watchdog)~~ | **Done.** A non-zero twist older than 250 ms is set to zero, see [interfaces](#interfaces). Timeout is hard-coded (`twist_cmd_timeout_`), not a parameter. |
 | **Singularity slowdown** | Missing as an explicit term. Velocity pre-scaling already slows down as $J^+$ grows. Planned: condition number $\kappa$, one-sided (MoveIt Servo style: compare $\kappa$ at $q + \dot q_{pred}\delta$). |
 | **Adaptive damping** | Planned in `RobotarmRbd::calculate_jacobian_inverse`, removes the DLS error far from singularities (background 2). |
-| **Tool-frame jogging** | Planned: rotate the twist with the TCP orientation before everything else. |
+| ~~Tool-frame jogging~~ | **Done.** Selected with `header.frame_id`, Ruckig runs in the commanded frame, see [Ruckig in the commanded frame](#ruckig-in-the-commanded-frame). |
+| Frame switch acceleration | The $\omega \times v$ term is dropped when Ruckig's state is rotated into the new frame (small jump in the starting acceleration, only when switching while translating and rotating). |
 | **Position increments** | Planned: Ruckig in `Position` mode with `Phase` sync. Seed the linear position from `x_ref`, angular as 0 relative to $R_{start}$; exact for a fixed rotation axis. |
 | Per-axis twist clamp | Box limit: a diagonal motion can reach $\sqrt3\times$ the per-axis speed. |
 | Hard clamp not in `x_ref` | Correction pushes against an active clamp (bounded); should never trigger with a sized zone. |
