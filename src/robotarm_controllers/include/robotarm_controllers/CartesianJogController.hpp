@@ -15,6 +15,7 @@
 #include <chrono>
 #include <Eigen/Geometry>
 
+#include "robotarm_interface/msg/cartesian_increment.hpp"
 #include "robotarm_rbd/RobotarmRbd.hpp"
 
 namespace cartesian_jog_controller
@@ -71,7 +72,14 @@ public:
         double margin = 0.0;    // rad, stop distance before the limit
     };
 
+    struct IncrementLimit
+    {
+        double linear = 0.0;        // m
+        double angular = 0.0;       // rad
+    };
+
     enum class Frame { BASE, TOOL };
+    enum class Mode { JOG, INCREMENT };
 
     // local timestamp to each twist cmd for watchdog
     struct TwistCmd
@@ -84,6 +92,12 @@ public:
     {
         TwistCmd cmd;
         rclcpp::Time stamp;
+    };
+
+    struct PendingIncrementCmd
+    {
+        Eigen::Matrix<double, 6, 1> base = Eigen::Matrix<double, 6, 1>::Zero();
+        Eigen::Matrix<double, 6, 1> tool = Eigen::Matrix<double, 6, 1>::Zero();
     };
 
 public:
@@ -107,11 +121,16 @@ public:
     controller_interface::CallbackReturn on_deactivate(
         const rclcpp_lifecycle::State & previous_state) override;
 
+    controller_interface::CallbackReturn on_cleanup(
+        const rclcpp_lifecycle::State & previous_state) override;
+
     controller_interface::return_type update(
         const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
     void watchdog(const rclcpp::Time &time);
+    void start_increment_run(Frame frame);
+    void end_increment_run();
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
     // all joints or fail, for a valid start in on_activate
@@ -141,15 +160,22 @@ private:
     double max_tracking_error_ = 0.0;   // rad, max |q_cmd - q_meas| per joint before stopping
     double joint_velocity_scale_ = 1.0; // fraction of the urdf joint velocity limits used while jogging
     PositionLimitParams position_limit_;
+    IncrementLimit increment_limits_;
 
+    Mode mode_ = Mode::JOG;
+
+    // sub and rt container for twist cmd
     rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr twist_cmd_subscriber_;
-
-    // the realtime container to exchange the reference from subscriber
     realtime_tools::RealtimeThreadSafeBox<TwistCmd> rt_command_twist_;
     TwistCmdStamped twist_cmd_;
     rclcpp::Duration twist_cmd_timeout_ = {std::chrono::milliseconds(250)};
 
+    //sub and rt container for increment cmd
+    rclcpp::Subscription<robotarm_interface::msg::CartesianIncrement>::SharedPtr inc_cmd_subscriber_;
+    realtime_tools::RealtimeThreadSafeBox<PendingIncrementCmd> rt_command_inc_;
+
     static constexpr size_t num_states_per_joint_ = 2;
+    static constexpr double min_increment_scale_ = 0.01;    // below: increment run aborted in front of a joint limit
 };
 
 }

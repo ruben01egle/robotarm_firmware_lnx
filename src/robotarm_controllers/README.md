@@ -25,6 +25,7 @@ active at a time.
   - [Background 4: smooth motion with Ruckig](#background-4-smooth-motion-with-ruckig)
   - [Background 5: limiting without breaking smoothness](#background-5-limiting-without-breaking-smoothness)
   - [Background 6: closing the loop, x_ref and drift correction](#background-6-closing-the-loop-x_ref-and-drift-correction)
+  - [Background 7: incremental moves](#background-7-incremental-moves)
   - [Safety and error handling](#safety-and-error-handling)
   - [Realtime considerations](#realtime-considerations)
   - [Known limitations and roadmap](#known-limitations-and-roadmap)
@@ -51,8 +52,8 @@ caught as well. A negative control test makes sure the counter is actually activ
 
 ## CartesianJogController
 
-The controller moves the tool center point (TCP) with a commanded Cartesian velocity (a *twist*).
-It does four things:
+The controller moves the tool center point (TCP) with a commanded Cartesian velocity (a *twist*),
+or by small relative steps (*increments*, e.g. "1 mm along x"). It does four things:
 
 - smooths the twist with jerk-limited acceleration (Ruckig),
 - keeps joint velocities and joint position limits within bounds without bending the path,
@@ -68,6 +69,7 @@ It does four things:
 | Command interfaces | `<joint>/position`, `<joint>/velocity` | for every joint of the kinematic chain, interleaved per joint |
 | State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
 | Subscription | `~/twist_cmds` (`geometry_msgs/msg/TwistStamped`) | i.e. `/cartesian_jog_controller/twist_cmds`, `header.frame_id` selects the frame |
+| Subscription | `~/increment_cmds` (`robotarm_interface/msg/CartesianIncrement`) | relative steps, `header.frame_id` selects the frame like for twists, see [incremental moves](#incremental-moves) |
 
 The joint names, joint limits and the TCP are **not** parameters. They come from the URDF
 (`robot_description`) through `robotarm_rbd`. That way the controller cannot disagree with the
@@ -86,7 +88,8 @@ Both names come from the URDF through `robotarm_rbd`, like the joints. In both f
 point is the TCP, so a pure rotation turns the tool in place. Each component is clamped to
 `max_linear_velocity` / `max_angular_velocity` **in the commanded frame** (a per-axis box, see
 [limitations](#known-limitations-and-roadmap)), so every axis of the operator interface has the
-same limit, whatever the orientation of the tool. Non-finite messages are dropped.
+same limit, whatever the orientation of the tool. The clamp happens in the subscriber callback, so
+the realtime loop only ever sees valid twists. Non-finite messages are dropped.
 
 The `header.stamp` is not used (see the watchdog below), so sender and controller clocks don't need
 to be synchronized.
@@ -98,6 +101,46 @@ held constant. The age is measured with the controller manager's `time` from the
 message is first seen (a receive counter in the realtime box detects new messages), so there is
 no clock mixing with the subscriber thread. On activation, the box and the local command are
 reset, so a twist received while inactive is never replayed.
+
+**Recommended sender protocol:** publish the twist only while a jog button is held, plus **one zero
+twist** on release and for a stop button. Nothing is sent while idle. Every new twist message
+(zero included) also ends a running increment, see below. An emergency stop does not go through
+this topic: deactivate the controller (and use the hardware e-stop).
+
+#### Incremental moves
+
+`~/increment_cmds` moves the TCP by a relative step instead of a velocity. One message is one step,
+e.g. `linear.x = 0.001` is 1 mm along x:
+
+```
+# robotarm_interface/msg/CartesianIncrement
+std_msgs/Header header          # frame_id: '' or base link → base, tcp → tool (as for twists)
+geometry_msgs/Vector3 linear    # m, per axis
+geometry_msgs/Vector3 angular   # rad, per axis (not a rotation vector)
+```
+
+- Each component is **clamped** to `max_increment_linear` / `max_increment_angular`. The sender
+  chooses the step size (e.g. 1, 2 or 3 mm buttons), the controller only bounds it.
+- Steps **add up**: three messages of +1 mm give 3 mm, also when they arrive while the arm is
+  still moving. Several messages within one control cycle are not lost.
+- A group of steps that belong together is called a **run**. A run starts with the first step
+  that is accepted and ends when the target is reached. While it runs, the controller is in
+  *increment mode*; otherwise it is in *jog mode*.
+
+| Situation | What happens |
+|---|---|
+| Step while jogging is idle (twist zero, Ruckig at rest) | a run starts in the frame of the step |
+| Step during a run, same frame | added to the run's target |
+| Step during a run, other frame | dropped (throttled warning) |
+| Step while jogging or still braking | dropped (throttled warning) |
+| Steps in base and tool frame within the same cycle while idle | dropped (throttled warning) |
+| Target reached | back to jog mode, the arm is at rest |
+| Any new twist message during a run | run ends, jog mode continues smoothly from the current motion |
+| A joint gets stuck in front of its position limit | run aborted, the arm brakes (throttled warning) |
+
+There is no feedback topic. A step the arm can't (fully) do is simply not (fully) done; the sender
+sees the result in the TCP pose. What is exact and what isn't is explained in
+[background 7](#background-7-incremental-moves).
 
 #### Parameters
 
@@ -123,6 +166,8 @@ acceleration or jerk limits only show up as a Ruckig error on the first `update(
 | `joint_velocity_scale` | `0.2` | – | (0, 1] | Fraction of the URDF joint velocity limits used while jogging |
 | `joint_limit_zone` | `0.2` | rad | > 0 | Width of the slow-down zone in front of a joint position limit |
 | `joint_limit_margin` | `0.02` | rad | ≥ 0 | The joint stops this far before its position limit |
+| `max_increment_linear` | `0.003` | m | > 0 | Per-axis clamp of one linear increment step |
+| `max_increment_angular` | `0.0524` | rad | > 0 | Per-axis clamp of one angular increment step (3°) |
 
 `dt` in the `kp` check is `1 / update_rate` of the controller manager. With the 500 Hz from
 `robotarm_bringup`, `kp < 500 1/s`. Values of 10–20 1/s are plenty, see
@@ -158,6 +203,8 @@ cartesian_jog_controller:
     joint_velocity_scale: 0.2
     joint_limit_zone: 0.2
     joint_limit_margin: 0.02
+    max_increment_linear: 0.003
+    max_increment_angular: 0.0524
 ```
 
 #### Running it
@@ -186,15 +233,23 @@ ros2 topic pub -r 50 /cartesian_jog_controller/twist_cmds geometry_msgs/msg/Twis
 The example publishes at 50 Hz (`-r 50`). A single `--once` message only moves the arm for 250 ms
 before the watchdog stops it. Stopping the publisher stops the arm.
 
+An increment is a single message, e.g. 1 mm along base x:
+
+```bash
+ros2 topic pub --once /cartesian_jog_controller/increment_cmds robotarm_interface/msg/CartesianIncrement \
+  "{header: {frame_id: ''}, linear: {x: 0.001, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+```
+
 #### Lifecycle behavior
 
 | Transition | What happens |
 |---|---|
 | `on_init` | Declares the parameters. |
-| `on_configure` | Reads and validates parameters, initializes the kinematic model from the URDF, scales the joint velocity limits, sizes all buffers, creates the subscription. |
-| `on_activate` | Reads the joint state (strict: all joints or fail), seeds `q_cmd` with it, commands velocity 0, computes `x_ref = FK(q_cmd)`, resets Ruckig to rest and the twist to zero. |
+| `on_configure` | Reads and validates parameters, initializes the kinematic model from the URDF, scales the joint velocity limits, sizes all buffers, creates both subscriptions. |
+| `on_activate` | Reads the joint state (strict: all joints or fail), seeds `q_cmd` with it, commands velocity 0, computes `x_ref = FK(q_cmd)`, resets Ruckig to rest, the twist to zero, the pending increments and the mode to jog. |
 | `update` | One control cycle, see below. |
 | `on_deactivate` | Nothing. The hardware holds position when the interfaces are released. |
+| `on_cleanup` | Destroys both subscriptions. Their callbacks read parameters and frame names, which a following `on_configure` rewrites. |
 
 If `update()` returns `ERROR`, the controller manager **deactivates the controller in the same
 cycle** (and the hardware holds position). The controller has to be activated again explicitly,
@@ -203,7 +258,8 @@ which re-seeds everything.
 ### Overview of one control cycle
 
 ```
- twist_cmds ─► clamp ─► [pre-scaling: joint velocity + position limits] ─► Ruckig (velocity mode)
+ jog:        twist_cmds ─► [pre-scaling: scale the target twist] ───────► Ruckig (velocity mode)
+ increment:  increment_cmds ─► Σ steps ─► [pre-scaling: scale max_velocity] ─► Ruckig (position mode)
                                                                                 │ dx_ff (smooth)
                     x_ref ⊖ FK(q_cmd) ─► Kp, clamp ─► dx_corr                   │
                                                           └──────► (+) ◄────────┘
@@ -213,25 +269,36 @@ which re-seeds everything.
                                        x_ref ⊕= s·J·J⁺·dx_ff·dt
 ```
 
+The controller has two modes, *jog* and *increment*. They share the whole cycle; where they
+differ, the step has one path per mode, so the flow of information is always the same.
+
 In code order (`update()` in [src/CartesianJogController.cpp](src/CartesianJogController.cpp)):
 
-1. Take the latest twist and its frame from the realtime box (stamped with `time` if new), run the
-   **watchdog** (zero a non-zero twist older than 250 ms) and clamp it per axis in the commanded
-   frame $F$.
+1. **Commands.** Take the latest twist (already clamped in the callback) and the pending increment
+   steps from their realtime boxes.
+   - *jog:* adopt a new twist (stamped with `time`), otherwise run the **watchdog** (zero a non-zero
+     twist older than 250 ms). Steps while idle start an increment run.
+   - *increment:* a new twist ends the run and is adopted.
 2. Read the joint state (best effort) and run the **tracking check** $\lvert q_{cmd} - q_{meas}\rvert$.
 3. Compute $J^+$ and $J$ at $q_{cmd}$.
-4. **Pre-scaling:** rotate the target into base, predict $\dot q_{pred} = J^+ R_{base,F}\,\dot x_{target}$,
-   compute the joint velocity factor and the one-sided position limit factor, and scale the target
-   twist (still in $F$) by their minimum.
-5. **Ruckig** runs in $F$. If $F$ changed, its state is rotated into the new frame first. It
-   smooths the scaled target, and the output is rotated into base: the feedforward twist $\dot x_{ff}$.
-   Everything from here on is in base.
-6. **Drift correction:** pose error between `x_ref` and $FK(q_{cmd})$, times gain, norm clamped.
-7. $\dot q_{cmd} = J^+(\dot x_{ff} + \dot x_{corr})$, then the **post-scaling** factor $s$ as a backstop.
-8. Integrate $q_{cmd}$, advance `x_ref` by the realized feedforward $s\,J J^+ \dot x_{ff}$.
-9. Hard clamp $q_{cmd}$ to the joint position limits (backstop).
-10. Advance Ruckig's state (`pass_to_input`, or re-sync if $s<1$).
-11. Write $q_{cmd}$ and $\dot q_{cmd}$ to the command interfaces.
+4. **Frame** $F$ of this cycle: the twist frame (jog) or the run's frame (increment).
+5. **Pre-scaling**, then write Ruckig's input.
+   - *jog:* rotate the target into base, predict $\dot q_{pred} = J^+ R_{base,F}\,\dot x_{target}$,
+     compute the joint velocity factor and the one-sided position limit factor, and scale the
+     target twist (still in $F$) by their minimum. If $F$ changed, Ruckig's state is rotated into
+     the new frame.
+   - *increment:* add the new steps to the target position, predict the worst case joint velocity
+     over all *corners* ([background 7](#background-7-incremental-moves)) and scale Ruckig's
+     `max_velocity` by the factor. Abort the run if the factor drops below 0.01.
+6. **Ruckig** runs in $F$. The output is rotated into base: the feedforward twist $\dot x_{ff}$.
+   *increment:* `Finished` ends the run. Everything from here on is in base and the same for both
+   modes.
+7. **Drift correction:** pose error between `x_ref` and $FK(q_{cmd})$, times gain, norm clamped.
+8. $\dot q_{cmd} = J^+(\dot x_{ff} + \dot x_{corr})$, then the **post-scaling** factor $s$ as a backstop.
+9. Integrate $q_{cmd}$, advance `x_ref` by the realized feedforward $s\,J J^+ \dot x_{ff}$.
+10. Hard clamp $q_{cmd}$ to the joint position limits (backstop).
+11. Advance Ruckig's state (`pass_to_input`, or re-sync if $s<1$, including the position step).
+12. Write $q_{cmd}$ and $\dot q_{cmd}$ to the command interfaces.
 
 The following sections explain each of these steps.
 
@@ -405,8 +472,8 @@ Points that matter:
 - **Synchronization `None`:** each axis is its own slider and ramps at its own maximum rate. `Time`
   (all DOFs finish together) would slow fast axes down and couple them: nudging x would replan y. A
   direction-preserving straight line in velocity space would be `Phase`, not `Time`. That's the
-  right choice for position increments or direction-type inputs (spacemouse), not for per-axis
-  sliders.
+  right choice for direction-type inputs (spacemouse), not for per-axis sliders. Increments use
+  `None` as well, see [background 7](#synchronization-none-not-phase).
 - Limits are **per DOF**: a diagonal xyz jog can reach $\sqrt{3}\times$ the per-axis speed.
 
 #### Ruckig in the commanded frame
@@ -694,6 +761,218 @@ What this buys and what it costs:
 - Ruckig is **not** re-synced to the realized twist. It keeps the operator's smoothed intent;
   syncing it would make jogging at the workspace edge feel sticky.
 
+### Background 7: incremental moves
+
+An increment ("move 1 mm along x") is a position goal, while everything so far works with
+velocities. The tempting designs bring a lot of extra machinery. The one used here needs almost
+none, because it reuses the jog pipeline and only changes **what goes into Ruckig**.
+
+#### The idea: a second input to the same Ruckig
+
+| | Jog mode | Increment mode |
+|---|---|---|
+| Ruckig `control_interface` | `Velocity` | `Position` |
+| Input | `target_velocity = scaled twist` | `target_position += step` per click |
+| Ruckig state | own output (`pass_to_input`) | own output (`pass_to_input`) |
+| Used downstream | `new_velocity` only | `new_velocity` only |
+| Pre-scaling acts on | the target twist | `max_velocity` |
+| Everything after Ruckig | identical | identical |
+
+Downstream nothing knows that an increment is running: $\dot x_{ff}$ is Ruckig's `new_velocity`,
+rotated into base, exactly as while jogging. Ruckig's positions never leave Ruckig. They are only
+bookkeeping for the run:
+
+- they count **from the start of the run**: `current_position = 0`, `target_position = 0` when it
+  starts (velocity mode keeps integrating a position nobody uses, so it has to be reset),
+- clicks add up in `target_position`,
+- `target_position − current_position` is what's left of the run (used for the pre-scaling),
+- `Finished` tells when the run is done.
+
+**Why the distance comes out right.** Ruckig plans a velocity profile from rest to rest whose
+integral is the step. The controller integrates exactly that velocity into `q_cmd` and `x_ref`.
+Ruckig integrates exactly, the controller per cycle as $\sum v_k\,\Delta t$ with the velocity at the
+end of each cycle. Because the profile starts and ends at $v = 0$, that sum equals the trapezoidal
+rule, whose error is $\propto \Delta t^2\,(a_{end} - a_{start}) = 0$. 1 mm stays 1 mm to far below
+a µm.
+
+#### Why Ruckig is fed only its own state
+
+The obvious alternative is to close a loop around Ruckig: keep a goal pose `x_goal` and recompute
+Ruckig's current position from `x_ref` every cycle ("how far is the arm really from the goal?").
+That's exact, but it was rejected, because every problem the arm has leaks into Ruckig:
+
+- when the arm can't follow (singularity, workspace edge), Ruckig's position stands still and
+  `Finished` never comes, so a stuck detection with timeouts or progress checks is needed,
+- Ruckig's velocity keeps "cruising" in a direction nothing moves in (a phantom velocity), which
+  must be cleaned up before handing over to jogging,
+- Ruckig replans every cycle, so its planned duration is useless as a deadline.
+
+Feeding Ruckig only its own output (its **intent**) makes all of that disappear, and it's the same
+philosophy as jog mode ([background 6](#background-6-closing-the-loop-x_ref-and-drift-correction)):
+Ruckig holds the intent, `x_ref` follows what is realized, and what the arm can't do simply isn't
+done, without windup. `Finished` is then guaranteed: every plan reaches the target, lower limits
+only make it later. The price is the same as while jogging: near singularities the arm falls short
+of the step by what $J J^+$ swallows.
+
+#### Getting the steps into the realtime loop
+
+The jog box only holds the **latest** twist. That's right for a velocity, but wrong for steps:
+two clicks between two cycles would lose one. So increments have their own box that **collects**:
+
+```cpp
+struct PendingIncrementCmd { Vector6d base, tool; };   // one slot per frame
+
+// callback (non-RT): static checks, clamp, then add to the slot of its frame
+// update() (RT):      try_set([&](PendingIncrementCmd& p){ taken = p; p = {}; })   // take and clear
+```
+
+- Adding and taking happen under the box's lock, so nothing is lost or counted twice. If the RT
+  side doesn't get the lock, the steps simply wait for the next cycle.
+- **One slot per frame**, so a click in the wrong frame can't block or mix with the right ones.
+- The callback only does checks that depend on the message alone (finite, clamp, frame name).
+  Whether a step is *accepted* depends on the controller state (mode, run frame, Ruckig at rest),
+  and that state lives in `update()`. Reading it from the callback would be a data race, and the
+  state could change between the check and the moment `update()` sees the step anyway.
+
+#### Synchronization: `None`, not `Phase`
+
+With `Phase`, all axes move on a straight line, but only if Ruckig's current motion is collinear
+with the remaining distance. A second click on another axis while the first is still moving breaks
+that, and Ruckig falls back to `Time` sync: all axes must finish together, so **the first axis
+suddenly slows down** to wait for the second. With `None`, every axis has its own time-optimal
+profile: x finishes its step as if nothing happened, y runs its own, the path is a rounded L. With
+one axis per click both are identical anyway.
+
+#### Pre-scaling without a target velocity
+
+In jog mode the pre-scaling scales the operator's twist. In position mode there is no target
+velocity; Ruckig decides how fast it goes. The lever is the limit instead: velocity mode ignores
+`max_velocity`, position mode enforces it. So
+
+$$
+\texttt{max\_velocity}_i = s \cdot v_{max,i}
+$$
+
+with the same $s$ for all six DOFs. **Only the velocity is scaled**: what's protected are joint
+velocity limits and the velocity ramp in front of position limits. A lower acceleration limit would
+only make braking weaker, i.e. the braking distance in front of a joint limit longer.
+
+The scaling is **exact, not conservative**: $s\cdot v_{max}$ is the highest speed the joints allow,
+and Ruckig moves at $\min(\text{own peak}, s\cdot v_{max})$. A 2 mm step peaks at about 17 mm/s
+with the default jerk limits, so a cap of $s\cdot 100$ mm/s only has an effect below $s \approx 0.17$.
+
+**What twist to predict with?** With `None`, every axis that still has distance to go moves
+somewhere between standstill and full speed towards its target, independently of the others:
+
+$$
+v_i \in [\,0,\ \operatorname{sign}(d_i)\,v_{max,i}\,], \qquad d = \texttt{target\_position} - \texttt{current\_position}
+$$
+
+All twists that can occur form a **box** (a rectangle for two moving axes):
+
+```
+ v_y
+ −vmax ┌───────────┐            example: d = (+2 mm, −1 mm, 0, ...)
+       │  possible │            x moves forwards: v_x ∈ [0, +vmax]
+       │   twists  │            y moves backwards: v_y ∈ [0, −vmax]
+     0 └───────────┘
+       0          +vmax  v_x
+```
+
+The pre-scaling has to hold for **every** point of the box, e.g. right after a click on y, x is
+still at full speed while y hasn't started yet.
+
+**The worst case is always at a corner.** A joint velocity is linear in the twist:
+$\dot q_j = a\,v_x + b\,v_y$ (a row of $J^+$). Hold $v_y$ fixed: a linear function of $v_x$ is
+largest at one end of its interval, never in the middle. The same holds for $v_y$, so the worst
+point has both at an end, i.e. it's a corner. Instead of infinitely many points, only the corners
+have to be checked.
+
+**All corners, not just "everything at full speed".** Example: $a = +3$, $b = -2$ (x pushes joint
+$j$ forwards, y backwards), joint limit 0.25 rad/s, $v_{max} = 0.1$:
+
+| Corner | Situation | $\dot q_j$ |
+|---|---|---|
+| (0.1, 0) | x at full speed, y not yet moving | **+0.3** rad/s |
+| (0, −0.1) | x done, y at full speed | +0.2 rad/s |
+| (0.1, −0.1) | both at full speed | +0.5 rad/s |
+
+Here both axes add up, so "both at full speed" happens to be the worst. With $b = +2$ instead, the
+axes cancel: "both" gives 0.1 rad/s, while "x alone" gives 0.3 rad/s. Checking only "both" would
+then give $s = 1$, although the joint would run at 1.2× its limit right after the click.
+
+**Building the corners.** Start with one corner (standstill). Every moving axis doubles the list:
+each corner so far once without and once with that axis at full speed:
+
+```
+start:     [ (0, 0) ]
+axis x:    [ (0, 0), (+v, 0) ]
+axis y:    [ (0, 0), (+v, 0), (0, −v), (+v, −v) ]
+```
+
+Every corner except the first (standstill) then gets the same prediction as a jog twist: rotate
+into base, $\dot q_{pred} = J^+ \dot x_{corner}$, joint velocity factor and position limit factor.
+$s$ is the minimum over all corners. One moving axis gives one corner (the jog prediction once),
+two give 3, all six at most 63. The corners live in a `std::array` of 64 fixed-size vectors on the
+stack (64 = $2^6$, all six axes moving), so nothing is allocated.
+
+**Not covered: an axis that reverses.** +1 mm and right after −2 mm on the same axis: Ruckig first
+brakes, then reverses. While braking, the axis moves against $\operatorname{sign}(d_i)$, which the
+box doesn't contain. That's accepted: braking only lowers the speed, the braking distance of
+millimeter steps is tiny, and the post-scaling and the hard clamp are the backstop.
+
+**Abort in front of a joint limit.** In the slow-down zone the position limit factor goes to 0 at
+the margin. In jog mode that's harmless (target 0 means stop). In position mode it's not: with
+`max_velocity = 0` and distance left, Ruckig has no solution and returns an error, which would
+deactivate the controller; with a tiny limit it crawls asymptotically and never finishes. So
+`s < 0.01` ends the run: Ruckig switches to velocity mode with target 0 and brakes from its current
+(already slow) state. Clicks towards the limit then do nothing, clicks away from it work, because
+the position limit factor is one-sided.
+
+#### Post-scaling and the resync of the position
+
+When the post-scaling clips ($s < 1$), only the fraction $s$ of this cycle's step is executed. Ruckig
+would otherwise believe it moved the full step and report `Finished` short of the target. So the
+resync also advances the position only by the executed part:
+
+```cpp
+current_position += s * (new_position - current_position);    // plus velocity, acceleration as before
+```
+
+In velocity mode Ruckig ignores positions, so this line runs in both modes.
+
+#### Ending a run
+
+- `Finished` in increment mode → back to velocity mode with target 0. Ruckig is at rest, the handover
+  is seamless. The mode check matters: in velocity mode Ruckig also reports `Finished` as soon as the
+  target velocity is reached, i.e. almost always while jogging.
+- A new twist message → velocity mode **from the current state** (velocity and acceleration are not
+  reset), so the arm continues or brakes without a jump. If the twist is in another frame, the
+  normal frame switch rotates Ruckig's state.
+- `s < 0.01` → abort, see above.
+
+#### What is exact
+
+Ruckig integrates each component of $\omega$ separately, while `x_ref` composes rotations
+([background 3](#background-3-orientation-integration-and-error)). Both agree only while the
+rotation axis doesn't change. Rotations don't commute ("10° about x, then 10° about y" ≠ the other
+order), the difference is about $\tfrac12\,\theta_1\theta_2$.
+
+| Case | Exact? |
+|---|---|
+| translations, any number of axes, also overlapping | yes |
+| rotation about **one** axis, any size | yes |
+| base frame: translation and rotation at the same time | yes (translate the TCP, rotate about the TCP) |
+| clicks that don't overlap in time | yes, each step is done before the next starts |
+| rotations about different axes overlapping in time | no: error $\approx \tfrac12\,\theta_1\theta_2$, e.g. 3° + 3° → 0.08° |
+| tool frame: translation while rotating | no: the translation follows the turning tool axes |
+
+Plus, as in jog mode: near singularities the arm falls short of the step ($J J^+$), and "1 mm" means
+1 mm of `x_ref` in the URDF model, so the real arm is as accurate as its calibration. Moves are
+relative and the operator sees the resulting pose, so this is the right trade for a jogger. Exact
+paths or target poses (straight lines between poses, arcs, screw motions) are the job of a
+planner, not of this controller.
+
 ### Safety and error handling
 
 **Tracking check.** Every cycle, before anything is computed:
@@ -726,6 +1005,7 @@ real failures:
 | Ruckig `result < 0` | `ERROR` (error code logged) |
 | State read misses (`get_optional()` → `nullopt`) | keep last value, continue, throttled warning |
 | Joint space clipping ($s<1$), hard position clamp | continue, throttled warning |
+| Increment dropped (moving, wrong frame) or run aborted at a joint limit | continue, throttled warning |
 
 Logs that come right before an `ERROR` aren't throttled (they happen once), while logs in paths
 that continue are.
@@ -736,6 +1016,12 @@ Configuration errors (wrong type, missing pointer) throw instead. A miss is tran
 so `update()` uses the best-effort `fetch_robotarm_state()`, and a persistent problem shows up in
 the tracking check. `on_activate` uses the strict variant, because $q_{cmd}$ is seeded from those
 values. A failed activation is harmless: just activate again.
+
+**Increments have no deadman.** Jogging stops 250 ms after the last message; an accepted increment
+is executed even if the sender has gone quiet. What bounds it: each step is clamped to
+`max_increment_*`, and steps only add up while a run is active. There is no cap on the distance
+still outstanding (see [limitations](#known-limitations-and-roadmap)), so a sender that floods
+the topic can queue up a long move. A new twist message (zero = stop) ends the run at any time.
 
 ### Realtime considerations
 
@@ -762,6 +1048,11 @@ values. A failed activation is harmless: just activate again.
 - The realtime box holds a `geometry_msgs/Twist` plus a `Frame` enum, not the `TwistStamped`:
   `header.frame_id` is a `std::string`, and copying it in `update()` can allocate. The string is
   matched to the enum in the subscriber callback, outside the realtime thread.
+- The increment box holds two fixed-size `Matrix<double,6,1>` slots. `update()` takes and clears
+  them with `try_set`, a lambda capturing by reference fits `std::function`'s small buffer.
+- The corners of the increment pre-scaling are a `std::array` of 64 fixed-size vectors on the stack
+  (~3 KB). Ruckig's arrays are read and written through `Eigen::Map`, which views them without
+  copying.
 - `test_cartesian_jog_rt_alloc` enforces all of this from the very first cycle after activation.
 
 ### Known limitations and roadmap
@@ -773,7 +1064,12 @@ values. A failed activation is harmless: just activate again.
 | **Adaptive damping** | Planned in `RobotarmRbd::calculate_jacobian_inverse`, removes the DLS error far from singularities (background 2). |
 | ~~Tool-frame jogging~~ | **Done.** Selected with `header.frame_id`, Ruckig runs in the commanded frame, see [Ruckig in the commanded frame](#ruckig-in-the-commanded-frame). |
 | Frame switch acceleration | The $\omega \times v$ term is dropped when Ruckig's state is rotated into the new frame (small jump in the starting acceleration, only when switching while translating and rotating). |
-| **Position increments** | Planned: Ruckig in `Position` mode with `Phase` sync. Seed the linear position from `x_ref`, angular as 0 relative to $R_{start}$; exact for a fixed rotation axis. |
+| ~~Position increments~~ | **Done.** `~/increment_cmds`, Ruckig in `Position` mode with `None` sync, fed only its own state, see [background 7](#background-7-incremental-moves). |
+| Increment: no outstanding cap | Steps add up without a bound on the distance still to go. A cap per axis (e.g. 20 mm / 10°) would bound how far the arm moves after the last message. |
+| Increment: rotations and tool frame | Overlapping rotations about different axes are off by $\approx \tfrac12\theta_1\theta_2$; a tool-frame translation during a rotation follows the turning tool axes. Freezing the tool orientation at the start of a run would make the tool frame behave like the base frame. |
+| Increment: stop and click in one cycle | A zero twist and a click within the same cycle while idle start the run (the zero twist passes the "twist is zero" check). Practically never happens. |
+| Increment: limit below the current speed | When the pre-scaling lowers `max_velocity` below Ruckig's current speed, Ruckig is expected to brake within its limits. Not yet verified on the arm. |
+| Increment: no rt_alloc coverage | `test_cartesian_jog_rt_alloc` doesn't exercise the increment path yet. |
 | Per-axis twist clamp | Box limit: a diagonal motion can reach $\sqrt3\times$ the per-axis speed. |
 | Hard clamp not in `x_ref` | Correction pushes against an active clamp (bounded); should never trigger with a sized zone. |
 | $J$ computed twice | `calculate_jacobian_inverse` computes $J$ internally and the controller computes it again. An rbd call returning both would save one evaluation. |

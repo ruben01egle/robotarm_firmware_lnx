@@ -2,6 +2,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <array>
 #include <memory>
 
 PLUGINLIB_EXPORT_CLASS(
@@ -34,6 +35,21 @@ void clamp_twist(
     msg.angular.x = std::clamp(msg.angular.x, -limits.angular.velocity, limits.angular.velocity);
     msg.angular.y = std::clamp(msg.angular.y, -limits.angular.velocity, limits.angular.velocity);
     msg.angular.z = std::clamp(msg.angular.z, -limits.angular.velocity, limits.angular.velocity);
+}
+
+// per component clamp of one increment step, returned as 6d [linear, angular]
+Eigen::Matrix<double, 6, 1> clamp_increment(
+    const robotarm_interface::msg::CartesianIncrement& msg,
+    const cartesian_jog_controller::CartesianJogController::IncrementLimit& limits)
+{
+    Eigen::Matrix<double, 6, 1> delta;
+    delta << std::clamp(msg.linear.x, -limits.linear, limits.linear),
+             std::clamp(msg.linear.y, -limits.linear, limits.linear),
+             std::clamp(msg.linear.z, -limits.linear, limits.linear),
+             std::clamp(msg.angular.x, -limits.angular, limits.angular),
+             std::clamp(msg.angular.y, -limits.angular, limits.angular),
+             std::clamp(msg.angular.z, -limits.angular, limits.angular);
+    return delta;
 }
 
 Eigen::Vector3d clamp_norm(const Eigen::Vector3d & v, double max)
@@ -73,6 +89,13 @@ void rotate_twist(const Eigen::Matrix3d & R, Eigen::Ref<Eigen::Matrix<double, 6,
 {
     v.head<3>() = R * v.head<3>();
     v.tail<3>() = R * v.tail<3>();
+}
+
+bool ruckig_at_rest(const ruckig::InputParameter<6>& input, double eps)
+{
+    using Vec6 = Eigen::Matrix<double, 6, 1>;
+    return Eigen::Map<const Vec6>(input.current_velocity.data()).isZero(eps) &&
+           Eigen::Map<const Vec6>(input.current_acceleration.data()).isZero(eps);
 }
 
 }  // namespace
@@ -175,10 +198,44 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
                 return;
             }
         }
-        rt_command_twist_.set([&msg, &frame](TwistCmd& cmd) {
-            cmd.twist = msg->twist;
+        geometry_msgs::msg::Twist twist = msg->twist;
+        clamp_twist(twist, cartesian_limits_);
+        rt_command_twist_.set([&twist, &frame](TwistCmd& cmd) {
+            cmd.twist = twist;
             cmd.frame = frame;
             ++cmd.seq;
+        });
+
+        });
+
+    inc_cmd_subscriber_ = get_node()->create_subscription<robotarm_interface::msg::CartesianIncrement>(
+        "~/increment_cmds", rclcpp::SystemDefaultsQoS(),
+        [this](const robotarm_interface::msg::CartesianIncrement::SharedPtr msg)
+        {
+
+        if (!is_finite(msg->linear) || !is_finite(msg->angular)) {
+            RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                "Non-finite value received. Dropping message");
+            return;
+        }
+        // empty frame_id defaults to base
+        Frame frame = Frame::BASE;
+        const auto & frame_id = msg->header.frame_id;
+        if (!frame_id.empty() && frame_id != rbd_base_name_) {
+            if (frame_id == rbd_tcp_name_) {
+                frame = Frame::TOOL;
+            }
+            else {
+                RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                    "Unknown frame_id '%s', expected '%s' or '%s'. Dropping message",
+                                    frame_id.c_str(), rbd_base_name_.c_str(), rbd_tcp_name_.c_str());
+                return;
+            }
+        }
+        // add up in the slot of its frame until update() takes it, so no step is lost between two cycles
+        const Eigen::Matrix<double, 6, 1> delta = clamp_increment(*msg, increment_limits_);
+        rt_command_inc_.set([&delta, &frame](PendingIncrementCmd& pending) {
+            (frame == Frame::TOOL ? pending.tool : pending.base) += delta;
         });
 
         });
@@ -189,6 +246,7 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
 
 controller_interface::CallbackReturn CartesianJogController::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
+    mode_ = Mode::JOG;
     // make sure hw is in defined state when claiming interfaces
     if (!fetch_robotarm_state_strict()) return controller_interface::CallbackReturn::ERROR;
 
@@ -229,6 +287,7 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
     }
 
     rt_command_twist_.set(TwistCmd{});
+    rt_command_inc_.set(PendingIncrementCmd{});
     twist_cmd_.cmd = TwistCmd{};
     ruckig_frame_ = Frame::BASE;
 
@@ -242,6 +301,16 @@ controller_interface::CallbackReturn CartesianJogController::on_deactivate(const
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
+controller_interface::CallbackReturn CartesianJogController::on_cleanup(const rclcpp_lifecycle::State &/*previous_state*/)
+{
+    // the callbacks read parameters and frame names, so they must be gone before a reconfigure rewrites them
+    twist_cmd_subscriber_.reset();
+    inc_cmd_subscriber_.reset();
+
+    RCLCPP_INFO(get_node()->get_logger(), "cleanup successful");
+    return controller_interface::CallbackReturn::SUCCESS;
+}
+
 // TODO:
 // - singularity detection and avoidance/slow down
 controller_interface::return_type CartesianJogController::update(const rclcpp::Time &time, const rclcpp::Duration &period)
@@ -250,16 +319,52 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     TwistCmd box_twist_cmd = twist_cmd_.cmd;
     rt_command_twist_.try_get([&box_twist_cmd](const TwistCmd& cmd){box_twist_cmd = cmd;});
 
-    // adopt new cmd or watchdog
-    if (box_twist_cmd.seq == twist_cmd_.cmd.seq) {
-        watchdog(time);
-    }
-    else {
-        twist_cmd_.cmd = box_twist_cmd;
-        twist_cmd_.stamp = time;
-    }
+    PendingIncrementCmd box_inc_cmd = PendingIncrementCmd{};
+    rt_command_inc_.try_set([&box_inc_cmd](PendingIncrementCmd& pending) {
+        box_inc_cmd = pending;           // take
+        pending = PendingIncrementCmd{};    // clear
+    });
 
-    clamp_twist(twist_cmd_.cmd.twist, cartesian_limits_);
+    const bool new_twist  = box_twist_cmd.seq != twist_cmd_.cmd.seq;
+    const bool base_steps = !box_inc_cmd.base.isZero();
+    const bool tool_steps = !box_inc_cmd.tool.isZero();
+    switch (mode_)
+    {
+        case Mode::JOG:
+            // adopt new cmd or watchdog
+            if (!new_twist) {
+                watchdog(time);
+            }
+            else {
+                twist_cmd_.cmd = box_twist_cmd;
+                twist_cmd_.stamp = time;
+            }
+            // update mode
+            if (base_steps || tool_steps) {
+                if (!is_zero(twist_cmd_.cmd.twist) || !ruckig_at_rest(ruckig_input_, 1e-6)) {
+                    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000, 
+                            "Increments dropped: jogging active");
+                }
+                else if (base_steps && tool_steps) {
+                    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000, 
+                            "Increments dropped: inconsistent frames");
+                    break;
+                }
+                else {
+                    start_increment_run(base_steps ? Frame::BASE : Frame::TOOL);
+                }
+            }
+            break;
+
+        case Mode::INCREMENT:
+            // new twist always end the increment run
+            if (new_twist) {
+                twist_cmd_.cmd = box_twist_cmd;
+                twist_cmd_.stamp = time;
+                end_increment_run();
+            }
+            break;
+    }
 
     fetch_robotarm_state();
 
@@ -283,47 +388,127 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
         return controller_interface::return_type::ERROR;
     }
 
-    // predict and scale down motion before ruckig for smooth motion
-    auto& twist_target = twist_cmd_.cmd.twist;
-    auto& twist_target_frame = twist_cmd_.cmd.frame;
-    Eigen::Matrix<double, 6, 1> dx_target;
-    dx_target << twist_target.linear.x,  twist_target.linear.y,  twist_target.linear.z,
-         twist_target.angular.x, twist_target.angular.y, twist_target.angular.z;
-
+    // frame of this cycle: the twist frame while jogging, Ruckig's own frame during an increment run
+    const Frame target_frame = (mode_ == Mode::INCREMENT) ? ruckig_frame_ : twist_cmd_.cmd.frame;
     // always use J/J_inv in base frame
     Eigen::Matrix3d R_base_frame = Eigen::Matrix3d::Identity();
-    if (twist_target_frame == Frame::TOOL) R_base_frame = data_.ref.x_ref.linear();
+    if (target_frame == Frame::TOOL) R_base_frame = data_.ref.x_ref.linear();
 
-    Eigen::Matrix<double, 6, 1> dx_target_base = dx_target;
-    rotate_twist(R_base_frame, dx_target_base);
-    data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target_base;
-    const double scale_vel = velocity_scale(data_.tmp.dq_pred, joint_limits_);
-    const double scale_pos = position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, joint_limits_,
-                                                  position_limit_.zone, position_limit_.margin);
-    dx_target *= std::min(scale_vel, scale_pos);
+    // predict and scale down motion before ruckig for smooth motion and update ruckig targets
+    switch (mode_)
+    {
+    case Mode::JOG: {
+        auto& twist_target = twist_cmd_.cmd.twist;
+        auto& twist_target_frame = twist_cmd_.cmd.frame;
+        Eigen::Matrix<double, 6, 1> dx_target;
+        dx_target << twist_target.linear.x,  twist_target.linear.y,  twist_target.linear.z,
+            twist_target.angular.x, twist_target.angular.y, twist_target.angular.z;
 
-    // update ruckig frame
-    if (ruckig_frame_ != twist_target_frame) {
-        Eigen::Matrix3d R_new_old = Eigen::Matrix3d::Identity();
-        switch (twist_target_frame) {
-            case Frame::BASE:
-                R_new_old = data_.ref.x_ref.linear();
-                break;
-            case Frame::TOOL:
-                R_new_old = data_.ref.x_ref.linear().transpose();
-                break;
+        // always use J/J_inv in base frame
+        Eigen::Matrix<double, 6, 1> dx_target_base = dx_target;
+        rotate_twist(R_base_frame, dx_target_base);
+        data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_target_base;
+        const double scale_vel = velocity_scale(data_.tmp.dq_pred, joint_limits_);
+        const double scale_pos = position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, joint_limits_,
+                                                    position_limit_.zone, position_limit_.margin);
+        dx_target *= std::min(scale_vel, scale_pos);
+
+        // update ruckig frame
+        if (ruckig_frame_ != twist_target_frame) {
+            Eigen::Matrix3d R_new_old = Eigen::Matrix3d::Identity();
+            switch (twist_target_frame) {
+                case Frame::BASE:
+                    R_new_old = data_.ref.x_ref.linear();
+                    break;
+                case Frame::TOOL:
+                    R_new_old = data_.ref.x_ref.linear().transpose();
+                    break;
+            }
+            // acceleration: the omega x v term of the rotating frame is ignored, small jump of |w|*|v|
+            Eigen::Map<Eigen::Matrix<double, 6, 1>> vel(ruckig_input_.current_velocity.data());
+            Eigen::Map<Eigen::Matrix<double, 6, 1>> acc(ruckig_input_.current_acceleration.data());
+            rotate_twist(R_new_old, vel);
+            rotate_twist(R_new_old, acc);
+            ruckig_frame_ = twist_target_frame;
         }
-        // acceleration: the omega x v term of the rotating frame is ignored, small jump of |w|*|v|
-        Eigen::Map<Eigen::Matrix<double, 6, 1>> vel(ruckig_input_.current_velocity.data());
-        Eigen::Map<Eigen::Matrix<double, 6, 1>> acc(ruckig_input_.current_acceleration.data());
-        rotate_twist(R_new_old, vel);
-        rotate_twist(R_new_old, acc);
-        ruckig_frame_ = twist_target_frame;
+
+        // update cartesian space ruckig
+        ruckig_input_.control_interface = ruckig::ControlInterface::Velocity;
+        for(size_t i=0; i<6; ++i) {
+            ruckig_input_.target_velocity[i] = dx_target[i];
+            ruckig_input_.target_acceleration[i] = 0;
+        }
+
+        break;
     }
 
-    // update cartesian space ruckig
-    for(size_t i=0; i<6; ++i) {
-        ruckig_input_.target_velocity[i] = dx_target[i];
+    case Mode::INCREMENT: {
+        // update cartesian space ruckig
+        ruckig_input_.control_interface = ruckig::ControlInterface::Position;
+        // steps of the run's frame go into the target, the other frame is dropped
+        const bool run_in_base = (ruckig_frame_ == Frame::BASE);
+        if (run_in_base ? tool_steps : base_steps) {
+            RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                "Increments dropped: different frame than the running increment");
+        }
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> target(ruckig_input_.target_position.data());
+        Eigen::Map<const Eigen::Matrix<double, 6, 1>> current(ruckig_input_.current_position.data());
+        target += run_in_base ? box_inc_cmd.base : box_inc_cmd.tool;
+        for(size_t i=0; i<6; ++i) {
+            ruckig_input_.target_velocity[i] = 0;
+            ruckig_input_.target_acceleration[i] = 0;
+        }
+
+        // scale motion
+        const Eigen::Matrix<double, 6, 1> dx = target - current;     // remaining part of the run
+        const double vmax[6] = {
+            cartesian_limits_.linear.velocity,  cartesian_limits_.linear.velocity,  cartesian_limits_.linear.velocity,
+            cartesian_limits_.angular.velocity, cartesian_limits_.angular.velocity, cartesian_limits_.angular.velocity};
+
+        // every moving axis is somewhere in [0, sign(d_i)·vmax_i], the worst joint velocity is at a
+        // corner of that box. collect all corners: start with standstill, each moving axis doubles the
+        // list (every corner so far once without and once with that axis at full speed towards its target)
+        std::array<Eigen::Matrix<double, 6, 1>, 64> corners;    // 64 = 2^6, all 6 axes moving
+        size_t num_corners = 1;
+        corners[0].setZero();
+        for (size_t i = 0; i < 6; ++i) {
+            if (std::abs(dx[i]) <= 1e-12) continue;                // axis does not move
+            for (size_t k = 0; k < num_corners; ++k) {
+                // copy and append existing corners
+                corners[num_corners + k] = corners[k];
+                // set new axis of potential worst case twist, zero case for axis already in list
+                corners[num_corners + k][i] = std::copysign(vmax[i], dx[i]);
+            }
+            num_corners *= 2;
+        }
+
+        // worst case over all corners, corners[0] is standstill
+        double s = 1.0;
+        for (size_t k = 1; k < num_corners; ++k) {
+            // same prediction as in jog mode
+            Eigen::Matrix<double, 6, 1> dx_corner = corners[k];
+            rotate_twist(R_base_frame, dx_corner);
+            data_.tmp.dq_pred.noalias() = data_.tmp.j_inv * dx_corner;
+            s = std::min({s, velocity_scale(data_.tmp.dq_pred, joint_limits_),
+                          position_limit_scale(data_.ref.q_cmd, data_.tmp.dq_pred, joint_limits_,
+                                               position_limit_.zone, position_limit_.margin)});
+        }
+
+        // in front of a joint limit s ramps towards 0, a velocity limit near 0 would never finish the run.
+        // aborting falls back to velocity mode with target 0: no velocity scaling needed
+        if (s < min_increment_scale_) {
+            RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                                "Increment aborted: joint position limit reached");
+            end_increment_run();
+            break;
+        }
+
+        // only the velocity is scaled, acceleration and jerk stay for full braking
+        for (size_t i = 0; i < 6; ++i) {
+            ruckig_input_.max_velocity[i] = s * vmax[i];
+        }
+        break;
+    }
     }
 
     ruckig_.delta_time = period.seconds();
@@ -332,6 +517,11 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     {
         RCLCPP_ERROR(get_node()->get_logger(), "Ruckig: runtime error %d!", static_cast<int>(result));
         return controller_interface::return_type::ERROR;
+    }
+
+    // run reached its target: back to jog mode, ruckig is at rest so the handover is seamless
+    if (mode_ == Mode::INCREMENT && result == ruckig::Result::Finished) {
+        end_increment_run();
     }
 
     // convert cartesian ruckig output to base frame
@@ -394,6 +584,7 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     // update ruckig for next cycle
     if (scale < 1.0) {
         for (size_t i = 0; i < 6; ++i) {
+            ruckig_input_.current_position[i]    += scale * (ruckig_output_.new_position[i] - ruckig_input_.current_position[i]);
             ruckig_input_.current_velocity[i]     = scale * ruckig_output_.new_velocity[i];
             ruckig_input_.current_acceleration[i] = scale * ruckig_output_.new_acceleration[i];
         }
@@ -429,6 +620,35 @@ void CartesianJogController::watchdog(const rclcpp::Time &time)
     }
 }
 
+void CartesianJogController::start_increment_run(Frame frame)
+{
+    // no need to convert inputs to frame since transition is only allowed at rest
+    ruckig_frame_ = frame;
+    mode_ = Mode::INCREMENT;
+    // positions count from the start of the run, velocity mode leaves an integrated value here
+    for(size_t i=0; i<6; ++i) {
+        ruckig_input_.current_position[i] = 0;
+        ruckig_input_.target_position[i] = 0;
+    }
+}
+
+void CartesianJogController::end_increment_run()
+{
+    mode_ = Mode::JOG;
+    // velocity mode from the current state (no reset of velocity/acceleration, smooth handover).
+    // target 0 brakes, the jog path overwrites it as soon as it runs again
+    ruckig_input_.control_interface = ruckig::ControlInterface::Velocity;
+    for(size_t i=0; i<6; ++i) {
+        ruckig_input_.target_velocity[i] = 0;
+        ruckig_input_.target_acceleration[i] = 0;
+    }
+    // reset limits to velocity mode
+    for(size_t i=0; i<3; ++i) {
+        ruckig_input_.max_velocity[i] = cartesian_limits_.linear.velocity;
+        ruckig_input_.max_velocity[i+3] = cartesian_limits_.angular.velocity;
+    }
+}
+
 void CartesianJogController::declare_parameters()
 {
     auto node = get_node();
@@ -454,6 +674,9 @@ void CartesianJogController::declare_parameters()
 
     node->declare_parameter<double>("joint_limit_zone", 0.2);           // rad, slow down zone in front of a position limit
     node->declare_parameter<double>("joint_limit_margin", 0.02);        // rad, stop this far before a position limit
+
+    node->declare_parameter<double>("max_increment_linear", 0.003);     // m, per axis and message
+    node->declare_parameter<double>("max_increment_angular", 0.0524);   // rad (3°), per axis and message
 }
 
 controller_interface::CallbackReturn CartesianJogController::read_parameters()
@@ -499,6 +722,18 @@ controller_interface::CallbackReturn CartesianJogController::read_parameters()
         RCLCPP_ERROR(node->get_logger(), "Parameter joint_limit_margin must be finite and >= 0, got %f",
                      position_limit_.margin);
         return controller_interface::CallbackReturn::ERROR;
+    }
+
+    increment_limits_.linear = node->get_parameter("max_increment_linear").as_double();
+    increment_limits_.angular = node->get_parameter("max_increment_angular").as_double();
+    for (const auto & [name, value] : {
+            std::pair{"max_increment_linear", increment_limits_.linear},
+            std::pair{"max_increment_angular", increment_limits_.angular}})
+    {
+        if (!std::isfinite(value) || value <= 0.0) {
+            RCLCPP_ERROR(node->get_logger(), "Parameter %s must be finite and > 0, got %f", name, value);
+            return controller_interface::CallbackReturn::ERROR;
+        }
     }
 
     // sanity check correction params
