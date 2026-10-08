@@ -348,7 +348,6 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
                 else if (base_steps && tool_steps) {
                     RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000, 
                             "Increments dropped: inconsistent frames");
-                    break;
                 }
                 else {
                     start_increment_run(base_steps ? Frame::BASE : Frame::TOOL);

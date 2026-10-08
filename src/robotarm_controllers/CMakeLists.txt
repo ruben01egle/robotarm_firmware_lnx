@@ -107,6 +107,7 @@ if(BUILD_TESTING)
     lifecycle_msgs
     geometry_msgs
     rclcpp
+    robotarm_interface
   )
 endif()
 

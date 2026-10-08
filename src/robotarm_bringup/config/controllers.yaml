@@ -122,3 +122,6 @@ cartesian_jog_controller:
 
     joint_limit_zone: 0.2           # rad, slow down zone in front of a position limit
     joint_limit_margin: 0.02        # rad, stop this far before a position limit
+
+    max_increment_linear: 0.003     # m, per axis clamp of one increment step
+    max_increment_angular: 0.0524   # rad (3°), per axis clamp of one increment step

@@ -23,6 +23,10 @@ namespace malloc_counter
 void arm();
 void disarm();
 
+// exclude a section from counting on the calling thread while armed, nestable
+void pause();
+void resume();
+
 // number of allocations (malloc, calloc, realloc, aligned) since the last arm()
 std::size_t count();
 
@@ -38,6 +42,14 @@ struct ScopedArm
     ~ScopedArm() {disarm();}
     ScopedArm(const ScopedArm &) = delete;
     ScopedArm & operator=(const ScopedArm &) = delete;
+};
+
+struct ScopedPause
+{
+    ScopedPause() {pause();}
+    ~ScopedPause() {resume();}
+    ScopedPause(const ScopedPause &) = delete;
+    ScopedPause & operator=(const ScopedPause &) = delete;
 };
 
 // runs f with counting armed and returns the number of allocations it made

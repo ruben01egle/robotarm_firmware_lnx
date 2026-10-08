@@ -10,8 +10,13 @@
 // CounterDetectsAllocation is the negative control: without it, a counter that is silently not
 // linked in would let all other checks pass.
 //
-// The tool frame tests also check the frame handling itself (direction of motion, continuity across
-// a frame switch), because those can't be seen in the allocation count.
+// Log output is excluded from counting (LogAllocationExclusion): the logging backend allocates for
+// every message that is actually printed (rosout publishes over DDS). In update() those are throttled
+// warnings and the errors right before a stop, accepted as rare. Everything up to the log call, incl.
+// the throttle check, is still counted.
+//
+// The tool frame and increment tests also check the motion itself (direction, distance, continuity),
+// because those can't be seen in the allocation count.
 
 #include <gtest/gtest.h>
 
@@ -37,6 +42,7 @@
 #include "lifecycle_msgs/msg/state.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rcutils/logging.h"
+#include "robotarm_interface/msg/cartesian_increment.hpp"
 
 #include "robotarm_controllers/CartesianJogController.hpp"
 
@@ -47,6 +53,7 @@ namespace
 
 using cartesian_jog_controller::CartesianJogController;
 using geometry_msgs::msg::TwistStamped;
+using robotarm_interface::msg::CartesianIncrement;
 using hardware_interface::CommandInterface;
 using hardware_interface::StateInterface;
 
@@ -97,6 +104,46 @@ TwistStamped make_twist(const Eigen::Vector3d & v, const Eigen::Vector3d & w, co
 {
     return make_twist(v.x(), v.y(), v.z(), w.x(), w.y(), w.z(), frame_id);
 }
+
+// one increment step, linear in m, angular in rad. Empty frame_id is the base frame
+CartesianIncrement make_increment(double dx, double dy, double dz, double rx, double ry, double rz,
+                                  const std::string & frame_id = "")
+{
+    CartesianIncrement inc;
+    inc.header.frame_id = frame_id;
+    inc.linear.x = dx;
+    inc.linear.y = dy;
+    inc.linear.z = dz;
+    inc.angular.x = rx;
+    inc.angular.y = ry;
+    inc.angular.z = rz;
+    return inc;
+}
+
+// Wraps the installed log output handler and pauses the allocation counter while it runs, see the
+// file comment. Installed once in main(), after rclcpp::init() has set up the logging backend.
+class LogAllocationExclusion
+{
+public:
+    static void install()
+    {
+        previous_ = rcutils_logging_get_output_handler();
+        rcutils_logging_set_output_handler(&LogAllocationExclusion::handler);
+    }
+
+private:
+    static void handler(
+        const rcutils_log_location_t * location, int severity, const char * name,
+        rcutils_time_point_value_t timestamp, const char * format, va_list * args)
+    {
+        malloc_counter::ScopedPause pause;
+        if (previous_) {
+            previous_(location, severity, name, timestamp, format, args);
+        }
+    }
+
+    static inline rcutils_logging_output_handler_t previous_ = nullptr;
+};
 
 // Counts log messages whose format string contains a marker and forwards everything to the handler
 // that was installed before. Forwarding keeps the real logging backend inside the measured window.
@@ -202,27 +249,35 @@ protected:
         twist_pub_ = pub_node_->create_publisher<TwistStamped>(topic, rclcpp::SystemDefaultsQoS());
         echo_sub_ = pub_node_->create_subscription<TwistStamped>(topic, rclcpp::SystemDefaultsQoS(),
                                                                  [this](TwistStamped::ConstSharedPtr) {++echo_count_;});
+        const std::string inc_topic = std::string("/") + controller_name + "/increment_cmds";
+        inc_pub_ = pub_node_->create_publisher<CartesianIncrement>(inc_topic, rclcpp::SystemDefaultsQoS());
+        inc_echo_sub_ = pub_node_->create_subscription<CartesianIncrement>(
+            inc_topic, rclcpp::SystemDefaultsQoS(), [this](CartesianIncrement::ConstSharedPtr) {++inc_echo_count_;});
         executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
         executor_->add_node(controller_->get_node()->get_node_base_interface());
         executor_->add_node(pub_node_);
     }
 
+    void send_twist(const TwistStamped & t) {publish_and_wait(twist_pub_, echo_count_, t);}
+    void send_increment(const CartesianIncrement & inc) {publish_and_wait(inc_pub_, inc_echo_count_, inc);}
+
     // publishes over the real subscription and spins until it is delivered, outside of any
     // measured window
-    void send_twist(const TwistStamped & t)
+    template<class Msg>
+    void publish_and_wait(const std::shared_ptr<rclcpp::Publisher<Msg>> & pub, const int & echo_count, const Msg & msg)
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (twist_pub_->get_subscription_count() < 2) {   // controller + echo
-            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "twist subscription not matched";
+        while (pub->get_subscription_count() < 2) {   // controller + echo
+            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "subscription not matched";
             executor_->spin_some();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        const int expected = echo_count_ + 1;
-        twist_pub_->publish(t);
+        const int expected = echo_count + 1;
+        pub->publish(msg);
         // the echo subscriber gets the same delivery as the controller, spin a bit more after it
         // arrived so the controller's callback has run too
-        while (echo_count_ < expected) {
-            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "twist not delivered";
+        while (echo_count < expected) {
+            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "message not delivered";
             executor_->spin_some();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -315,6 +370,9 @@ protected:
     rclcpp::Publisher<TwistStamped>::SharedPtr twist_pub_;
     rclcpp::Subscription<TwistStamped>::SharedPtr echo_sub_;
     int echo_count_ = 0;
+    rclcpp::Publisher<CartesianIncrement>::SharedPtr inc_pub_;
+    rclcpp::Subscription<CartesianIncrement>::SharedPtr inc_echo_sub_;
+    int inc_echo_count_ = 0;
     std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
 
     rclcpp::Time time_{0, 0, RCL_ROS_TIME};
@@ -349,6 +407,20 @@ TEST(MallocCounter, CounterDetectsAllocation)
         }), 0u);
     std::vector<int> outside(16);
     EXPECT_EQ(malloc_counter::count(), 0u);
+
+    // a paused section is excluded, counting continues after it (log exclusion relies on both)
+    EXPECT_EQ(malloc_counter::count_allocations([] {
+            malloc_counter::ScopedPause pause;
+            auto p = std::make_unique<double>(1.0);
+            asm volatile("" : : "g"(p.get()) : "memory");
+        }), 0u);
+    EXPECT_GT(malloc_counter::count_allocations([] {
+            {
+                malloc_counter::ScopedPause pause;
+            }
+            auto p = std::make_unique<double>(1.0);
+            asm volatile("" : : "g"(p.get()) : "memory");
+        }), 0u);
 }
 
 TEST_F(CartesianJogRtAllocTest, IdleUpdateDoesNotAllocate)
@@ -363,11 +435,16 @@ TEST_F(CartesianJogRtAllocTest, JoggingDoesNotAllocate)
 {
     start(regular_pose());
     send_twist(make_twist(0.05, -0.03, 0.02, 0.1, -0.2, 0.15));
-    const StepResult r = step(2000);
+    StepResult r = step(200);
     EXPECT_TRUE(r.ok);
     EXPECT_NO_RT_ALLOCATIONS(r);
-    // sanity: the full ruckig / IK path ran
+    // sanity: the full ruckig / IK path ran (checked before the watchdog stops the arm)
     EXPECT_GT(max_abs_dq_cmd(), 1e-3);
+
+    // watchdog timeout and braking to rest
+    r = step(1800);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
 }
 
 TEST_F(CartesianJogRtAllocTest, NewCommandPickupDoesNotAllocate)
@@ -537,12 +614,140 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
     EXPECT_GT(clipping.hits(), 0) << "joint space clipping was never triggered, adjust the scenario";
 }
 
+// Distances of increment runs are checked to 1 %: x_ref advances by the twist the damped inverse
+// realizes (J·J⁺·dx_ff), which falls short of the step by ~0.5 % in regular_pose() with lambda = 0.01
+// (with lambda = 0.001 it is below 1e-5 relative).
+constexpr double inc_tol = 0.01;
+
+TEST_F(CartesianJogRtAllocTest, IncrementRunDoesNotAllocate)
+{
+    // one step: start of the run, position mode, corner pre-scaling, Finished and back to jog mode
+    start(regular_pose());
+    const Eigen::Isometry3d T0 = tcp_pose();
+
+    send_increment(make_increment(0.001, 0.0, 0.0, 0.0, 0.0, 0.0));
+    const StepResult r = step(1500);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+
+    // 1 mm along base x, back at rest
+    const Eigen::Vector3d dp = tcp_pose().translation() - T0.translation();
+    EXPECT_NEAR(dp.x(), 0.001, inc_tol * 0.001);
+    EXPECT_NEAR(dp.y(), 0.0, inc_tol * 0.001);
+    EXPECT_NEAR(dp.z(), 0.0, inc_tol * 0.001);
+    EXPECT_LT(max_abs_dq_cmd(), 1e-5);
+}
+
+TEST_F(CartesianJogRtAllocTest, IncrementsAddUpAndAxesOverlap)
+{
+    start(regular_pose());
+
+    // three clicks on the same axis while the arm is still moving
+    Eigen::Isometry3d T0 = tcp_pose();
+    for (int click = 0; click < 3; ++click) {
+        send_increment(make_increment(0.001, 0.0, 0.0, 0.0, 0.0, 0.0));
+        const StepResult r = step(50);
+        EXPECT_TRUE(r.ok);
+        EXPECT_NO_RT_ALLOCATIONS(r);
+    }
+    StepResult r = step(1500);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    Eigen::Vector3d dp = tcp_pose().translation() - T0.translation();
+    EXPECT_NEAR(dp.x(), 0.003, inc_tol * 0.003) << "steps did not add up";
+
+    // a second axis while the first is moving: several corners in the pre-scaling
+    T0 = tcp_pose();
+    send_increment(make_increment(0.002, 0.0, 0.0, 0.0, 0.0, 0.0));
+    EXPECT_TRUE(step(50).ok);
+    send_increment(make_increment(0.0, -0.001, 0.0, 0.0, 0.0, 0.0));
+    r = step(1500);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    dp = tcp_pose().translation() - T0.translation();
+    EXPECT_NEAR(dp.x(), 0.002, inc_tol * 0.002);
+    EXPECT_NEAR(dp.y(), -0.001, inc_tol * 0.002);
+    EXPECT_NEAR(dp.z(), 0.0, inc_tol * 0.002);
+
+    // rotation step in the tool frame: turns about tool z, the TCP stays in place
+    T0 = tcp_pose();
+    send_increment(make_increment(0.0, 0.0, 0.0, 0.0, 0.0, 0.05, tcp_frame_));
+    r = step(1500);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    const Eigen::Isometry3d T1 = tcp_pose();
+    const Eigen::AngleAxisd aa(T0.linear().transpose() * T1.linear());
+    EXPECT_NEAR(aa.angle(), 0.05, inc_tol * 0.05);
+    EXPECT_GT(aa.axis().dot(Eigen::Vector3d::UnitZ()), 0.999);
+    // J·J⁺ also couples a little of the rotation into translation
+    EXPECT_LT((T1.translation() - T0.translation()).norm(), 1e-4);
+}
+
+TEST_F(CartesianJogRtAllocTest, TwistEndsIncrementRunSmoothly)
+{
+    // a zero twist (stop) early in a run: velocity mode continues from the current state, so the
+    // joint velocities stay smooth, and the arm brakes well before the end of the step.
+    // The stop has to come while the run still speeds up (jerk > 0, first ~65 ms of a 3 mm step):
+    // later, the rest of the planned profile already is the fastest stop and ends on the target.
+    start(regular_pose());
+    const Eigen::Isometry3d T0 = tcp_pose();
+
+    send_increment(make_increment(0.003, 0.0, 0.0, 0.0, 0.0, 0.0));
+    EXPECT_TRUE(step(29).ok);
+    const Eigen::VectorXd dq_0 = dq_cmd_vec();
+    EXPECT_TRUE(step(1).ok);
+    const Eigen::VectorXd dq_1 = dq_cmd_vec();
+    ASSERT_GT(max_abs_dq_cmd(), 1e-4) << "arm not moving when the stop arrives";
+
+    send_twist(make_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+    StepResult r = step(1);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    // the change per cycle stays the same (no velocity jump): only the jerk flips, which changes
+    // the velocity step by ~J⁺·2·j·dt², far below a jump of the velocity itself
+    const Eigen::VectorXd change_before = dq_1 - dq_0;
+    const Eigen::VectorXd change_after = dq_cmd_vec() - dq_1;
+    EXPECT_LT((change_after - change_before).norm(), 1e-4) << "joint velocity jumped when the run ended";
+
+    r = step(1500);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+    const double dx = tcp_pose().translation().x() - T0.translation().x();
+    EXPECT_GT(dx, 0.0001);
+    EXPECT_LT(dx, 0.002) << "run was not ended by the twist";
+    EXPECT_LT(max_abs_dq_cmd(), 1e-5);
+}
+
+TEST_F(CartesianJogRtAllocTest, IncrementIntoJointLimitAborts)
+{
+    // axis2 starts at its stop position in front of the upper limit (0.349 rad - 0.02 margin), so
+    // every step that drives axis2 up is aborted by the pre-scaling, the others run normally
+    std::vector<double> q0 = regular_pose();
+    q0[1] = 0.3291;
+    start(q0);
+
+    LogMarkerCounter aborted("Increment aborted");     // one instance at a time, its state is static
+    for (int axis = 0; axis < 3; ++axis) {
+        for (const double sign : {1.0, -1.0}) {
+            double d[3] = {0.0, 0.0, 0.0};
+            d[axis] = sign * 0.003;
+            send_increment(make_increment(d[0], d[1], d[2], 0.0, 0.0, 0.0));
+            const StepResult r = step(800);
+            EXPECT_TRUE(r.ok) << " step along axis " << axis << " sign " << sign;
+            EXPECT_NO_RT_ALLOCATIONS(r) << " step along axis " << axis << " sign " << sign;
+            EXPECT_LT(q_cmd(1), 0.3491) << "axis2 passed its upper limit";
+        }
+    }
+    EXPECT_GT(aborted.hits(), 0) << "no step was aborted, adjust the scenario";
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
     rclcpp::init(argc, argv);
+    LogAllocationExclusion::install();
     malloc_counter::prime_backtrace();
     const int result = RUN_ALL_TESTS();
     rclcpp::shutdown();

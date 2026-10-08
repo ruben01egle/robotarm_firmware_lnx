@@ -23,13 +23,14 @@ constexpr int max_frames = 64;
 // trivially constructible thread_locals of the executable live in static TLS, accessing them does
 // not allocate (which would recurse into malloc)
 thread_local bool armed = false;
+thread_local int paused = 0;
 thread_local std::size_t allocations = 0;
 thread_local void * first_frames[max_frames];
 thread_local int first_frame_count = 0;
 
 inline void record()
 {
-    if (!armed) {
+    if (!armed || paused > 0) {
         return;
     }
     if (allocations++ == 0) {
@@ -110,6 +111,16 @@ void arm()
 void disarm()
 {
     armed = false;
+}
+
+void pause()
+{
+    ++paused;
+}
+
+void resume()
+{
+    --paused;
 }
 
 std::size_t count()

@@ -45,8 +45,15 @@ loop. Pass `-DCMAKE_BUILD_TYPE=Debug` to override this.
 
 `test_cartesian_jog_rt_alloc` runs `CartesianJogController::update()` without a controller manager
 and counts every heap allocation inside `update()`. It does this by interposing `malloc` for the
-whole test executable, so allocations in Ruckig, Eigen, rclcpp logging and realtime_tools are
-caught as well. A negative control test makes sure the counter is actually active.
+whole test executable, so allocations in Ruckig, Eigen and realtime_tools are caught as well. A
+negative control test makes sure the counter is actually active.
+
+Log output is excluded from the count: the logging backend allocates for every printed message
+(rosout publishes over DDS). In `update()` those are throttled warnings (at most one per second
+and message) and the errors right before a stop, so they are accepted. The test wraps the log output
+handler and pauses the counter inside it; the controller's own code up to the log call is still
+counted. The increment tests also check distances, accumulation, the handover to jogging and the
+abort in front of a joint limit.
 
 ---
 
@@ -1068,8 +1075,9 @@ the topic can queue up a long move. A new twist message (zero = stop) ends the r
 | Increment: no outstanding cap | Steps add up without a bound on the distance still to go. A cap per axis (e.g. 20 mm / 10°) would bound how far the arm moves after the last message. |
 | Increment: rotations and tool frame | Overlapping rotations about different axes are off by $\approx \tfrac12\theta_1\theta_2$; a tool-frame translation during a rotation follows the turning tool axes. Freezing the tool orientation at the start of a run would make the tool frame behave like the base frame. |
 | Increment: stop and click in one cycle | A zero twist and a click within the same cycle while idle start the run (the zero twist passes the "twist is zero" check). Practically never happens. |
-| Increment: limit below the current speed | When the pre-scaling lowers `max_velocity` below Ruckig's current speed, Ruckig is expected to brake within its limits. Not yet verified on the arm. |
-| Increment: no rt_alloc coverage | `test_cartesian_jog_rt_alloc` doesn't exercise the increment path yet. |
+| Increment: limit below the current speed | When the pre-scaling lowers `max_velocity` below Ruckig's current speed, Ruckig is expected to brake within its limits. Not verified, but millimeter steps barely get up to speed. |
+| Increment: DLS shortfall | Steps fall short by what $J J^+$ attenuates: measured 0.5 % in the regular pose of the tests with `lambda = 0.01` (below $10^{-5}$ with `lambda = 0.001`). Adaptive damping would remove it. |
+| Logging in the realtime path | Every printed log allocates (rosout over DDS). Only throttled warnings and errors before a stop are logged in `update()`. The rt_alloc test excludes them deliberately. |
 | Per-axis twist clamp | Box limit: a diagonal motion can reach $\sqrt3\times$ the per-axis speed. |
 | Hard clamp not in `x_ref` | Correction pushes against an active clamp (bounded); should never trigger with a sized zone. |
 | $J$ computed twice | `calculate_jacobian_inverse` computes $J$ internally and the controller computes it again. An rbd call returning both would save one evaluation. |
