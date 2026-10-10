@@ -653,6 +653,7 @@ void CartesianJogController::declare_parameters()
     auto node = get_node();
 
     node->declare_parameter<double>("lambda", 0.01);
+    node->declare_parameter<std::string>("jinv_method", "svd");         // "svd" or "ldlt"
 
     node->declare_parameter<double>("max_linear_velocity", 0.1);        // in m/s
     node->declare_parameter<double>("max_linear_acceleration", 0.5);    // in m/s²
@@ -682,6 +683,18 @@ controller_interface::CallbackReturn CartesianJogController::read_parameters()
 {
     auto node = get_node();
     rbd_cfg_.lambda = node->get_parameter("lambda").as_double();
+
+    // "svd": selective, adaptive damping (accurate), "ldlt": constant damping (fast)
+    const std::string jinv_method = node->get_parameter("jinv_method").as_string();
+    if (jinv_method == "svd") {
+        rbd_cfg_.jinv_method = robotarm_rbd::RobotarmRbd::JinvMethod::SVD;
+    } else if (jinv_method == "ldlt") {
+        rbd_cfg_.jinv_method = robotarm_rbd::RobotarmRbd::JinvMethod::LDLT;
+    } else {
+        RCLCPP_ERROR(node->get_logger(), "Parameter jinv_method must be 'svd' or 'ldlt', got '%s'",
+                     jinv_method.c_str());
+        return controller_interface::CallbackReturn::ERROR;
+    }
 
     cartesian_limits_.linear.velocity = node->get_parameter("max_linear_velocity").as_double();
     cartesian_limits_.linear.acceleration = node->get_parameter("max_linear_acceleration").as_double();

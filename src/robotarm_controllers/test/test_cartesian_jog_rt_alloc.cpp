@@ -583,6 +583,9 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
     // Close to the wrist singularity (axis5 = 0) the joint velocities from the damped inverse grow
     // quickly. With high cartesian limits ruckig cannot follow the pre-scaled target fast enough,
     // the joint space scaling in update() kicks in and logs "Joint space clipping" (throttled).
+    // the throttle state is per call site and process wide: an earlier test that clipped (e.g. the
+    // frame switch) suppresses the log for 1 s, wait it out so the marker below can be seen
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     std::vector<double> q0 = regular_pose();
     q0[4] = 0.15;
     start(q0, {
@@ -615,8 +618,9 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
 }
 
 // Distances of increment runs are checked to 1 %: x_ref advances by the twist the damped inverse
-// realizes (J·J⁺·dx_ff), which falls short of the step by ~0.5 % in regular_pose() with lambda = 0.01
-// (with lambda = 0.001 it is below 1e-5 relative).
+// realizes (J·J⁺·dx_ff). With jinv_method = svd all singular values in regular_pose() are above
+// √2·λ, so nothing is damped and J·J⁺ = I. With ldlt and lambda = 0.01 it falls short of the step
+// by ~0.5 % (with lambda = 0.001 below 1e-5 relative), the tolerance covers both.
 constexpr double inc_tol = 0.01;
 
 TEST_F(CartesianJogRtAllocTest, IncrementRunDoesNotAllocate)

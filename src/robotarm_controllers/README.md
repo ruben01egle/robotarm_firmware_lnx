@@ -158,7 +158,8 @@ acceleration or jerk limits only show up as a Ruckig error on the first `update(
 
 | Parameter | Default | Unit | Constraint | Meaning |
 |---|---|---|---|---|
-| `lambda` | `0.01` | – | ≥ 0 | Damping $\lambda$ of the damped least squares Jacobian inverse ([background 2](#background-2-the-damped-pseudoinverse)) |
+| `lambda` | `0.01` | – | > 0 | Damping $\lambda$ of the damped least squares Jacobian inverse ([background 2](#background-2-the-damped-pseudoinverse)) |
+| `jinv_method` | `"svd"` | – | `"svd"` or `"ldlt"` | Jacobian inverse method: `svd` selective, adaptive damping (accurate), `ldlt` constant damping $\lambda$ (fast) |
 | `max_linear_velocity` | `0.1` | m/s | | Per-axis clamp of the commanded linear velocity |
 | `max_linear_acceleration` | `0.5` | m/s² | > 0 | Ruckig limit, linear DOFs |
 | `max_linear_jerk` | `5.0` | m/s³ | > 0 | Ruckig limit, linear DOFs |
@@ -196,6 +197,7 @@ Example (`robotarm_bringup/config/controllers.yaml`):
 cartesian_jog_controller:
   ros__parameters:
     lambda: 0.01
+    jinv_method: "svd"
     max_linear_velocity: 0.1
     max_linear_acceleration: 0.5
     max_linear_jerk: 5.0

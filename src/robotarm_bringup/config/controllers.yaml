@@ -94,7 +94,7 @@ teleop_controller:
     command_interfaces:
       - position
       - velocity
-    max_velocity: 3.0
+    max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
     max_acceleration: 4.0
     max_jerk: 10.0
     sync_joints: false
@@ -102,6 +102,7 @@ teleop_controller:
 cartesian_jog_controller:
   ros__parameters:
     lambda: 0.01                    # damping of the damped least squares jacobian inverse
+    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
 
     max_linear_velocity: 0.1        # m/s
     max_linear_acceleration: 0.5    # m/s²
