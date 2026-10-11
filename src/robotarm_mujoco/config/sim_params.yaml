@@ -1,0 +1,50 @@
+# Hand-tuned simulation parameters, merged by robotarm_mjcf into the MJCF converted from the URDF.
+# Everything the URDF cannot express lives here, so regenerating from a new URDF keeps the tuning.
+
+simulation:
+  timestep: 0.001                 # s, physics step (controller_manager runs at 500 Hz)
+  integrator: implicitfast        # implicit in joint damping, stable with stiff impedance gains
+
+# Per joint, all optional:
+#   armature      kg·m², reflected rotor inertia at the joint, used as is
+#   rotor_inertia kg·m², together with gear_ratio: armature = rotor_inertia * gear_ratio²
+#   gear_ratio    rotor turns per output turn (1 / moteus rotor_to_output_ratio)
+#   damping       Nm·s/rad, viscous joint friction (belts, bearings)
+#   frictionloss  Nm, dry joint friction. 0 is the strict setting for checking gravity compensation:
+#                 any model error shows as drift instead of being held by friction.
+#
+# LA8308 rotor inertia: about 180 kg·mm² (1.8e-4 kg·m²), ESTIMATE, consistent with a ~120 g rotor bell at
+# ~40 mm radius. No datasheet value found. Pulleys and belts are not included. Replace once measured.
+joints:
+  axis1:
+    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
+    gear_ratio: 6.0               # docs/motor_cfg: rotor_to_output_ratio 0.166667
+    damping: 0.02
+    frictionloss: 0.0
+  axis2:
+    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
+    gear_ratio: 30.0              # docs/motor_cfg: rotor_to_output_ratio 0.033333
+    damping: 0.02
+    frictionloss: 0.0
+  axis3:
+    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
+    gear_ratio: 11.4545           # docs/motor_cfg: rotor_to_output_ratio 0.087302
+    damping: 0.02
+    frictionloss: 0.0
+  axis4:
+    rotor_inertia: 1.8e-4         # LA8308 (same motor as axis3), ESTIMATE
+    gear_ratio: 4.0
+    damping: 0.02
+    frictionloss: 0.0
+  axis5:
+    armature: 0.0                 # TODO: tiny wrist motors (differential), set once rotor inertia and ratio are known
+    damping: 0.005
+    frictionloss: 0.0
+  axis6:
+    armature: 0.0                 # TODO: tiny wrist motors (differential), set once rotor inertia and ratio are known
+    damping: 0.005
+    frictionloss: 0.0
+
+# Body pairs (MuJoCo body = URDF link with a moving joint) whose collision meshes must not collide.
+# Parent/child pairs, and the base against the first link, are excluded automatically.
+contact_exclude: []

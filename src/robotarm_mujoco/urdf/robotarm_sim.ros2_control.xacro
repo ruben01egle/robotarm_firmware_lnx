@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!-- ros2_control block of the MuJoCo simulation. Effort only: the sim stands in for the motors in torque mode,
+     position/velocity controllers stay on mock_components. Each joint is driven by the MJCF <motor> actuator of the
+     same name. The joint list duplicates robotarm_description/urdf/robotarm.ros2_control.xacro, test_mjcf.py checks
+     that both stay equal. No torque_ff (moteus only) and no transmissions: MuJoCo drives axis5/axis6 directly. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="robotarm_sim_ros2_control" params="name mujoco_model headless:=false">
+
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+        <param name="mujoco_model">${mujoco_model}</param>
+        <param name="headless">${str(headless).lower()}</param>
+      </hardware>
+
+      <joint name="axis1">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="axis2">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="axis3">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="axis4">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="axis5">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="axis6">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+    </ros2_control>
+  </xacro:macro>
+</robot>
