@@ -75,7 +75,7 @@ private:
 
     rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
 
-    static constexpr size_t num_states_per_joint_ = 2;
+    static constexpr size_t num_interfaces_per_joint_ = 2;
 };
 
 }

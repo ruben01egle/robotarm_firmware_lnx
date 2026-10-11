@@ -12,6 +12,7 @@ A [ros2_control](https://control.ros.org/) `SystemInterface` hardware plugin for
 - [Configuration Reference](#configuration-reference)
 - [Behavior / How It Works](#behavior--how-it-works)
   - [Configuration and homing sequence](#configuration-and-homing-sequence)
+  - [Command interface groups and mode switching](#command-interface-groups-and-mode-switching)
   - [The read/write cycle](#the-readwrite-cycle)
   - [Execution modes: strict_sequential vs. pipelined](#execution-modes-strict_sequential-vs-pipelined)
   - [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling)
@@ -24,7 +25,7 @@ A [ros2_control](https://control.ros.org/) `SystemInterface` hardware plugin for
 
 ## Overview
 
-`moteus_interface` is a `hardware_interface::SystemInterface` plugin that lets [ros2_control](https://control.ros.org/) drive one or more [mjbots moteus](https://github.com/mjbots/moteus) brushless controllers as regular joints, exposing `position`/`velocity`/`effort` command and state interfaces per joint.
+`moteus_interface` is a `hardware_interface::SystemInterface` plugin that lets [ros2_control](https://control.ros.org/) drive one or more [mjbots moteus](https://github.com/mjbots/moteus) brushless controllers as regular joints, exposing `position`/`velocity`/`torque_ff`/`effort` command interfaces and `position`/`velocity`/`effort` state interfaces per joint.
 
 It exists because there is no official or widely-adopted ros2_control hardware interface for moteus controllers. This package was built to drive a multi-axis robot arm, using moteus's own C++ client library (`mjbots/moteus`) for constructing and parsing the moteus register-protocol frames, paired with a **from-scratch transport layer** written specifically for this project (see [Custom Transport Layer](#custom-transport-layer-experimental)).
 
@@ -43,10 +44,11 @@ Treat this as a working reference implementation to build on or adapt, not a pol
 ## Features
 
 - Implements `hardware_interface::SystemInterface` and is exported as the pluginlib plugin `moteus_interface/MoteusInterface`.
-- Per-joint `position` + `velocity` + `effort` command and state interfaces (exactly these three, in this order, are required on every joint).
+- Per-joint `position` + `velocity` + `torque_ff` + `effort` command interfaces and `position` + `velocity` + `effort` state interfaces (exactly these, in this order, are required on every joint).
 - Two selectable execution modes trading off latency vs. determinism: `strict_sequential` (blocking write+read each cycle) and `pipelined` (fire-and-forget write, read back on the next cycle).
-- Automatic control-mode selection per joint per cycle: standard position/velocity/feed-forward-torque mode, or a torque-only mode (feedforward torque with position-mode PD gains zeroed) when only the effort command interface is claimed.
-- A software communication watchdog per joint (consecutive-failure counter + exponential moving-average failure rate) that catches missed/degraded replies at the ros2_control level.
+- Command interfaces split into two mutually exclusive **groups** that select the control mode per joint: the position/velocity group (`position`, `velocity`, `torque_ff` → position-velocity control) and the torque group (`effort` → pure torque control with the position-mode PD gains zeroed). Claims that mix both groups on a joint, or that differ between the two joints of a differential transmission, are rejected at controller-switch time — see [Command interface groups and mode switching](#command-interface-groups-and-mode-switching).
+- `torque_ff` is clamped to the joint's URDF effort limit by the interface itself, since the controller_manager's joint limiter doesn't know about custom interfaces.
+- A software communication watchdog per actuator (consecutive-failure counter + exponential moving-average failure rate) that catches missed/degraded replies at the ros2_control level.
 - Optional per-cycle transport timing instrumentation (`TransportTiming`) that can be dumped to CSV for offline latency analysis.
 - A one-time, non-standard startup routine that reads a secondary/output encoder register and uses it to directly set the moteus internal absolute position estimate (`MakeOutputExact`), bypassing the standard moteus homing flow — see [Non-standard secondary-encoder homing](#non-standard-secondary-encoder-homing).
 - Custom, from-scratch USB transport (`TransportUSB`) built specifically for the official mjbots fdcanusb adapter, designed for more deterministic, real-time-friendly cyclic operation than the stock moteus transport — see [Custom Transport Layer](#custom-transport-layer-experimental).
@@ -79,7 +81,7 @@ Building `moteus_interface` alone will transitively fetch and build the vendored
 
 ## Usage
 
-Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Each joint needs exactly three command interfaces (`position`, `velocity`, `effort`) and three state interfaces (`position`, `velocity`, `effort`), plus the `encoder_offset` parameter; each joint is paired with one (or, for a differential joint pair, two) actuator(s) via a `<transmission>`, which is where `can_id` is declared per actuator (and, for a `differential` transmission, `joint1_encoder_actuator`/`joint2_encoder_actuator` — see [Configuration Reference](#configuration-reference)):
+Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Each joint needs exactly four command interfaces (`position`, `velocity`, `torque_ff`, `effort`, in this order) and three state interfaces (`position`, `velocity`, `effort`), plus the `encoder_offset` parameter and a positive `effort` limit on the joint's URDF `<limit>` tag (used to clamp `torque_ff`); each joint is paired with one (or, for a differential joint pair, two) actuator(s) via a `<transmission>`, which is where `can_id` is declared per actuator (and, for a `differential` transmission, `joint1_encoder_actuator`/`joint2_encoder_actuator` — see [Configuration Reference](#configuration-reference)):
 
 ```xml
 <?xml version="1.0"?>
@@ -100,6 +102,7 @@ Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Ea
       <joint name="axis1">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -119,6 +122,8 @@ Declare the hardware plugin inside a `<ros2_control>` tag in your URDF/xacro. Ea
   </xacro:macro>
 </robot>
 ```
+
+The kinematic URDF joint with the same name must also declare a positive effort limit, e.g. `<limit lower="-3.0" upper="3.0" effort="2.0" velocity="1.0"/>`; `on_init()` fails without it.
 
 Pairing `<xacro:if value="${use_hardware}">` with a `mock_components/GenericSystem` fallback (as shown above) lets you develop/test against simulated joints without real hardware attached, and switch to real hardware with a single xacro argument.
 
@@ -178,6 +183,14 @@ The hardware component name in your controller YAML (`moteus_hardware_system` ab
 
 Read in `on_init()`; the hardware component fails to initialize (`CallbackReturn::ERROR`) if this is missing on any joint.
 
+### Per-joint URDF joint limits
+
+| Name | Type | Default | Required | Meaning |
+|---|---|---|:---:|---|
+| `<limit effort="...">` | double (Nm) | — | **Yes** | Must be `> 0`. `torque_ff` commands are clamped to `[-effort, effort]` by the interface itself, because the controller_manager's joint limiter only handles the standard interfaces and doesn't know about `torque_ff`. The `effort` interface (torque group) is not clamped here. |
+
+Taken from the kinematic URDF `<joint>` (parsed by `hardware_interface` into `info_.limits`), not from the `<ros2_control>` block. Read in `on_init()`; the hardware component fails to initialize if any joint has no positive effort limit.
+
 ### Per-actuator URDF/xacro `<transmission>` `<param>`s
 
 | Name | Type | Default | Required | Meaning |
@@ -209,7 +222,7 @@ Only relevant for a `differential` transmission, where either joint's dedicated 
 |---|---|---|:---:|---|
 | `transport.usb_device` | string | `"/dev/fdcanusb"` | No | Path to the serial device backing the fdcanusb-protocol USB-CAN adapter. |
 
-> Only `can_id`, `encoder_offset`, and (for `differential` transmissions) `joint1_encoder_actuator`/`joint2_encoder_actuator` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
+> Only `can_id`, `encoder_offset`, the URDF joint effort limit, and (for `differential` transmissions) `joint1_encoder_actuator`/`joint2_encoder_actuator` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
 
 ## Behavior / How It Works
 
@@ -226,14 +239,40 @@ On `on_configure()`, the interface:
 
 If anything in this sequence throws or fails, `on_configure()` returns `CallbackReturn::ERROR` and the hardware component does not become usable.
 
+### Command interface groups and mode switching
+
+The four command interfaces of a joint are split into two groups. Which group a joint's claimed interfaces belong to decides its control mode (`CommandMode`, see `CommandMode.hpp`):
+
+| Group | Interfaces | Mode | Sent to moteus |
+|---|---|---|---|
+| position/velocity | any of `position`, `velocity`, `torque_ff` | `PVC` | `PositionMode::Command` with position, velocity and feedforward torque; the controller's own PD gains stay active |
+| torque | `effort` | `TC` | `PositionMode::Command` with position/velocity ignored and `kp_scale`/`kd_scale`/`ilimit_scale` forced to `0`, so only the feedforward torque drives the motor |
+| — | nothing claimed | `IDLE` | `PositionMode::Command` with `NaN` position, `0` velocity, `0` torque, i.e. hold the current position |
+
+The groups are mutually exclusive per joint: a controller can claim any subset of one group (e.g. only `position`, or `position` + `torque_ff` for gravity-compensated position control), but a joint never has interfaces from both groups claimed at the same time. This is what makes torque-only control safe to rely on. ros2_control only prevents two controllers from claiming the *same* interface; without the groups, a second controller could claim `position` on a joint while a torque controller holds `effort`, and the drive would suddenly switch from zero-gain torque control to stiff position control under the torque controller's feet. With the groups, once a controller has claimed `effort` on a joint, any claim on that joint's `position`/`velocity`/`torque_ff` is rejected, so the torque controller is guaranteed that the drive stays in torque-only mode for as long as it holds the claim. That's also why the feedforward torque of the position/velocity group is a separate `torque_ff` interface instead of reusing `effort`.
+
+Switching goes through the two ros2_control hooks:
+
+1. **`prepare_command_mode_switch()`** (validation only). For every joint touched by the request, it snapshots the currently claimed interfaces, applies the requested start/stop interfaces to them, and asks the joint's transmission `validate_mode_switch()`:
+   - `identity`: the joint's resulting claims must not mix groups.
+   - `differential`: both joints must not mix groups **and** must claim the exact same set of interfaces, since each actuator's command is a combination of both joints and the two actuators can't run in different modes.
+
+   The snapshots are always restored afterwards, whether the check passed or not. If any transmission says no, the whole switch is rejected (`return_type::ERROR`) and every joint of that transmission is logged with its requested interface set and the reason (mixed groups, or differing claims within the transmission). Interfaces belonging to other hardware components are ignored.
+2. **`perform_command_mode_switch()`** (commit). Applies the start/stop interfaces for real, resets the command value of every newly claimed interface to a safe default (`NaN` position, `0` velocity/`torque_ff`/`effort`) so a stale value from a previous controller is never sent, derives each joint's `CommandMode` from its claims, and then lets every transmission copy the joint modes onto its actuators (`perform_mode_switch()`). The modes are applied per actuator from then on.
+
+Example: with the differential wrist joints `axis5`/`axis6`, a controller claiming `axis5/position` and `axis6/position` is accepted; one claiming only `axis5/position`, or `axis5/position` + `axis6/effort`, is rejected. On an `identity` joint, claiming `axis1/position` + `axis1/effort` is rejected, `axis1/position` + `axis1/torque_ff` is fine.
+
 ### The read/write cycle
 
-Each joint tracks which of its three command interfaces (`position`, `velocity`, `effort`) is currently claimed by an active controller (`perform_command_mode_switch()`). Every cycle, `make_cyclic_commands()`:
+Every cycle, `make_cyclic_commands()`:
 
-- Rotates a per-cycle `send_order_` array by one position, so the order in which joints' frames are placed in the outgoing buffer shifts every cycle rather than always sending the same joint first — this exists specifically to spread out reply-timeout risk evenly across joints; see [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling).
-- Picks a control mode per joint:
-  - **Standard mode** (default, or whenever position/velocity is active): sends `position`, `velocity`, and `feedforward_torque` as a `PositionMode::Command`, in each case falling back to "inactive"/neutral values (`NaN` position, `0` velocity, `0` torque) for any interface not currently claimed or whose command value is `NaN`. Position and velocity are converted from radians / rad·s⁻¹ to the motor revolutions / rev·s⁻¹ units moteus expects (`value / 2π`).
-  - **Torque-only mode** (only when the `effort` interface is active and neither `position` nor `velocity` is): still sent as a `PositionMode::Command`, but with position/velocity ignored on the wire and `kp_scale`/`kd_scale`/`ilimit_scale` all forced to `0` — i.e. the position-mode PD/I gains are zeroed out so only the feedforward torque term drives the motor.
+- Rotates a per-cycle `send_order_` array by one position, so the order in which actuators' frames are placed in the outgoing buffer shifts every cycle rather than always sending the same actuator first — this exists specifically to spread out reply-timeout risk evenly across actuators; see [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling).
+- Maps the claimed command interfaces to joint-space physical commands depending on the joint's mode (`joint_interface_to_joint_physical()`):
+  - **`PVC`**: `position`, `velocity` and `torque_ff` are passed through; any of them that isn't claimed falls back to its neutral value (`NaN` position, `0` velocity, `0` torque). `torque_ff` is clamped to the URDF effort limit.
+  - **`TC`**: position `NaN`, velocity `0`, torque taken from `effort`.
+  - **`IDLE`**: position `NaN`, velocity `0`, torque `0`.
+- Runs each transmission's `joint_to_actuator()` to get actuator-space commands.
+- Builds one frame per actuator according to that actuator's mode (see the table above). `NaN` velocity/torque values are replaced by `0`, and position and velocity are converted from radians / rad·s⁻¹ to the motor revolutions / rev·s⁻¹ units moteus expects (`value / 2π`).
 
 **strict_sequential**: `write()` builds commands and performs a single blocking `transport_->cycle()` (write, then block for replies up to `timeout_transport_us`); `read()` then just parses whatever `cycle()` already collected.
 
@@ -266,11 +305,11 @@ This is also why the software watchdog below tolerates a short run of misses rat
 
 This package implements two independent layers of fault detection at the ros2_control level (the moteus controllers also run their own firmware-side command watchdog, left at its default configuration and not touched by this plugin):
 
-1. **Immediate hardware fault check** (`read()`): if a joint's parsed `Query::Result.fault` code is non-zero, `read()` immediately logs `RCLCPP_FATAL` and returns `hardware_interface::return_type::ERROR` for that cycle — no filtering or grace period.
-2. **Software communication watchdog** (`MoteusInterface::watchdog()` / `Joint::update_status()`), run once per `read()` call for every joint:
-   - Each joint tracks `consecutive_failures_` (reset to 0 on any successful reply, incremented on any missed reply) and an exponentially-weighted `failure_rate_` (`α = 0.01`, i.e. roughly a 100-cycle time constant), where each missed reply counts as `1.0` and each success as `0.0` in the filter.
-   - A joint is considered to be **in an error state** if `consecutive_failures_ >= 3` **or** the filtered `failure_rate_ > 0.10` (10%).
-   - In *strict* mode (used only during `on_configure()`), a single missed reply from any joint is fatal and aborts configuration.
+1. **Immediate hardware fault check** (`read()`): if an actuator's parsed `Query::Result.fault` code is non-zero, `read()` immediately logs `RCLCPP_FATAL` and returns `hardware_interface::return_type::ERROR` for that cycle — no filtering or grace period.
+2. **Software communication watchdog** (`MoteusInterface::watchdog()` / `Actuator::update_status()`), run once per `read()` call for every actuator:
+   - Each actuator tracks `consecutive_failures_` (reset to 0 on any successful reply, incremented on any missed reply) and an exponentially-weighted `failure_rate_` (`α = 0.01`, i.e. roughly a 100-cycle time constant), where each missed reply counts as `1.0` and each success as `0.0` in the filter.
+   - An actuator is considered to be **in an error state** if `consecutive_failures_ >= 3` **or** the filtered `failure_rate_ > 0.10` (10%).
+   - In *strict* mode (used only during `on_configure()`), a single missed reply from any actuator is fatal and aborts configuration.
    - In normal (non-strict) operation, a single missed reply is only logged as a warning, but the error-state thresholds above still apply — occasional missed replies are tolerated, sustained or bursty communication loss is not, and either condition returns `hardware_interface::return_type::ERROR` from `read()`.
 
 On any `ERROR` return, or on `on_shutdown()`/`on_error()`, the interface calls into `on_deactivate()`, which sends a final `MakeStop()` to every joint as an emergency stop before giving up control.

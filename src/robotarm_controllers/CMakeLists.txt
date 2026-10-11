@@ -27,6 +27,7 @@ find_package(robotarm_rbd REQUIRED)
 add_library(${PROJECT_NAME} SHARED
   src/TeleopController.cpp
   src/CartesianJogController.cpp
+  src/CartesianImpedanceController.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC

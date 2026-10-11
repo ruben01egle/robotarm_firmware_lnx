@@ -69,6 +69,9 @@ controller_manager:
     cartesian_jog_controller:
       type: robotarm_controllers/CartesianJogController
 
+    cartesian_impedance_controller:
+      type: robotarm_controllers/CartesianImpedanceController
+
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
@@ -126,3 +129,18 @@ cartesian_jog_controller:
 
     max_increment_linear: 0.003     # m, per axis clamp of one increment step
     max_increment_angular: 0.0524   # rad (3°), per axis clamp of one increment step
+
+cartesian_impedance_controller:
+  ros__parameters:
+    lambda: 0.01                    # damping of the damped least squares jacobian inverse
+    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
+
+    torque_scale: 0.5               # fraction of the urdf joint effort limits the commanded torque is clamped to
+
+    # Nm·s/rad, per joint in urdf order (axis1..axis6), starting guesses, tune on hardware
+    joint_damping: [0.5, 0.5, 0.3, 0.1, 0.05, 0.05]
+
+    # breakaway hold per joint: spring to an anchor that slides once the spring torque exceeds the
+    # breakaway torque, i.e. a virtual static friction. Band width = breakaway / stiffness, 0 disables a joint
+    hold_stiffness: [100.0, 100.0, 60.0, 20.0, 10.0, 10.0]          # Nm/rad
+    hold_breakaway_torque: [1.0, 1.5, 1.0, 0.3, 0.2, 0.2]           # Nm, must exceed the gravity model error

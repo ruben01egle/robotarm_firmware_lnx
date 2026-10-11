@@ -1,6 +1,5 @@
 #include "robotarm_controllers/CartesianJogController.hpp"
 
-#include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -158,21 +157,20 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
         RCLCPP_ERROR(get_node()->get_logger(), "rbd failed to init: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
     }
-    std::vector<std::string> rbd_links;
     if (!rbd_.get_joint_names(rbd_joint_names_) ||
         !rbd_.get_joint_limits(joint_limits_) ||
         !rbd_.get_tcp_link_name(rbd_tcp_name_) ||
-        !rbd_.get_link_names(rbd_links))
+        !rbd_.get_base_link_name(rbd_base_name_))
     {
         RCLCPP_ERROR(get_node()->get_logger(), "rbd not properly initialized: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
     }
-    rbd_base_name_ = rbd_links[0];
+
     // urdf velocity limits are hardware limits, way too fast for jogging
     for (auto & lim : joint_limits_) {
         lim.velocity *= joint_velocity_scale_;
     }
-    data_.resize(rbd_joint_names_.size());
+    data_.resize(rbd_.get_dof());
 
     twist_cmd_subscriber_ = get_node()->create_subscription<geometry_msgs::msg::TwistStamped>(
         "~/twist_cmds", rclcpp::SystemDefaultsQoS(),
@@ -252,10 +250,10 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
 
     data_.ref.q_cmd = data_.state.q;      // joint space: start from measured
     data_.ref.dq_cmd.setZero();
-    for (size_t i = 0; i < rbd_joint_names_.size(); ++i)
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_states_per_joint_ + 0;
-        size_t vel_idx = i * num_states_per_joint_ + 1;
+        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
 
         (void)command_interfaces_[pos_idx].set_value(data_.state.q[i]);
         (void)command_interfaces_[vel_idx].set_value(0.0);
@@ -594,10 +592,10 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
         ruckig_output_.pass_to_input(ruckig_input_);
     }
 
-    for (size_t i = 0; i < rbd_joint_names_.size(); ++i)
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_states_per_joint_ + 0;
-        size_t vel_idx = i * num_states_per_joint_ + 1;
+        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
 
         (void)command_interfaces_[pos_idx].set_value(data_.ref.q_cmd[i]);
         (void)command_interfaces_[vel_idx].set_value(data_.ref.dq_cmd[i]);
@@ -783,10 +781,10 @@ controller_interface::CallbackReturn CartesianJogController::read_parameters()
 
 bool CartesianJogController::fetch_robotarm_state_strict()
 {
-    for (size_t i = 0; i < rbd_joint_names_.size(); ++i)
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_states_per_joint_ + 0;
-        size_t vel_idx = i * num_states_per_joint_ + 1;
+        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
 
         auto pos_opt = state_interfaces_[pos_idx].get_optional();
         auto vel_opt = state_interfaces_[vel_idx].get_optional();
@@ -807,10 +805,10 @@ void CartesianJogController::fetch_robotarm_state()
 {
     // best effort: a missed read (lock contention) keeps the value of the last successful read,
     // a persistently stale state is caught by the deviation check
-    for (size_t i = 0; i < rbd_joint_names_.size(); ++i)
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_states_per_joint_ + 0;
-        size_t vel_idx = i * num_states_per_joint_ + 1;
+        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
 
         auto pos_opt = state_interfaces_[pos_idx].get_optional();
         auto vel_opt = state_interfaces_[vel_idx].get_optional();

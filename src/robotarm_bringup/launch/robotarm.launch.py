@@ -77,10 +77,18 @@ def generate_launch_description():
         output='screen'
     )
 
+    cartesian_impedance_controller_spawner = Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=['cartesian_impedance_controller', '--inactive'],
+            output='screen'
+        )
+
     return LaunchDescription(declared_arguments + [
         control_node,
         robot_state_pub_node,
         joint_state_broadcaster_spawner,
         teleop_controller_spawner,
         cartesian_jog_controller_spawner,
+        cartesian_impedance_controller_spawner,
     ])

@@ -174,7 +174,7 @@ private:
     rclcpp::Subscription<robotarm_interface::msg::CartesianIncrement>::SharedPtr inc_cmd_subscriber_;
     realtime_tools::RealtimeThreadSafeBox<PendingIncrementCmd> rt_command_inc_;
 
-    static constexpr size_t num_states_per_joint_ = 2;
+    static constexpr size_t num_interfaces_per_joint_ = 2;
     static constexpr double min_increment_scale_ = 0.01;    // below: increment run aborted in front of a joint limit
 };
 

@@ -107,8 +107,8 @@ controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_
     // make sure hw is in defined state when claiming interfaces
     for (size_t i = 0; i < joint_names_.size(); ++i)
     {
-        size_t pos_idx = i * num_states_per_joint_ + 0;
-        size_t vel_idx = i * num_states_per_joint_ + 1;
+        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
 
         auto pos_opt = state_interfaces_[pos_idx].get_optional();
         if (!pos_opt.has_value())
@@ -162,8 +162,8 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
     for (size_t i = 0; i < joint_names_.size(); ++i) 
     {
-        size_t pos_state_idx = i * num_states_per_joint_ + 0;
-        size_t vel_state_idx = i * num_states_per_joint_ + 1;
+        size_t pos_state_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_state_idx = i * num_interfaces_per_joint_ + 1;
 
         if (update_reference_) 
         {
@@ -204,8 +204,8 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
     for (size_t i = 0; i < joint_names_.size(); ++i)
     {
-        size_t pos_state_idx = i * num_states_per_joint_ + 0;
-        size_t vel_state_idx = i * num_states_per_joint_ + 1;
+        size_t pos_state_idx = i * num_interfaces_per_joint_ + 0;
+        size_t vel_state_idx = i * num_interfaces_per_joint_ + 1;
 
         (void)command_interfaces_[pos_state_idx].set_value(ruckig_output_->new_position[i]);
         (void)command_interfaces_[vel_state_idx].set_value(ruckig_output_->new_velocity[i]);
