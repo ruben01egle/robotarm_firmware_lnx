@@ -1,0 +1,10 @@
+# mujoco_ros2_control plugins, loaded by sim.launch.py into the sim's ros2_control_node.
+
+mujoco_ros2_control_node:
+  ros__parameters:
+    mujoco_plugins:
+      # service /external_wrench/apply_wrench (mujoco_ros2_control_msgs/srv/ApplyExternalWrench),
+      # used by push_test. Applies force and torque in the BODY frame, although the plugin's
+      # description says world frame.
+      external_wrench:
+        type: "mujoco_ros2_control_plugins/ExternalWrenchPlugin"

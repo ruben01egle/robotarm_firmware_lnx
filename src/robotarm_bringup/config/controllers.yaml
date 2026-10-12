@@ -137,10 +137,12 @@ cartesian_impedance_controller:
 
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
 
-    # Nm·s/rad, per joint in urdf order (axis1..axis6), starting values from the MuJoCo sim, tune on hardware.
-    joint_damping: [4.0, 6.0, 2.0, 0.4, 0.08, 0.002]
+    # Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
+    # hold_stiffness at the median pose inertia, see docs/dynamics/README.md (axis1 varies 0.6..2.2 with the pose)
+    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
 
     # breakaway hold per joint: spring to an anchor that slides once the spring torque exceeds the
-    # breakaway torque, i.e. a virtual static friction. Band width = breakaway / stiffness, 0 disables a joint
-    hold_stiffness: [100.0, 100.0, 60.0, 20.0, 2.0, 0.0]            # Nm/rad
-    hold_breakaway_torque: [1.0, 1.5, 1.0, 0.3, 0.05, 0.0]          # Nm, must exceed the gravity model error
+    # breakaway torque, i.e. a virtual static friction. Band width = breakaway / stiffness, 0 disables a joint.
+    # Stiffness from the band: 0.05 rad for axis1..3, 0.1 rad for the wrist (model error relatively larger)
+    hold_stiffness: [20.0, 50.0, 30.0, 4.0, 1.0, 1.0]               # Nm/rad
+    hold_breakaway_torque: [1.0, 2.5, 1.5, 0.4, 0.1, 0.1]          # Nm, must exceed the gravity model error

@@ -160,6 +160,11 @@ def test_passive_drop_stays_finite(sim):
     assert np.all(np.isfinite(sim.d.qvel))
 
 
+def test_mouse_stiffness_from_params(sim):
+    expected = (sim.params.get('simulation') or {}).get('mouse_stiffness', 10.0)
+    assert sim.m.vis.map.stiffness == pytest.approx(expected)
+
+
 def test_no_contact_between_base_and_first_link(sim):
     sim.forward(np.zeros(sim.m.nq))
     assert sim.d.ncon == 0

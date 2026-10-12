@@ -22,6 +22,7 @@ ros2 launch robotarm_mujoco sim.launch.py headless:=true rviz:=true
 | `software_rendering` | `true` | Mesa software OpenGL for the viewer and RViz. In the dev container, hardware rendering hangs on VS Code's forwarded X display; set `false` once the container has working GPU access |
 | `sim_params` | installed `config/sim_params.yaml` | simulation parameters (armature, friction, timestep) |
 | `controller_params` | none | yaml applied after `robotarm_bringup/config/controllers.yaml`, for gains you only want in the sim |
+| `joint_state_rate` | `50` | Hz, `/joint_states` rate. `500` for the push test, 50 Hz is too coarse to fit a response |
 
 As on the real robot, the hardware component starts `inactive` and the impedance controller is only
 loaded:
@@ -42,11 +43,68 @@ ros2 service call /mujoco_ros2_control_node/reset_world mujoco_ros2_control_msgs
 ros2 service call /mujoco_ros2_control_node/set_pause mujoco_ros2_control_msgs/srv/SetPause "{paused: false}"
 ```
 
-In the viewer, double-click a link and Ctrl + right-drag to push it.
+With the controller already active, its hold is still anchored at the old pose. Activating it after the
+reset by hand is too slow: the CLI needs over a second after the unpause, and the limp arm falls in the
+meantime. `push_test --pose` does the whole sequence correctly, see below.
+
+In the viewer, double-click a link and Ctrl + right-drag to push it. This is only for rough poking: the
+drag is a spring from the grab point to the mouse, so nothing moves until it beats gravity, joint limits or
+the hold's breakaway torque, and the stretched spring then flings the arm. Its strength is
+`mouse_stiffness` in `sim_params.yaml` (10, MuJoCo's default 100 overpowers the motors). For defined
+pushes use the push test.
 
 The viewer and RViz need access to your desktop's X server. If they fail with *"Authorization
 required, but no authorization protocol specified"*, run `xhost +local:` on the host (not in the
 container), once per login.
+
+## Push test
+
+`push_test` pushes a body with a defined wrench for a set time, releases it and fits the free response of
+every joint: overshoot, damping ratio ζ, damped frequency and 5% settling time, next to the ζ and f_n the
+gains should give at that pose (from the mass matrix, see
+[docs/dynamics/README.md](../../docs/dynamics/README.md)).
+
+```bash
+ros2 launch robotarm_mujoco sim.launch.py joint_state_rate:=500
+ros2 control set_hardware_component_state moteus_hardware_system active
+
+# reset to a free pose, controller holding it, then 10 N down on the elbow for 0.3 s
+ros2 run robotarm_mujoco push_test --pose 0.3 -0.9 0.8 0.5 0.6 0.4
+# bend axis5: 0.5 N sideways at a 10 cm "tool tip" in front of the wrist center, held 1.5 s
+ros2 run robotarm_mujoco push_test --pose 0.3 -0.9 0.8 0.5 0.6 0.4 \
+  --body stage6 --point 0 0 0.1 --force 0.5 0 0 --duration 1.5
+```
+
+| Option | Default | |
+|---|---|---|
+| `--pose` | | 6 joint angles [rad]: deactivate the controller, pause, reset to the pose, activate again (the hold anchors there), unpause. Without it the test starts wherever the arm is |
+| `--body` | `stage3` | MJCF body, `stage1`..`stage6` |
+| `--force`, `--torque` | `0 0 -10`, `0 0 0` | N and Nm, world frame |
+| `--point` | `0 0 0` | m, application point in the body frame |
+| `--duration` | `0.3` | s, push length. Short: a knock; long: the arm settles at the deflection first, cleanest fit |
+| `--record` | `3.0` | s, recorded after the release |
+| `--csv` | | writes `t, axis1..axis6` for plotting, `t = 0` at the push |
+| `--tool`, `--params`, `--controllers` | `none`, installed files | model and gains for the expected values |
+
+Before pushing it prints the **joint torques of the push** at the current pose, and warns when
+
+- a joint rests on a position limit or a link rests on the floor. They take part of the push and the
+  response says nothing about the controller. The arm falls limp onto both before the controller is
+  active, so use `--pose`.
+- the pushed body's own joint gets no torque. `stage5` and `stage6` have their origin in the wrist center,
+  where the axes of axis5 and axis6 cross: a force there turns neither. Use `--point` for a lever, and a
+  force perpendicular to the joint axis (check the printed torques, the axes turn with the pose).
+
+Reading the table: **anchor slid ≠ 0** means the push exceeded the breakaway torque and the hold moved;
+stay below it (`τ_push < hold_breakaway_torque`) to measure ζ of the hold itself. **coupled** means the
+joint moved further after the release than it was deflected at release, dragged by the other joints or
+its momentum, so there is no decay to fit. Joints that moved less than 1 mrad are not evaluated.
+
+The wrench comes from mujoco_ros2_control's `ExternalWrenchPlugin`, which `sim.launch.py` always loads
+([config/sim_plugins.yaml](config/sim_plugins.yaml)), service `/external_wrench/apply_wrench`. The plugin
+applies force and torque in the **body frame**, although its description says world frame: a vertical
+"world" force on `stage3` turned the vertical axis1. `push_test` rotates its world frame input into the
+body frame at the pose before the push.
 
 ## How the model is made
 

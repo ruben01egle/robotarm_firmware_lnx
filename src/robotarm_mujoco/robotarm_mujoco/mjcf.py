@@ -244,7 +244,7 @@ def _add_options(mjcf, simulation, contact_exclude):
         ET.SubElement(contact, 'exclude', {'body1': body1, 'body2': body2})
 
 
-def scene_xml():
+def scene_xml(mouse_stiffness=10.0):
     return f"""<mujoco model="robotarm scene">
   <include file="{ROBOT_FILE}"/>
 
@@ -253,6 +253,7 @@ def scene_xml():
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
     <global azimuth="135" elevation="-25"/>
+    <map stiffness="{float(mouse_stiffness):.9g}"/>
   </visual>
 
   <asset>
@@ -285,7 +286,9 @@ def urdf_to_mjcf(urdf, params):
         mjcf, params.get('simulation') or {}, params.get('contact_exclude') or [])
 
     ET.indent(mjcf, space='  ')
-    return ET.tostring(mjcf, encoding='unicode') + '\n', scene_xml()
+    simulation = params.get('simulation') or {}
+    return ET.tostring(mjcf, encoding='unicode') + '\n', scene_xml(
+        simulation.get('mouse_stiffness', 10.0))
 
 
 def generate(out_dir, tool='none', params_file=None):

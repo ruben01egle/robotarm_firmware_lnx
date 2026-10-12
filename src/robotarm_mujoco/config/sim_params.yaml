@@ -4,6 +4,8 @@
 simulation:
   timestep: 0.001                 # s, physics step (controller_manager runs at 500 Hz)
   integrator: implicitfast        # implicit in joint damping, stable with stiff impedance gains
+  mouse_stiffness: 10.0           # viewer drag spring. MuJoCo's default 100 pulls with hundreds of N, far beyond
+                                  # the motors, and flings the light wrist joints between their limits
 
 # Per joint, all optional:
 #   armature      kg·m², reflected rotor inertia at the joint, used as is
@@ -36,12 +38,15 @@ joints:
     gear_ratio: 4.0
     damping: 0.02
     frictionloss: 0.0
+  # Wrist differential: each motor turns for both joints (rotor_a = N·(q5 + q6), rotor_b = N·(q5 − q6)),
+  # so each joint sees both rotors: armature = 2 · J_rotor · N² = 2 · 2.25e-5 · 4² = 7.2e-4.
+  # rotor_inertia + gear_ratio would only give half of that. J_rotor 20–25 kg·mm², ESTIMATE.
   axis5:
-    armature: 0.0                 # TODO: tiny wrist motors (differential), set once rotor inertia and ratio are known
+    armature: 7.2e-4              # wrist motor, differential, see above
     damping: 0.005
     frictionloss: 0.0
   axis6:
-    armature: 0.0                 # TODO: tiny wrist motors (differential), set once rotor inertia and ratio are known
+    armature: 7.2e-4              # wrist motor, differential, see above
     damping: 0.005
     frictionloss: 0.0
 

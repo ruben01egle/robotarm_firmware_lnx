@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'robotarm_mjcf = robotarm_mujoco.mjcf:main',
+            'push_test = robotarm_mujoco.push_test:main',
         ],
     },
 )
