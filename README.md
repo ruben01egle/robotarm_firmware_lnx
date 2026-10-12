@@ -43,11 +43,12 @@ More joints and more controller options are expected as the arm grows — see
 | [`moteus_interface`](src/moteus_interface) | Native | `ros2_control` `SystemInterface` hardware plugin that drives mjbots moteus brushless controllers over CAN-FD via the official fdcanusb USB adapter, using a from-scratch transport layer built for deterministic RT cycles. **[See its own README for the full deep dive](src/moteus_interface/README.md).** |
 | [`robotarm_controllers`](src/robotarm_controllers) | Native | Custom `ros2_control` controllers. Currently ships `TeleopController`: a reactive controller that runs incoming joint position targets through [Ruckig](https://ruckig.com/) for jerk-limited online trajectory smoothing, with a runtime speed-scale service, and `CartesianJogController`: jerk-limited Cartesian jogging of the TCP from a twist command. |
 | [`robotarm_bringup`](src/robotarm_bringup) | Native | ROS 2 launch files and `controller_manager` YAML configuration that bring the arm up, either against real hardware (`moteus_interface`) or a mocked system (`mock_components/GenericSystem`) for development without hardware attached. |
+| [`robotarm_mujoco`](src/robotarm_mujoco) | Native | MuJoCo simulation for the torque (effort) controllers: converts the URDF to a MuJoCo model on every launch and runs the controllers against `mujoco_ros2_control`. Kept separate so `robotarm_description` has no MuJoCo dependency. **[See its README](src/robotarm_mujoco/README.md).** |
 | [`robotarm_description`](src/robotarm_description) | **Git submodule** | URDF/Xacro, the `<ros2_control>` tag definitions, and STL meshes describing the arm's kinematics and geometry — currently 6 joints (`axis1`…`axis6`, with a differential wrist on `axis5`/`axis6`) plus a selectable tool (`tool` xacro arg) that defines the TCP. The single source of truth for the robot's shape, shared with the high-level repo. |
 | [`robotarm_interface`](src/robotarm_interface) | **Git submodule** | Custom ROS 2 message/service/action definitions — interface contracts with no application logic of their own, shared between this repo and the high-level repo. Some (e.g. `SetFloat64`) are consumed here; others (`CANFDTunnel.srv`, `Mission`/`ConfigMotor`/`PlanCSV`/`PlanJointSpace`/`ReadMotorConfigs` actions) are consumed by the high-level repo rather than by anything in this one. |
 
 `robotarm_description` and `robotarm_interface` are the only two submodules; `moteus_interface`,
-`robotarm_controllers`, and `robotarm_bringup` are native to this repository.
+`robotarm_controllers`, `robotarm_bringup`, and `robotarm_mujoco` are native to this repository.
 
 ## Architecture
 
@@ -233,7 +234,9 @@ permissions for the fdcanusb adapter, Docker RT runtime flags — see
   latency (produced by its `time_transport` option).
 - **[docs/motor_cfg/](docs/motor_cfg/)** — per-axis moteus controller register
   configuration dumps (`axis1`/`axis2`/`axis3`), kept as a backup/reference of
-  each controller's calibrated configuration.
+  each controller's calibrated configuration. Its
+  **[README](docs/motor_cfg/README.md)** is the setup guide: which values are set
+  for this robot, their units, and why.
 
 ## Status / Roadmap
 
