@@ -1,10 +1,11 @@
 #include "robotarm_controllers/CartesianImpedanceController.hpp"
 
 #include <algorithm>
+#include <limits>
 
 PLUGINLIB_EXPORT_CLASS(
   cartesian_impedance_controller::CartesianImpedanceController, 
-  controller_interface::ControllerInterface
+  controller_interface::ChainableControllerInterface
 )
 
 namespace
@@ -17,6 +18,32 @@ namespace
         if (static_cast<size_t>(t.size()) != limits.size()) return false;
         for (Eigen::Index i = 0; i < t.size(); ++i) {
             t(i) = std::clamp(t(i), -limits[i].effort, limits[i].effort);
+        }
+        return true;
+    }
+
+    bool clamp_torque_rate(
+        Eigen::VectorXd& t_new,
+        const Eigen::VectorXd& t,
+        const std::vector<robotarm_rbd::RobotarmRbd::Limits>& limits,
+        const double dt,
+        const double rise_time,
+        bool* clamped = nullptr)
+    {
+        if (clamped != nullptr) *clamped = false;
+
+        if (!t_new.allFinite() || !t.allFinite()) return false;
+        if (t_new.size() != t.size()) return false;
+        if (static_cast<size_t>(t.size()) != limits.size()) return false;
+
+        if (rise_time <= 0) return true;
+        for (Eigen::Index i = 0; i < t.size(); ++i) {
+            const double max_step = limits[i].effort / rise_time * dt;
+            const double t_new_i_clamped = std::clamp(t_new(i), t(i) - max_step, t(i) + max_step);
+            if (t_new_i_clamped != t_new(i)) {
+                t_new(i) = t_new_i_clamped;
+                if (clamped != nullptr) *clamped = true;
+            }
         }
         return true;
     }
@@ -147,6 +174,7 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_activate(c
 
     data_.ref.q_anchor = data_.state.q;
     data_.ref.tau_start = data_.state.tau;
+    data_.ref.tau_cmd = data_.state.tau;
     ramp_elapsed_ = 0;
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
@@ -159,10 +187,86 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_deactivate
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period)
+std::vector<hardware_interface::CommandInterface> CartesianImpedanceController::on_export_reference_interfaces()
+{
+    // per joint [position, velocity, acceleration], same layout as the upstream controllers write it.
+    // NaN until an upstream controller writes them
+    reference_interfaces_.assign(rbd_joint_names_.size() * num_refs_per_joint_,
+                                 std::numeric_limits<double>::quiet_NaN());
+
+    std::vector<hardware_interface::CommandInterface> reference_interfaces;
+    reference_interfaces.reserve(reference_interfaces_.size());
+    for (size_t i = 0; i < rbd_joint_names_.size(); ++i) {
+        const std::string & joint = rbd_joint_names_[i];
+        reference_interfaces.emplace_back(get_node()->get_name(), joint + "/position",
+                                          &reference_interfaces_[i * num_refs_per_joint_ + 0]);
+        reference_interfaces.emplace_back(get_node()->get_name(), joint + "/velocity",
+                                          &reference_interfaces_[i * num_refs_per_joint_ + 1]);
+        reference_interfaces.emplace_back(get_node()->get_name(), joint + "/acceleration",
+                                          &reference_interfaces_[i * num_refs_per_joint_ + 2]);
+    }
+    return reference_interfaces;
+}
+
+controller_interface::return_type CartesianImpedanceController::update_reference_from_subscribers(
+    const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
+{
+    // no standalone input yet, the references keep their values
+    return controller_interface::return_type::OK;
+}
+
+controller_interface::return_type CartesianImpedanceController::update_and_write_commands(const rclcpp::Time& /*time*/, const rclcpp::Duration& period)
 {
     fetch_robotarm_state();
 
+    // write new torque into data_.tmp.tau_new
+    switch (mode_)
+    {
+    case Mode::GC:
+        if (!compute_gc_torque()) return controller_interface::return_type::ERROR;
+        break;
+
+    case Mode::IMPEDANCE:
+        if (!compute_impedance_torque()) return controller_interface::return_type::ERROR;
+        break;
+    }
+
+    // smooth ramp in on startup
+    if (ramp_elapsed_ < ramp_time_) {
+        data_.tmp.tau_new.noalias() = (data_.tmp.tau_new - data_.ref.tau_start)/ramp_time_*ramp_elapsed_ + data_.ref.tau_start;
+        ramp_elapsed_ += period.seconds();
+    }
+
+    bool rate_limited = false;
+    if (!clamp_torque_rate(data_.tmp.tau_new,
+                           data_.ref.tau_cmd,
+                           joint_limits_,
+                           period.seconds(),
+                           torque_rise_time_,
+                           &rate_limited)) {
+        RCLCPP_ERROR(get_node()->get_logger(), "Error clamping torque rate: nan, invalid limits or length mismatch");
+        return controller_interface::return_type::ERROR;
+    }
+    if (rate_limited) {
+        RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+                            "Torque rate limited");
+    }
+    if (!clamp_torque(data_.tmp.tau_new, joint_limits_)) {
+        RCLCPP_ERROR(get_node()->get_logger(), "Error clamping torque: nan or invalid limits");
+        return controller_interface::return_type::ERROR;
+    }
+    data_.ref.tau_cmd = data_.tmp.tau_new;
+
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
+    {
+        (void)command_interfaces_[i].set_value(data_.ref.tau_cmd[i]);
+    }
+
+    return controller_interface::return_type::OK;
+}
+
+bool CartesianImpedanceController::compute_gc_torque()
+{
     for (size_t i=0; i<rbd_.get_dof(); ++i) {
         if (hold_stiffness_[i] <= 0.0 || hold_breakaway_torque_[i] <= 0.0) continue;
         double eps_max = hold_breakaway_torque_[i]/hold_stiffness_[i];
@@ -187,39 +291,30 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
             data_.ref.F_tcp_ref,
             data_.ref.M_tcp_ref)) {
         RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
-        return controller_interface::return_type::ERROR;
+        return false;
     }
     data_.tmp.tau_joint_damped.noalias() = - joint_damping_.cwiseProduct(data_.state.dq);
     data_.tmp.tau_breakaway.noalias() = - hold_stiffness_.cwiseProduct(data_.state.q - data_.ref.q_anchor);
-    data_.ref.tau_cmd.noalias() = data_.tmp.tau_ff + data_.tmp.tau_joint_damped + data_.tmp.tau_breakaway;
+    data_.tmp.tau_new.noalias() = data_.tmp.tau_ff + data_.tmp.tau_joint_damped + data_.tmp.tau_breakaway;
+    return true;
+}
 
-    // smooth ramp in on startup
-    if (ramp_elapsed_ < ramp_time_) {
-        data_.ref.tau_cmd.noalias() = (data_.ref.tau_cmd - data_.ref.tau_start)/ramp_time_*ramp_elapsed_ + data_.ref.tau_start;
-        ramp_elapsed_ += period.seconds();
-    }
-
-    if (!clamp_torque(data_.ref.tau_cmd, joint_limits_)) {
-        RCLCPP_ERROR(get_node()->get_logger(), "Error clamping torque: nan or invalid limits");
-        return controller_interface::return_type::ERROR;
-    }
-
-    for (size_t i = 0; i < rbd_.get_dof(); ++i)
-    {
-        (void)command_interfaces_[i].set_value(data_.ref.tau_cmd[i]);
-    }
-
-    return controller_interface::return_type::OK;
+bool CartesianImpedanceController::compute_impedance_torque()
+{
+    return true;
 }
 
 void CartesianImpedanceController::declare_parameters()
 {
     auto node = get_node();
 
+    node->declare_parameter<std::string>("mode", "gc");                 // "gc" or "impedance"
+
     node->declare_parameter<double>("lambda", 0.01);
     node->declare_parameter<std::string>("jinv_method", "svd");         // "svd" or "ldlt"
 
     node->declare_parameter<double>("torque_scale", 1.0);
+    node->declare_parameter<double>("torque_rise_time", 0.0);
     node->declare_parameter<std::vector<double>>("joint_damping", std::vector<double>());
     node->declare_parameter<std::vector<double>>("hold_stiffness", std::vector<double>());
     node->declare_parameter<std::vector<double>>("hold_breakaway_torque", std::vector<double>());
@@ -228,6 +323,18 @@ void CartesianImpedanceController::declare_parameters()
 controller_interface::CallbackReturn CartesianImpedanceController::read_parameters()
 {
     auto node = get_node();
+
+    const std::string mode = node->get_parameter("mode").as_string();
+    if (mode == "gc") {
+        mode_ = Mode::GC;
+    } else if (mode == "impedance") {
+        mode_ = Mode::IMPEDANCE;
+    } else {
+        RCLCPP_ERROR(node->get_logger(), "Parameter mode must be 'gc' or 'impedance', got '%s'",
+                     mode.c_str());
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
     rbd_cfg_.lambda = node->get_parameter("lambda").as_double();
 
     // "svd": selective, adaptive damping (accurate), "ldlt": constant damping (fast)
@@ -246,6 +353,13 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     if (!std::isfinite(torque_scale_) || torque_scale_ <= 0.0 || torque_scale_ > 1.0) {
         RCLCPP_ERROR(node->get_logger(), "Parameter torque_scale must be in (0, 1], got %f",
                      torque_scale_);
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
+    torque_rise_time_ = node->get_parameter("torque_rise_time").as_double();
+    if (!std::isfinite(torque_rise_time_) || torque_rise_time_ < 0.0) {
+        RCLCPP_ERROR(node->get_logger(), "Parameter torque_rise_time must be >= 0, got %f",
+                     torque_rise_time_);
         return controller_interface::CallbackReturn::ERROR;
     }
 
