@@ -1,7 +1,7 @@
-#include "robotarm_controllers/TeleopController.hpp"
+#include "robotarm_controllers/JointStreamController.hpp"
 
 PLUGINLIB_EXPORT_CLASS(
-  teleop_controller::TeleopController, 
+  joint_stream_controller::JointStreamController, 
   controller_interface::ControllerInterface
 )
 
@@ -9,7 +9,7 @@ namespace
 {  // utility
 
 // called from RT control loop
-void reset_controller_reference_msg(teleop_controller::CmdType & msg)
+void reset_controller_reference_msg(joint_stream_controller::CmdType & msg)
 {
   for (auto & data : msg.data)
   {
@@ -19,29 +19,36 @@ void reset_controller_reference_msg(teleop_controller::CmdType & msg)
 
 }  // namespace
 
-namespace teleop_controller
+namespace joint_stream_controller
 {
 
-TeleopController::TeleopController()
+JointStreamController::JointStreamController()
 : controller_interface::ControllerInterface(), joints_command_subscriber_(nullptr)
 {
     update_reference_ = true;
 }
 
-controller_interface::InterfaceConfiguration TeleopController::command_interface_configuration() const
+controller_interface::InterfaceConfiguration JointStreamController::command_interface_configuration() const
 {
     controller_interface::InterfaceConfiguration command_interfaces_config;
     command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
     for (const auto & joint : joint_names_)
     {
-        command_interfaces_config.names.push_back(joint + "/position");
-        command_interfaces_config.names.push_back(joint + "/velocity");
+        if (chained_) {
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/position");
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/velocity");
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/acceleration");
+        }
+        else {
+            command_interfaces_config.names.push_back(joint + "/position");
+            command_interfaces_config.names.push_back(joint + "/velocity");
+        }
     }
 
     return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration TeleopController::state_interface_configuration() const
+controller_interface::InterfaceConfiguration JointStreamController::state_interface_configuration() const
 {
     controller_interface::InterfaceConfiguration state_interfaces_config;
     state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -54,7 +61,7 @@ controller_interface::InterfaceConfiguration TeleopController::state_interface_c
     return state_interfaces_config;
 }
 
-controller_interface::CallbackReturn TeleopController::on_init()
+controller_interface::CallbackReturn JointStreamController::on_init()
 {
     try
     {
@@ -69,13 +76,16 @@ controller_interface::CallbackReturn TeleopController::on_init()
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp_lifecycle::State &/*previous_state*/)
+controller_interface::CallbackReturn JointStreamController::on_configure(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     auto ret = read_parameters();
     if (ret != controller_interface::CallbackReturn::SUCCESS)
     {
         return ret;
     }
+
+    chained_ = !chain_to_.empty();
+    num_cmd_interfaces_per_joint_ = chained_ ? 3 : 2;
 
     joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
         "~/commands", rclcpp::SystemDefaultsQoS(),
@@ -96,28 +106,26 @@ controller_interface::CallbackReturn TeleopController::on_configure(const rclcpp
 
     scale_speed_service_ = get_node()->create_service<robotarm_interface::srv::SetFloat64>(
         "~/scale_speed",
-        std::bind(&TeleopController::handle_scale_speed, this, std::placeholders::_1, std::placeholders::_2));
+        std::bind(&JointStreamController::handle_scale_speed, this, std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(get_node()->get_logger(), "configure successful");
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
+controller_interface::CallbackReturn JointStreamController::on_activate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     // make sure hw is in defined state when claiming interfaces
     for (size_t i = 0; i < joint_names_.size(); ++i)
     {
-        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
+        size_t pos_state_idx = i * num_state_interfaces_per_joint_ + 0;
 
-        auto pos_opt = state_interfaces_[pos_idx].get_optional();
+        auto pos_opt = state_interfaces_[pos_state_idx].get_optional();
         if (!pos_opt.has_value())
         {
             RCLCPP_ERROR(get_node()->get_logger(), "Could not read position of %s", joint_names_[i].c_str());
             return controller_interface::CallbackReturn::ERROR;   // refuse to activate rather than command garbage
         }
-        (void)command_interfaces_[pos_idx].set_value(pos_opt.value());
-        (void)command_interfaces_[vel_idx].set_value(0.0);
+        write_joint_cmd(i, pos_opt.value(), 0.0, 0.0);
     }
 
     reset_controller_reference_msg(joint_commands_);
@@ -128,12 +136,12 @@ controller_interface::CallbackReturn TeleopController::on_activate(const rclcpp_
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn TeleopController::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
+controller_interface::CallbackReturn JointStreamController::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type TeleopController::update(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
+controller_interface::return_type JointStreamController::update(const rclcpp::Time &/*time*/, const rclcpp::Duration &period)
 {
     rt_command_.try_get([this](const CmdType & msg){joint_commands_.data = msg.data;});
 
@@ -162,8 +170,8 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
     for (size_t i = 0; i < joint_names_.size(); ++i) 
     {
-        size_t pos_state_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_state_idx = i * num_interfaces_per_joint_ + 1;
+        size_t pos_state_idx = i * num_state_interfaces_per_joint_ + 0;
+        size_t vel_state_idx = i * num_state_interfaces_per_joint_ + 1;
 
         if (update_reference_) 
         {
@@ -204,17 +212,14 @@ controller_interface::return_type TeleopController::update(const rclcpp::Time &/
 
     for (size_t i = 0; i < joint_names_.size(); ++i)
     {
-        size_t pos_state_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_state_idx = i * num_interfaces_per_joint_ + 1;
-
-        (void)command_interfaces_[pos_state_idx].set_value(ruckig_output_->new_position[i]);
-        (void)command_interfaces_[vel_state_idx].set_value(ruckig_output_->new_velocity[i]);
+        write_joint_cmd(i, ruckig_output_->new_position[i], ruckig_output_->new_velocity[i],
+                        ruckig_output_->new_acceleration[i]);
     }
 
     return controller_interface::return_type::OK;
 }
 
-void TeleopController::declare_parameters()
+void JointStreamController::declare_parameters()
 {
     auto node = get_node();
 
@@ -225,9 +230,11 @@ void TeleopController::declare_parameters()
     node->declare_parameter<double>("max_jerk", 2.0);           // in rad/s³
 
     node->declare_parameter<bool>("sync_joints", false);
+
+    node->declare_parameter<std::string>("chain_to", "");
 }
 
-controller_interface::CallbackReturn TeleopController::read_parameters()
+controller_interface::CallbackReturn JointStreamController::read_parameters()
 {
     auto node = get_node();
 
@@ -240,6 +247,8 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
         RCLCPP_ERROR(node->get_logger(), "The 'joints' parameter list cannot be empty!");
         return controller_interface::CallbackReturn::FAILURE;
     }
+
+    chain_to_ = node->get_parameter("chain_to").as_string();
 
     size_t dofs = joint_names_.size();
     try 
@@ -254,7 +263,6 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
 
         for (size_t i = 0; i < dofs; ++i)
         {
-
             ruckig_input_->max_velocity[i] = max_velocity_;
             ruckig_input_->max_acceleration[i] = max_acceleration_;
             ruckig_input_->max_jerk[i] = max_jerk_;
@@ -262,11 +270,11 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
         bool sync_joints = node->get_parameter("sync_joints").as_bool();
         if (sync_joints) {
             ruckig_input_->synchronization = ruckig::Synchronization::Time;
-            RCLCPP_INFO(get_node()->get_logger(), "Teleop controller sync joints: ON");
+            RCLCPP_INFO(get_node()->get_logger(), "Joint stream controller sync joints: ON");
         }
         else {
             ruckig_input_->synchronization = ruckig::Synchronization::None;
-            RCLCPP_INFO(get_node()->get_logger(), "Teleop controller sync joints: OFF");
+            RCLCPP_INFO(get_node()->get_logger(), "Joint stream controller sync joints: OFF");
         }
     }
     catch (const std::exception& e)
@@ -278,12 +286,31 @@ controller_interface::CallbackReturn TeleopController::read_parameters()
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void TeleopController::handle_scale_speed(
+void JointStreamController::handle_scale_speed(
     const std::shared_ptr<robotarm_interface::srv::SetFloat64::Request> request,
     std::shared_ptr<robotarm_interface::srv::SetFloat64::Response> response)
 {
+    // 0, negative or nan would hand invalid limits to ruckig and stop the controller
+    if (!std::isfinite(request->data) || request->data <= 0.0 || request->data > 1.0) {
+        response->success = false;
+        response->message = "speed scale must be in (0, 1]";
+        return;
+    }
     speed_scale_.store(request->data);
     response->success = true;
+}
+
+void JointStreamController::write_joint_cmd(size_t i, double q, double dq, double ddq)
+{
+    const size_t pos_cmd_idx = i * num_cmd_interfaces_per_joint_ + 0;
+    const size_t vel_cmd_idx = i * num_cmd_interfaces_per_joint_ + 1;
+    const size_t acc_cmd_idx = i * num_cmd_interfaces_per_joint_ + 2;
+
+    (void)command_interfaces_[pos_cmd_idx].set_value(q);
+    (void)command_interfaces_[vel_cmd_idx].set_value(dq);
+    if (chained_) {
+        (void)command_interfaces_[acc_cmd_idx].set_value(ddq);
+    }
 }
 
 }

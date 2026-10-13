@@ -6,7 +6,7 @@
 | Plugin | Class | Purpose |
 |---|---|---|
 | `robotarm_controllers/CartesianJogController` | `cartesian_jog_controller::CartesianJogController` | Jerk limited Cartesian velocity jogging of the TCP |
-| `robotarm_controllers/TeleopController` | `teleop_controller::TeleopController` | Jerk limited joint space position following for teleoperation |
+| `robotarm_controllers/JointStreamController` | `joint_stream_controller::JointStreamController` | Jerk limited joint space following of streamed position targets (e.g. teleoperation) |
 
 Both claim `position` + `velocity` command interfaces of all joints, so only one of them can be
 active at a time.
@@ -29,7 +29,7 @@ active at a time.
   - [Safety and error handling](#safety-and-error-handling)
   - [Realtime considerations](#realtime-considerations)
   - [Known limitations and roadmap](#known-limitations-and-roadmap)
-- [TeleopController](#teleopcontroller)
+- [JointStreamController](#jointstreamcontroller)
 
 ---
 
@@ -219,10 +219,10 @@ cartesian_jog_controller:
 #### Running it
 
 `robotarm_bringup/launch/robotarm.launch.py` spawns the controller **inactive**. To activate it (and
-release the teleop controller, which claims the same interfaces):
+release the joint stream controller, which claims the same interfaces):
 
 ```bash
-ros2 control switch_controllers --activate cartesian_jog_controller --deactivate teleop_controller
+ros2 control switch_controllers --activate cartesian_jog_controller --deactivate joint_stream_controller
 ```
 
 Send a twist, e.g. 2 cm/s along base x:
@@ -1089,7 +1089,7 @@ the topic can queue up a long move. A new twist message (zero = stop) ends the r
 
 ---
 
-## TeleopController
+## JointStreamController
 
 > **Status:** skeleton. This section will be expanded once the controller is reworked.
 

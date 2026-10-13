@@ -1,7 +1,7 @@
 # robotarm_mujoco
 
 MuJoCo simulation of the robotarm, for the controllers that command **effort**. The position and
-velocity controllers (teleop, Cartesian jog) keep using `mock_components` through
+velocity controllers (joint stream, Cartesian jog) keep using `mock_components` through
 `robotarm_bringup`, since the moteus internal loop is what they rely on.
 
 The sim runs [`mujoco_ros2_control`](https://github.com/ros-controls/mujoco_ros2_control) as the

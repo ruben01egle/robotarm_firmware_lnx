@@ -108,8 +108,15 @@ controller_interface::InterfaceConfiguration CartesianJogController::command_int
     command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
     for (const auto & joint : rbd_joint_names_)
     {
-        command_interfaces_config.names.push_back(joint + "/position");
-        command_interfaces_config.names.push_back(joint + "/velocity");
+        if (chained_) {
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/position");
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/velocity");
+            command_interfaces_config.names.push_back(chain_to_ + "/" + joint + "/acceleration");
+        }
+        else {
+            command_interfaces_config.names.push_back(joint + "/position");
+            command_interfaces_config.names.push_back(joint + "/velocity");
+        }
     }
 
     return command_interfaces_config;
@@ -150,6 +157,9 @@ controller_interface::CallbackReturn CartesianJogController::on_configure(const 
     {
         return ret;
     }
+
+    chained_ = !chain_to_.empty();
+    num_cmd_interfaces_per_joint_ = chained_ ? 3 : 2;
 
     std::string urdf_string = get_robot_description();
 
@@ -250,14 +260,9 @@ controller_interface::CallbackReturn CartesianJogController::on_activate(const r
 
     data_.ref.q_cmd = data_.state.q;      // joint space: start from measured
     data_.ref.dq_cmd.setZero();
-    for (size_t i = 0; i < rbd_.get_dof(); ++i)
-    {
-        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
+    data_.ref.ddq_cmd.setZero();
 
-        (void)command_interfaces_[pos_idx].set_value(data_.state.q[i]);
-        (void)command_interfaces_[vel_idx].set_value(0.0);
-    }
+    write_robotarm_cmd();
 
     // update x_ref to q_cmd with fk
     if (!rbd_.calculate_link_transform(data_.ref.q_cmd, rbd_tcp_name_, data_.ref.x_ref)) {
@@ -548,20 +553,27 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
     Eigen::Matrix<double, 6, 1> dx_cmd = dx_ff + dx_ik_corr;
 
     // convert to joint space and calculate dq_cmd
-    data_.ref.dq_cmd.noalias() = data_.tmp.j_inv * dx_cmd;
+    const double dt = period.seconds();
+
+    data_.tmp.dq_cmd_new.noalias() = data_.tmp.j_inv * dx_cmd;
     // limit/scale joint space as last resort
-    double scale = velocity_scale(data_.ref.dq_cmd, joint_limits_);
-    data_.ref.dq_cmd = scale * data_.ref.dq_cmd;
+    double scale = velocity_scale(data_.tmp.dq_cmd_new, joint_limits_);
+    data_.tmp.dq_cmd_new *= scale;
+    // calculate joint space acceleration
+    if (dt > 0) data_.ref.ddq_cmd.noalias() = (data_.tmp.dq_cmd_new - data_.ref.dq_cmd) / dt;
+    else data_.ref.ddq_cmd.setZero();
+    // store dq_cmd
+    data_.ref.dq_cmd = data_.tmp.dq_cmd_new;
     // part of dx_ff the damped inverse actually realizes (J·J⁺·dx_ff). Near singularities the
     // rest cannot be followed and must not wind up in x_ref
     // tradeoff: the damping error of J⁺ is no longer corrected, but x_ref cannot run away
     Eigen::Matrix<double, 6, 1> dx_ff_realized = scale * data_.tmp.j * data_.tmp.j_inv * dx_ff;
     
     // update q_cmd and x_ref
-    data_.ref.q_cmd += data_.ref.dq_cmd * period.seconds();
+    data_.ref.q_cmd += data_.ref.dq_cmd * dt;
 
-    data_.ref.x_ref.translation() += dx_ff_realized.head<3>() * period.seconds();
-    Eigen::Vector3d dx_ref_rot = dx_ff_realized.tail<3>() * period.seconds();
+    data_.ref.x_ref.translation() += dx_ff_realized.head<3>() * dt;
+    Eigen::Vector3d dx_ref_rot = dx_ff_realized.tail<3>() * dt;
     data_.ref.x_ref.linear() = Eigen::AngleAxisd(dx_ref_rot.norm(), dx_ref_rot.normalized()) * data_.ref.x_ref.linear();
 
     // hard position limit as last resort, should never trigger with the position limit scaling above
@@ -592,14 +604,7 @@ controller_interface::return_type CartesianJogController::update(const rclcpp::T
         ruckig_output_.pass_to_input(ruckig_input_);
     }
 
-    for (size_t i = 0; i < rbd_.get_dof(); ++i)
-    {
-        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
-
-        (void)command_interfaces_[pos_idx].set_value(data_.ref.q_cmd[i]);
-        (void)command_interfaces_[vel_idx].set_value(data_.ref.dq_cmd[i]);
-    }
+    write_robotarm_cmd();
 
     return controller_interface::return_type::OK;
 }
@@ -675,6 +680,8 @@ void CartesianJogController::declare_parameters()
 
     node->declare_parameter<double>("max_increment_linear", 0.003);     // m, per axis and message
     node->declare_parameter<double>("max_increment_angular", 0.0524);   // rad (3°), per axis and message
+
+    node->declare_parameter<std::string>("chain_to", "");
 }
 
 controller_interface::CallbackReturn CartesianJogController::read_parameters()
@@ -776,6 +783,8 @@ controller_interface::CallbackReturn CartesianJogController::read_parameters()
         }
     }
 
+    chain_to_ = node->get_parameter("chain_to").as_string();
+
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -783,11 +792,11 @@ bool CartesianJogController::fetch_robotarm_state_strict()
 {
     for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
+        size_t pos_state_idx = i * num_state_interfaces_per_joint_ + 0;
+        size_t vel_state_idx = i * num_state_interfaces_per_joint_ + 1;
 
-        auto pos_opt = state_interfaces_[pos_idx].get_optional();
-        auto vel_opt = state_interfaces_[vel_idx].get_optional();
+        auto pos_opt = state_interfaces_[pos_state_idx].get_optional();
+        auto vel_opt = state_interfaces_[vel_state_idx].get_optional();
 
         if (!pos_opt.has_value() || !vel_opt.has_value())
         {
@@ -807,11 +816,11 @@ void CartesianJogController::fetch_robotarm_state()
     // a persistently stale state is caught by the deviation check
     for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        size_t pos_idx = i * num_interfaces_per_joint_ + 0;
-        size_t vel_idx = i * num_interfaces_per_joint_ + 1;
+        size_t pos_state_idx = i * num_state_interfaces_per_joint_ + 0;
+        size_t vel_state_idx = i * num_state_interfaces_per_joint_ + 1;
 
-        auto pos_opt = state_interfaces_[pos_idx].get_optional();
-        auto vel_opt = state_interfaces_[vel_idx].get_optional();
+        auto pos_opt = state_interfaces_[pos_state_idx].get_optional();
+        auto vel_opt = state_interfaces_[vel_state_idx].get_optional();
 
         if (pos_opt.has_value()) data_.state.q[i] = pos_opt.value();
         if (vel_opt.has_value()) data_.state.dq[i] = vel_opt.value();
@@ -825,4 +834,20 @@ void CartesianJogController::fetch_robotarm_state()
     }
 }
 
+void CartesianJogController::write_robotarm_cmd()
+{
+    for (size_t i = 0; i < rbd_.get_dof(); ++i)
+    {
+        size_t pos_idx = i * num_cmd_interfaces_per_joint_ + 0;
+        size_t vel_idx = i * num_cmd_interfaces_per_joint_ + 1;
+
+        (void)command_interfaces_[pos_idx].set_value(data_.ref.q_cmd[i]);
+        (void)command_interfaces_[vel_idx].set_value(data_.ref.dq_cmd[i]);
+
+        if (chained_) {
+            size_t accel_cmd_idx = i * num_cmd_interfaces_per_joint_ + 2;
+            (void)command_interfaces_[accel_cmd_idx].set_value(data_.ref.ddq_cmd[i]);
+        }
+    }
+}
 }

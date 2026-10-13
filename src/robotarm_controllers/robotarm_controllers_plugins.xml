@@ -1,9 +1,9 @@
 <library path="robotarm_controllers">
-  <class name="robotarm_controllers/TeleopController" 
-         type="teleop_controller::TeleopController" 
+  <class name="robotarm_controllers/JointStreamController" 
+         type="joint_stream_controller::JointStreamController" 
          base_class_type="controller_interface::ControllerInterface">
     <description>
-      Reactive controller for smooth teleop.
+      Reactive controller that smoothly follows a stream of joint position targets.
     </description>
   </class>
 

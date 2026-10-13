@@ -282,7 +282,7 @@ Remove this section once everything below is done.
     [axis 5/6 table](#axis-56-wrist-be4108-380kv)
   - [ ] Tune the position PID (`kp`/`ki`/`kd`, see [Position PID](#position-pid))
   - [ ] `conf write`
-- [ ] Test each axis: move to both URDF position limits and at URDF velocity (teleop is
+- [ ] Test each axis: move to both URDF position limits and at URDF velocity (joint stream controller is
   capped at 2.5 rad/s for all joints) and check that the joint tracks without hitting
   the moteus limits. For axis 5/6 also move both joints at full speed at once, and
   check motor temperature.
@@ -424,7 +424,7 @@ The two velocity parameters do different things:
 
 `servo.default_accel_limit` (12 / 4 / 6 rev/s² ≈ 75 / 25 / 38 rad/s²) is deliberately
 loose: an upper bound, not a tuned value. The URDF has no acceleration limits, and the
-ROS controllers already command smooth trajectories (teleop: 4 rad/s²), so in normal
+ROS controllers already command smooth trajectories (joint stream controller: 4 rad/s²), so in normal
 operation this limit never acts. It only matters when moteus' internal set point has to
 jump or catch up, e.g. after a large position step.
 

@@ -1,5 +1,5 @@
-#ifndef ROBOTARM_CONTROLLERS_TELEOPCONTROLLER_HPP
-#define ROBOTARM_CONTROLLERS_TELEOPCONTROLLER_HPP
+#ifndef ROBOTARM_CONTROLLERS_JOINTSTREAMCONTROLLER_HPP
+#define ROBOTARM_CONTROLLERS_JOINTSTREAMCONTROLLER_HPP
 
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
@@ -16,17 +16,17 @@
 #include <memory>
 #include <atomic>
 
-namespace teleop_controller {
+namespace joint_stream_controller {
 
 using CmdType = std_msgs::msg::Float64MultiArray;
 
-class TeleopController : public controller_interface::ControllerInterface
+class JointStreamController : public controller_interface::ControllerInterface
 {
 public:
-    RCLCPP_SHARED_PTR_DEFINITIONS(TeleopController)
+    RCLCPP_SHARED_PTR_DEFINITIONS(JointStreamController)
 
-    TeleopController();
-    virtual ~TeleopController() = default;
+    JointStreamController();
+    virtual ~JointStreamController() = default;
 
     controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
@@ -52,6 +52,8 @@ private:
     void handle_scale_speed(
         const std::shared_ptr<robotarm_interface::srv::SetFloat64::Request> request,
         std::shared_ptr<robotarm_interface::srv::SetFloat64::Response> response);
+    // ddq is only written when chained
+    void write_joint_cmd(size_t i, double q, double dq, double ddq);
 
 private:
     std::vector<std::string> joint_names_;
@@ -75,7 +77,10 @@ private:
 
     rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
 
-    static constexpr size_t num_interfaces_per_joint_ = 2;
+    std::string chain_to_ = "";
+    bool chained_ = false;
+    size_t num_cmd_interfaces_per_joint_ = 2;
+    static constexpr size_t num_state_interfaces_per_joint_ = 2;
 };
 
 }

@@ -25,7 +25,7 @@ find_package(robotarm_interface REQUIRED)
 find_package(robotarm_rbd REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
-  src/TeleopController.cpp
+  src/JointStreamController.cpp
   src/CartesianJogController.cpp
   src/CartesianImpedanceController.cpp
 )

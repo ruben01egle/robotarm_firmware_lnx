@@ -32,15 +32,17 @@ public:
     struct Reference {                       // persistent, reset on activate
         Eigen::VectorXd q_cmd;
         Eigen::VectorXd dq_cmd;
+        Eigen::VectorXd ddq_cmd;
         Eigen::Isometry3d x_ref = Eigen::Isometry3d::Identity();
-        void resize(size_t n) { q_cmd.resize(n); dq_cmd.resize(n); }
+        void resize(size_t n) { q_cmd.resize(n); dq_cmd.resize(n); ddq_cmd.resize(n); }
     };
 
     struct Scratch {                        // per cycle only
         Eigen::VectorXd dq_pred;
+        Eigen::VectorXd dq_cmd_new;
         Eigen::Matrix<double, 6, Eigen::Dynamic> j;
         Eigen::Matrix<double, Eigen::Dynamic, 6> j_inv;
-        void resize(size_t n) { dq_pred.resize(n); j.resize(6, n); j_inv.resize(n, 6); }
+        void resize(size_t n) { dq_pred.resize(n); dq_cmd_new.resize(n); j.resize(6, n); j_inv.resize(n, 6); }
     };
 
     struct RobotarmData {
@@ -137,6 +139,7 @@ private:
     bool fetch_robotarm_state_strict();
     // best effort, missed reads keep their last value
     void fetch_robotarm_state();
+    void write_robotarm_cmd();
 
 private:
     // custom rigid body dynamics class
@@ -174,7 +177,10 @@ private:
     rclcpp::Subscription<robotarm_interface::msg::CartesianIncrement>::SharedPtr inc_cmd_subscriber_;
     realtime_tools::RealtimeThreadSafeBox<PendingIncrementCmd> rt_command_inc_;
 
-    static constexpr size_t num_interfaces_per_joint_ = 2;
+    std::string chain_to_ = "";
+    bool chained_ = false;
+    size_t num_cmd_interfaces_per_joint_ = 2;
+    static constexpr size_t num_state_interfaces_per_joint_ = 2;
     static constexpr double min_increment_scale_ = 0.01;    // below: increment run aborted in front of a joint limit
 };
 

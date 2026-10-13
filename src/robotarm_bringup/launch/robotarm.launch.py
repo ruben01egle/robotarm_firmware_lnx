@@ -63,10 +63,10 @@ def generate_launch_description():
         arguments=['joint_state_broadcaster'],
     )
 
-    teleop_controller_spawner = Node(
+    joint_stream_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=['teleop_controller', '--inactive'],
+        arguments=['joint_stream_controller', '--inactive'],
         output='screen'
     )
 
@@ -88,7 +88,7 @@ def generate_launch_description():
         control_node,
         robot_state_pub_node,
         joint_state_broadcaster_spawner,
-        teleop_controller_spawner,
+        joint_stream_controller_spawner,
         cartesian_jog_controller_spawner,
         cartesian_impedance_controller_spawner,
     ])

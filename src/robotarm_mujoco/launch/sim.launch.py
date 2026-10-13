@@ -74,7 +74,7 @@ def launch_setup(context):
         arguments=['joint_state_broadcaster'],
     )
 
-    # effort only: teleop and cartesian jog (position/velocity) cannot run in the sim
+    # effort only: joint stream and cartesian jog (position/velocity) cannot run in the sim
     cartesian_impedance_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',

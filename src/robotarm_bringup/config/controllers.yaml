@@ -63,10 +63,14 @@ controller_manager:
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
-    teleop_controller:
-      type: robotarm_controllers/TeleopController
+    joint_stream_controller:
+      type: robotarm_controllers/JointStreamController
+    joint_stream_controller_impedance:
+      type: robotarm_controllers/JointStreamController
 
     cartesian_jog_controller:
+      type: robotarm_controllers/CartesianJogController
+    cartesian_jog_controller_impedance:
       type: robotarm_controllers/CartesianJogController
 
     cartesian_impedance_controller:
@@ -85,7 +89,7 @@ joint_state_broadcaster:
   ros__parameters:
     publish_rate: 50
 
-teleop_controller:
+joint_stream_controller:
   ros__parameters:
     joints:
       - axis1
@@ -94,13 +98,25 @@ teleop_controller:
       - axis4
       - axis5
       - axis6
-    command_interfaces:
-      - position
-      - velocity
     max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
     max_acceleration: 4.0
     max_jerk: 10.0
     sync_joints: false
+
+joint_stream_controller_impedance:
+  ros__parameters:
+    joints:
+      - axis1
+      - axis2
+      - axis3
+      - axis4
+      - axis5
+      - axis6
+    max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
+    max_acceleration: 4.0
+    max_jerk: 10.0
+    sync_joints: false
+    chain_to: "cartesian_impedance_controller"
 
 cartesian_jog_controller:
   ros__parameters:
@@ -129,6 +145,36 @@ cartesian_jog_controller:
 
     max_increment_linear: 0.003     # m, per axis clamp of one increment step
     max_increment_angular: 0.0524   # rad (3°), per axis clamp of one increment step
+
+cartesian_jog_controller_impedance:
+  ros__parameters:
+    lambda: 0.01                    # damping of the damped least squares jacobian inverse
+    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
+
+    max_linear_velocity: 0.1        # m/s
+    max_linear_acceleration: 0.5    # m/s²
+    max_linear_jerk: 5.0            # m/s³
+
+    max_angular_velocity: 0.5       # rad/s
+    max_angular_acceleration: 2.0   # rad/s²
+    max_angular_jerk: 20.0          # rad/s³
+
+    kp_linear: 10.0                 # 1/s, ik drift correction, kp / update_rate must be < 1
+    kp_angular: 10.0                # 1/s
+    max_correction_linear: 0.01     # m/s
+    max_correction_angular: 0.05    # rad/s
+
+    max_tracking_error: 1.5         # rad, |q_cmd - q_meas| per joint before stopping
+
+    joint_velocity_scale: 0.2       # fraction of the urdf joint velocity limits used while jogging
+
+    joint_limit_zone: 0.2           # rad, slow down zone in front of a position limit
+    joint_limit_margin: 0.02        # rad, stop this far before a position limit
+
+    max_increment_linear: 0.003     # m, per axis clamp of one increment step
+    max_increment_angular: 0.0524   # rad (3°), per axis clamp of one increment step
+
+    chain_to: "cartesian_impedance_controller"
 
 cartesian_impedance_controller:
   ros__parameters:
