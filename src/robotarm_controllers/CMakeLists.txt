@@ -110,6 +110,25 @@ if(BUILD_TESTING)
     rclcpp
     robotarm_interface
   )
+
+  # CartesianImpedanceController: allocations in update(), the control law against an own model and
+  # the safety layers (limit protection, rate limit, clamp). Same malloc interposer as above.
+  ament_add_gtest(test_cartesian_impedance
+    test/test_cartesian_impedance.cpp
+    test/malloc_counter.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_cartesian_impedance PRIVATE test)
+  target_link_libraries(test_cartesian_impedance
+    ${PROJECT_NAME}
+    ament_index_cpp::ament_index_cpp
+    Eigen3::Eigen
+  )
+  ament_target_dependencies(test_cartesian_impedance
+    controller_interface
+    hardware_interface
+    lifecycle_msgs
+    rclcpp
+  )
 endif()
 
 ament_package()

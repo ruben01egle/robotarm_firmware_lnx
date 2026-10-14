@@ -36,11 +36,11 @@ same joint.
 - [JointStreamController](#jointstreamcontroller)
   - [Usage](#usage-1)
   - [Overview of one control cycle](#overview-of-one-control-cycle-1)
-  - [Background I: Ruckig in position mode towards a standstill](#background-i-ruckig-in-position-mode-towards-a-standstill)
-  - [Background II: seeding and feedback](#background-ii-seeding-and-feedback)
-  - [Background III: speed scaling](#background-iii-speed-scaling)
-  - [Background IV: synchronization](#background-iv-synchronization)
-  - [Background V: switching controllers while moving](#background-v-switching-controllers-while-moving)
+  - [Background A: Ruckig in position mode towards a standstill](#background-a-ruckig-in-position-mode-towards-a-standstill)
+  - [Background B: seeding and feedback](#background-b-seeding-and-feedback)
+  - [Background C: speed scaling](#background-c-speed-scaling)
+  - [Background D: synchronization](#background-d-synchronization)
+  - [Background E: switching controllers while moving](#background-e-switching-controllers-while-moving)
   - [Safety and error handling](#safety-and-error-handling-1)
   - [Realtime considerations](#realtime-considerations-1)
   - [Known limitations and roadmap](#known-limitations-and-roadmap-1)
@@ -81,6 +81,16 @@ and message) and the errors right before a stop, so they are accepted. The test 
 handler and pauses the counter inside it; the controller's own code up to the log call is still
 counted. The increment tests also check distances, accumulation, the handover to jogging and the
 abort in front of a joint limit.
+
+`test_cartesian_impedance` drives `CartesianImpedanceController` the same way, with the same
+interposer and log exclusion, and writes the exported reference interfaces like an upstream
+controller. There is no physics: the test sets the measured state, so each cycle is a static
+evaluation of the control law, checked against its own `RobotarmRbd`. Besides the allocation count
+in both modes it checks physical properties (gravity at rest, the spring pulls towards the
+reference and linearizes to $J^T K J$, the damping dissipates and acts on the velocity error, the
+spring wrench stays within its norms, no torque pushes into a joint limit), the post-processing
+(rate limit, effort clamp, start ramp), stale references after reactivation and the parameter
+validation. Shared helpers (URDF, log handlers) are in `test/test_helpers.hpp`.
 
 ---
 
@@ -1180,7 +1190,7 @@ parameters, and a target is taken as it is.
 | Command interfaces, chained | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | instead of the above when `chain_to` is set, see [chained to the impedance controller](#chained-to-the-impedance-controller-1) |
 | State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
 | Subscription | `~/commands` (`std_msgs/msg/Float64MultiArray`) | i.e. `/joint_stream_controller/commands`, target joint positions in rad, one per joint, in `joints` order |
-| Service | `~/scale_speed` (`robotarm_interface/srv/SetFloat64`) | runtime speed scale in (0, 1], see [background III](#background-iii-speed-scaling) |
+| Service | `~/scale_speed` (`robotarm_interface/srv/SetFloat64`) | runtime speed scale in (0, 1], see [background C](#background-c-speed-scaling) |
 
 **Command convention:** `data` holds exactly one target position per joint. The latest message
 wins: targets are not queued, a message that arrives while the arm is still moving replaces the
@@ -1203,14 +1213,14 @@ up as a Ruckig error on the first `update()`.
 | `max_velocity` | `1.5` | rad/s | > 0 (not validated) | Ruckig velocity limit, the same for all joints |
 | `max_acceleration` | `2.0` | rad/s² | > 0 (not validated) | Ruckig acceleration limit, all joints |
 | `max_jerk` | `2.0` | rad/s³ | > 0 (not validated) | Ruckig jerk limit, all joints |
-| `sync_joints` | `false` | – | | `true`: `Synchronization::Time` (all joints arrive together), `false`: `None`, see [background IV](#background-iv-synchronization) |
+| `sync_joints` | `false` | – | | `true`: `Synchronization::Time` (all joints arrive together), `false`: `None`, see [background D](#background-d-synchronization) |
 | `chain_to` | `""` | – | | Empty: drive the hardware. Otherwise the name of the downstream controller to write the reference into ([chained](#chained-to-the-impedance-controller-1)) |
 
 Tuning hints:
 - **`max_velocity`**: one value for all joints, so it has to fit the slowest joint. `robotarm_bringup`
   uses the lowest URDF velocity limit (axis2–6), and the speed scale lowers it at runtime.
 - **`max_acceleration` / `max_jerk`**: together with the velocity they set how far behind a moving
-  target the arm runs ([background I](#background-i-ruckig-in-position-mode-towards-a-standstill)).
+  target the arm runs ([background A](#background-a-ruckig-in-position-mode-towards-a-standstill)).
   Higher values follow more closely, lower values filter a jittery stream more.
 
 Example (`robotarm_bringup/config/controllers.yaml`):
@@ -1304,7 +1314,7 @@ In code order (`update()` in [src/JointStreamController.cpp](src/JointStreamCont
 5. Run Ruckig with the cycle's `period` as `delta_time` (`ERROR` if `result < 0`).
 6. Write position and velocity, chained also the acceleration.
 
-### Background I: Ruckig in position mode towards a standstill
+### Background A: Ruckig in position mode towards a standstill
 
 The controller runs one $n$-DOF Ruckig in **position mode**. The target is the latest streamed
 position with **target velocity 0**:
@@ -1334,7 +1344,7 @@ continuous motion rather than stop-and-go.
 A target jump (e.g. a new pose selected in a GUI) is handled the same way: the jump only moves the
 goal, the motion towards it stays within the limits.
 
-### Background II: seeding and feedback
+### Background B: seeding and feedback
 
 Like the jog controller ([background 4](#background-4-smooth-motion-with-ruckig)), Ruckig is fed its
 **own output**, not measurements. The measured state is noisy, and feeding it back would make Ruckig
@@ -1354,7 +1364,7 @@ Seeding on the first *target* rather than on activation means the trajectory sta
 actually is when the stream starts. In the chained case the arm is compliant and may have been
 pushed in between; seeding on activation would start with a step back to the activation pose.
 
-### Background III: speed scaling
+### Background C: speed scaling
 
 `~/scale_speed` sets a factor $k \in (0, 1]$, stored in an atomic and read every cycle. It scales the
 limits as a **time scaling**: running a trajectory $q(t)$ as $q(k\,t)$ scales the $n$-th derivative
@@ -1373,7 +1383,7 @@ triggers exactly one replan. Lowered while moving, Ruckig first brings the motio
 new limits and then continues towards the target. The service rejects values outside (0, 1] and
 non-finite values, because 0 or a negative limit would make Ruckig fail and stop the controller.
 
-### Background IV: synchronization
+### Background D: synchronization
 
 | `sync_joints` | Ruckig | Behavior |
 |---|---|---|
@@ -1387,7 +1397,7 @@ straight line; that would be `Phase`, which only works from rest or for collinea
 back to `Time` otherwise (see [background 7](#synchronization-none-not-phase) for the same trade-off
 in the jog controller). Neither mode says anything about the Cartesian path of the TCP.
 
-### Background V: switching controllers while moving
+### Background E: switching controllers while moving
 
 The joint stream and the jog controller claim the same interfaces, so they are switched, never run
 together. On activation each writes the measured position with **velocity 0**. Switching while the
@@ -1437,11 +1447,11 @@ What the controller does **not** have, compared to the jog controller:
 | **No tracking check** | A stuck or runaway arm isn't detected. Same check as in the jog controller would fit. |
 | Joints and limits as parameters | Not from the URDF, so they can disagree with the model. One velocity/acceleration/jerk limit for all joints. |
 | Limits not validated | `max_velocity/acceleration/jerk` aren't checked in `on_configure`. |
-| Lag behind a moving target | By design (target velocity 0, background I). A target velocity from the sender (e.g. `JointTrajectoryPoint`) would remove it without estimating anything. |
+| Lag behind a moving target | By design (target velocity 0, background A). A target velocity from the sender (e.g. `JointTrajectoryPoint`) would remove it without estimating anything. |
 | ~~Empty / wrong-size message~~ | **Done.** Dropped in the callback against the joint count captured at configure. |
 | ~~Reset on activation not guaranteed~~ | **Done.** `on_activate` clears the box with a blocking `set`. |
 | ~~Speed scale and `on_cleanup`~~ | **Done.** The scale is reset to 1 on activation and cleanup, `on_cleanup` destroys subscription and service. |
-| Switching while moving | Hard stop, see background V. |
+| Switching while moving | Hard stop, see background E. |
 | Realtime test | No malloc counter test like `test_cartesian_jog_rt_alloc`. |
 
 ---
@@ -1913,7 +1923,8 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
   computations can't corrupt them.
 - `Eigen::Vector3d::Zero()` for the TCP wrench and the gravity argument is fixed size, no
   allocation.
-- There is no malloc counter test for this controller yet.
+- `test_cartesian_impedance` enforces this in both modes from the first cycle after activation,
+  including streamed references, the limit zone and a rate limited torque step.
 
 ### Known limitations and roadmap
 
@@ -1931,4 +1942,4 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 | Reference export API | Uses the classic `on_export_reference_interfaces()` (deprecated in Jazzy, still works). |
 | `lambda`, `jinv_method` | Read and passed to `robotarm_rbd`, unused. |
 | Start ramp | 1 s, hard-coded. |
-| Realtime test | No malloc counter test like `test_cartesian_jog_rt_alloc`. |
+| ~~Realtime test~~ | **Done.** `test_cartesian_impedance`, see [building and testing](#building-and-testing). |

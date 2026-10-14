@@ -335,4 +335,5 @@ Roughly ordered by effort and benefit.
 2. **Joint limit protection:** joint space repulsive spring/damper in a zone in front of each limit, the cartesian
    spring knows nothing about joint limits
 3. **Tuning:** `K`, `D`, `ζ`, units, starting values, check the `torque_rise_time` is never active in normal use
-4. **Later:** see [future extensions](#future-extensions)
+4. **Later:** see [future extensions](#future-extensions). Planned next, with a handoff:
+   [NEXT_STEPS.md](NEXT_STEPS.md) (mass-adaptive damping, stiffness changes at runtime, tool frame)
