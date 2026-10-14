@@ -73,6 +73,8 @@ controller_manager:
     cartesian_jog_controller_impedance:
       type: robotarm_controllers/CartesianJogController
 
+    gc_controller:
+      type: robotarm_controllers/CartesianImpedanceController
     cartesian_impedance_controller:
       type: robotarm_controllers/CartesianImpedanceController
 
@@ -176,20 +178,58 @@ cartesian_jog_controller_impedance:
 
     chain_to: "cartesian_impedance_controller"
 
-cartesian_impedance_controller:
+gc_controller:
   ros__parameters:
-    lambda: 0.01                    # damping of the damped least squares jacobian inverse
+    mode: "gc"                      # "gc" or "impedance"
+
+    lambda: 0.01                   # damping of the damped least squares jacobian inverse
     jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
 
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
 
-    # Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
     # hold_stiffness at the median pose inertia, see docs/dynamics/README.md (axis1 varies 0.6..2.2 with the pose)
     joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
 
-    # breakaway hold per joint: spring to an anchor that slides once the spring torque exceeds the
+    # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
+    # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
+    # joint_limit_push · effort. Gravity compensation is not scaled. The zone must be longer than the braking distance
+    # at the expected joint speed, only joint_damping and friction brake inside it (axis1 at 1 rad/s: M/D·v ≈ 0.07 rad).
+    # Less than half the joint range, 0 disables a joint.
+    joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]             # rad
+    joint_limit_push: 0.2           # fraction of the scaled effort limit at the limit, all joints, 0..1
+
+    # gc mode only. Breakaway hold per joint: spring to an anchor that slides once the spring torque exceeds the
     # breakaway torque, i.e. a virtual static friction. Band width = breakaway / stiffness, 0 disables a joint.
     # Stiffness from the band: 0.05 rad for axis1..3, 0.1 rad for the wrist (model error relatively larger)
     hold_stiffness: [20.0, 50.0, 30.0, 4.0, 1.0, 1.0]               # Nm/rad
     hold_breakaway_torque: [1.0, 2.5, 1.5, 0.4, 0.1, 0.1]          # Nm, must exceed the gravity model error
+
+cartesian_impedance_controller:
+  ros__parameters:
+    mode: "impedance"               # "gc" or "impedance"
+
+    lambda: 0.01                   # damping of the damped least squares jacobian inverse
+    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
+
+    torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
+    torque_rise_time: 0.03
+
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
+    # hold_stiffness at the median pose inertia, see docs/dynamics/README.md (axis1 varies 0.6..2.2 with the pose)
+    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
+
+    # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
+    # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
+    # joint_limit_push · effort. Gravity compensation is not scaled. The zone must be longer than the braking distance
+    # at the expected joint speed, only joint_damping and friction brake inside it (axis1 at 1 rad/s: M/D·v ≈ 0.07 rad).
+    # Less than half the joint range, 0 disables a joint.
+    joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]             # rad
+    joint_limit_push: 0.2           # fraction of the scaled effort limit at the limit, all joints, 0..1
+
+    # impedance mode only. Cartesian impedance, diagonal in the base frame, [x, y, z, rx, ry, rz]
+    cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]      # N/m, Nm/rad, NOT TUNED
+    cartesian_damping: [28.0, 28.0, 28.0, 0.22, 0.22, 0.22]        # N·s/m, Nm·s/rad, zeta ~0.7 at ESTIMATED 2 kg / 0.005 kg·m²
+    max_spring_force: 20.0          # N, norm of the translational spring force
+    max_spring_moment: 2.0          # Nm, norm of the rotational spring moment, below the 4 Nm of the wrist motors

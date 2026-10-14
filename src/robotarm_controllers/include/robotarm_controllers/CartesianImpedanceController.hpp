@@ -32,8 +32,6 @@ public:
         Eigen::VectorXd q_ref;
         Eigen::VectorXd dq_ref;
         Eigen::VectorXd ddq_ref;
-        Eigen::Vector3d F_tcp_ref;
-        Eigen::Vector3d M_tcp_ref;
         void resize(size_t n) {
             tau_cmd.resize(n);
             tau_start.resize(n);
@@ -46,14 +44,28 @@ public:
 
     struct Scratch {                        // per cycle only
         Eigen::VectorXd tau_new;
-        Eigen::VectorXd tau_ff;
+        Eigen::VectorXd tau_limiter;
+        Eigen::VectorXd tau_mode;
+        Eigen::VectorXd tau_gravity;
         Eigen::VectorXd tau_joint_damped;
         Eigen::VectorXd tau_breakaway;
+        Eigen::VectorXd tau_dyn_ff;
+        Eigen::VectorXd tau_impedance;
+        Eigen::VectorXd zero;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> j;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> j_ref;
         void resize(size_t n) {
             tau_new.resize(n);
-            tau_ff.resize(n);
+            tau_limiter.resize(n);
+            tau_mode.resize(n);
+            tau_gravity.resize(n);
             tau_joint_damped.resize(n);
-            tau_breakaway.resize(n); }
+            tau_breakaway.resize(n);
+            tau_dyn_ff.resize(n);
+            tau_impedance.resize(n);
+            zero.setZero(n);
+            j.resize(6, n);
+            j_ref.resize(6, n); }
     };
 
     struct RobotarmData {
@@ -66,6 +78,20 @@ public:
     // GC: gravity compensation with joint damping and breakaway hold, references are ignored
     // IMPEDANCE: gravity compensation with joint damping and the cartesian impedance, no breakaway hold
     enum class Mode { GC, IMPEDANCE };
+
+    struct GcParams {                       // gc mode only
+        // breakaway hold, a spring to an anchor that is dragged along once the spring torque exceeds the
+        // breakaway torque, i.e. virtual static friction band_width: eps_max = breakaway_tq/stiffness
+        Eigen::VectorXd hold_stiffness;          // Nm/rad
+        Eigen::VectorXd hold_breakaway_torque;   // Nm
+    };
+
+    struct ImpedanceParams {                // impedance mode only, diagonal in the base frame, [x, y, z, rx, ry, rz]
+        Eigen::Matrix<double, 6, 1> stiffness = Eigen::Matrix<double, 6, 1>::Zero();   // N/m, Nm/rad
+        Eigen::Matrix<double, 6, 1> damping = Eigen::Matrix<double, 6, 1>::Zero();     // N·s/m, Nm·s/rad
+        double max_spring_force = 0.0;      // N, limit on the norm of the translational spring force
+        double max_spring_moment = 0.0;     // Nm, limit on the norm of the rotational spring moment
+    };
 
 public:
     RCLCPP_SHARED_PTR_DEFINITIONS(CartesianImpedanceController)
@@ -104,10 +130,9 @@ private:
     bool compute_impedance_torque();
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
-    // all joints or fail, for a valid start in on_activate
-    bool fetch_robotarm_state_strict();
-    // best effort, missed reads keep their last value
-    void fetch_robotarm_state();
+    bool fetch_robotarm_state_strict();    // all joints or fail, for a valid start in on_activate
+    void fetch_robotarm_state();            // best effort, missed reads keep their last value
+    void fetch_references();
 
 private:
     // custom rigid body dynamics class
@@ -115,14 +140,16 @@ private:
     robotarm_rbd::RobotarmRbd::Config rbd_cfg_;
     Mode mode_ = Mode::GC;
     std::vector<std::string> rbd_joint_names_;
+    std::string rbd_tcp_name_;
     std::vector<robotarm_rbd::RobotarmRbd::Limits> joint_limits_;  // from urdf, torque scaled by torque_scale_
     double torque_scale_ = 1.0;
     double torque_rise_time_ = 0;
-    Eigen::VectorXd joint_damping_;   // Nm·s/rad, per joint in rbd joint order
-    // breakaway hold, a spring to an anchor that is dragged along once the spring torque exceeds the
-    // breakaway torque, i.e. virtual static friction band_width: eps_max = breakaway_tq/stiffness
-    Eigen::VectorXd hold_stiffness_;          // Nm/rad
-    Eigen::VectorXd hold_breakaway_torque_;   // Nm
+    Eigen::VectorXd joint_damping_;   // Nm·s/rad, per joint in rbd joint order, both modes
+    // joint limit protection, both modes
+    Eigen::VectorXd joint_limit_zone_;   // rad, per joint, width of the zone in front of each limit, 0 disables a joint
+    double joint_limit_push_ = 0.0;      // fraction of the scaled effort limit pushing outwards at the limit, all joints
+    GcParams gc_;
+    ImpedanceParams impedance_;
 
     double ramp_time_ = 1.0;
     double ramp_elapsed_ = 0.0;

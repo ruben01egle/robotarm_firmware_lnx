@@ -24,12 +24,16 @@ ros2 launch robotarm_mujoco sim.launch.py headless:=true rviz:=true
 | `controller_params` | none | yaml applied after `robotarm_bringup/config/controllers.yaml`, for gains you only want in the sim |
 | `joint_state_rate` | `50` | Hz, `/joint_states` rate. `500` for the push test, 50 Hz is too coarse to fit a response |
 
-As on the real robot, the hardware component starts `inactive` and the impedance controller is only
-loaded:
+As on the real robot, the hardware component starts `inactive` and the controllers are only loaded:
+`gc_controller`, `cartesian_impedance_controller` and the upstream controllers chained to it,
+`joint_stream_controller_impedance` and `cartesian_jog_controller_impedance`. The joint stream and jog
+instances that drive position/velocity directly can't run here.
 
 ```bash
 ros2 control set_hardware_component_state moteus_hardware_system active
-ros2 control switch_controllers --activate cartesian_impedance_controller
+ros2 control switch_controllers --activate gc_controller                     # gravity compensation and hold
+ros2 control switch_controllers --deactivate gc_controller \
+  --activate cartesian_impedance_controller joint_stream_controller_impedance   # impedance, streamed targets
 ```
 
 Physics runs from the start, so the arm falls limp onto its joint limits before you activate

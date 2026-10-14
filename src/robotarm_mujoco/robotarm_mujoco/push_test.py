@@ -3,7 +3,7 @@ Push the simulated arm with a defined wrench, release it and measure the respons
 
 Reports overshoot, damping ratio, frequency and settling time, next to what the gains in
 controllers.yaml should give at that pose. Needs the sim (it loads the wrench plugin) and the
-cartesian_impedance_controller active, see the README.
+gc_controller active, see the README.
 
     ros2 run robotarm_mujoco push_test [--body stage3] [--force 0 0 -10] [--duration 0.3]
 """

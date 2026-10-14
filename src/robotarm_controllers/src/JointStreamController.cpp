@@ -89,8 +89,18 @@ controller_interface::CallbackReturn JointStreamController::on_configure(const r
 
     joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
         "~/commands", rclcpp::SystemDefaultsQoS(),
-        [this](const CmdType::SharedPtr msg)
+        [this, num_joints = joint_names_.size()](const CmdType::SharedPtr msg)
         {
+
+        // size captured at configure, so the callback shares no state with a later reconfigure
+        if (msg->data.size() != num_joints)
+        {
+            RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *(get_node()->get_clock()), 1000,
+            "Command size (%zu) does not match number of joints (%zu). Dropping message",
+            msg->data.size(), num_joints);
+            return;
+        }
 
         if (!std::all_of(
                 msg->data.cbegin(), msg->data.cend(),
@@ -130,7 +140,9 @@ controller_interface::CallbackReturn JointStreamController::on_activate(const rc
 
     reset_controller_reference_msg(joint_commands_);
     update_reference_ = true;
-    rt_command_.try_set(joint_commands_);
+    // blocking: a target received while inactive must never be executed
+    rt_command_.set(joint_commands_);
+    speed_scale_.store(1.0);
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
@@ -138,6 +150,14 @@ controller_interface::CallbackReturn JointStreamController::on_activate(const rc
 
 controller_interface::CallbackReturn JointStreamController::on_deactivate(const rclcpp_lifecycle::State &/*previous_state*/)
 {
+    return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn JointStreamController::on_cleanup(const rclcpp_lifecycle::State &/*previous_state*/)
+{
+    joints_command_subscriber_.reset();
+    scale_speed_service_.reset();
+    speed_scale_.store(1.0);
     return controller_interface::CallbackReturn::SUCCESS;
 }
 

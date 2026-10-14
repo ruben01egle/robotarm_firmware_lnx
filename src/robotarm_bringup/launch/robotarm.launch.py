@@ -77,12 +77,34 @@ def generate_launch_description():
         output='screen'
     )
 
+    gc_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['gc_controller', '--inactive'],
+        output='screen'
+    )
+
     cartesian_impedance_controller_spawner = Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['cartesian_impedance_controller', '--inactive'],
-            output='screen'
-        )
+        package='controller_manager',
+        executable='spawner',
+        arguments=['cartesian_impedance_controller', '--inactive'],
+        output='screen'
+    )
+
+    # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
+    joint_stream_controller_impedance_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['joint_stream_controller_impedance', '--inactive'],
+        output='screen'
+    )
+
+    cartesian_jog_controller_impedance_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['cartesian_jog_controller_impedance', '--inactive'],
+        output='screen'
+    )
 
     return LaunchDescription(declared_arguments + [
         control_node,
@@ -90,5 +112,8 @@ def generate_launch_description():
         joint_state_broadcaster_spawner,
         joint_stream_controller_spawner,
         cartesian_jog_controller_spawner,
+        gc_controller_spawner,
         cartesian_impedance_controller_spawner,
+        joint_stream_controller_impedance_spawner,
+        cartesian_jog_controller_impedance_spawner,
     ])

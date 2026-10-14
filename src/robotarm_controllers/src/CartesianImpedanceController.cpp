@@ -48,9 +48,15 @@ namespace
         return true;
     }
 
-    // per joint array parameter, every entry finite and >= 0. The length is checked in on_configure,
-    // the dof is only known after rbd init
-    bool read_non_negative_joint_array(
+    Eigen::Vector3d clamp_norm(const Eigen::Vector3d & v, double max)
+    {
+        const double n = v.norm();
+        return (n > max) ? Eigen::Vector3d(v * (max / n)) : v;
+    }
+
+    // array parameter, every entry finite and >= 0. The length is checked by the caller, for per joint arrays
+    // in on_configure, the dof is only known after rbd init
+    bool read_non_negative_array(
         const rclcpp_lifecycle::LifecycleNode::SharedPtr& node,
         const std::string& name,
         Eigen::VectorXd& out)
@@ -127,7 +133,8 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_configure(
         return controller_interface::CallbackReturn::ERROR;
     }
     if (!rbd_.get_joint_names(rbd_joint_names_) ||
-        !rbd_.get_joint_limits(joint_limits_))
+        !rbd_.get_joint_limits(joint_limits_)   ||
+        !rbd_.get_tcp_link_name(rbd_tcp_name_))
     {
         RCLCPP_ERROR(get_node()->get_logger(), "rbd not properly initialized: %s", rbd_.last_error());
         return controller_interface::CallbackReturn::ERROR;
@@ -138,12 +145,16 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_configure(
         lim.effort *= torque_scale_;
     }
 
-    const std::pair<const char*, const Eigen::VectorXd*> joint_arrays[] = {
-        {"joint_damping", &joint_damping_},
-        {"hold_stiffness", &hold_stiffness_},
-        {"hold_breakaway_torque", &hold_breakaway_torque_},
+    // the breakaway hold only runs in gc mode
+    const bool needs_hold = (mode_ == Mode::GC);
+    const struct { const char* name; const Eigen::VectorXd* values; bool required; } joint_arrays[] = {
+        {"joint_damping", &joint_damping_, true},
+        {"joint_limit_zone", &joint_limit_zone_, true},
+        {"hold_stiffness", &gc_.hold_stiffness, needs_hold},
+        {"hold_breakaway_torque", &gc_.hold_breakaway_torque, needs_hold},
     };
-    for (const auto & [name, values] : joint_arrays) {
+    for (const auto & [name, values, required] : joint_arrays) {
+        if (!required) continue;
         if (static_cast<size_t>(values->size()) != rbd_.get_dof()) {
             RCLCPP_ERROR(get_node()->get_logger(), "Parameter %s needs one entry per joint (%zu), got %ld",
                          name, rbd_.get_dof(), values->size());
@@ -151,12 +162,24 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_configure(
         }
     }
 
-    // a breakaway torque above the torque clamp can never be reached, the hold would never slide
+    // the upper and lower zone of a joint must not overlap
     for (size_t i = 0; i < rbd_.get_dof(); ++i) {
-        if (hold_breakaway_torque_[i] > joint_limits_[i].effort) {
+        const auto & lim = joint_limits_[i];
+        if (lim.max <= lim.min) continue;   // no position limits
+        if (2.0 * joint_limit_zone_[i] >= lim.max - lim.min) {
+            RCLCPP_ERROR(get_node()->get_logger(),
+                         "Parameter joint_limit_zone[%zu] = %f must be less than half the range %f of joint %s",
+                         i, joint_limit_zone_[i], lim.max - lim.min, rbd_joint_names_[i].c_str());
+            return controller_interface::CallbackReturn::ERROR;
+        }
+    }
+
+    // a breakaway torque above the torque clamp can never be reached, the hold would never slide
+    for (size_t i = 0; needs_hold && i < rbd_.get_dof(); ++i) {
+        if (gc_.hold_breakaway_torque[i] > joint_limits_[i].effort) {
             RCLCPP_ERROR(get_node()->get_logger(),
                          "Parameter hold_breakaway_torque[%zu] = %f exceeds the scaled torque limit %f of joint %s",
-                         i, hold_breakaway_torque_[i], joint_limits_[i].effort, rbd_joint_names_[i].c_str());
+                         i, gc_.hold_breakaway_torque[i], joint_limits_[i].effort, rbd_joint_names_[i].c_str());
             return controller_interface::CallbackReturn::ERROR;
         }
     }
@@ -173,6 +196,10 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_activate(c
     if (!fetch_robotarm_state_strict()) return controller_interface::CallbackReturn::ERROR;
 
     data_.ref.q_anchor = data_.state.q;
+    data_.ref.q_ref = data_.state.q;
+    // drop references of a previous activation, NaN holds q_ref until an upstream controller writes
+    std::fill(reference_interfaces_.begin(), reference_interfaces_.end(),
+              std::numeric_limits<double>::quiet_NaN());
     data_.ref.tau_start = data_.state.tau;
     data_.ref.tau_cmd = data_.state.tau;
     ramp_elapsed_ = 0;
@@ -219,7 +246,19 @@ controller_interface::return_type CartesianImpedanceController::update_and_write
 {
     fetch_robotarm_state();
 
-    // write new torque into data_.tmp.tau_new
+    // always compute gravity compensation to data_.tmp.tau_gravity
+    if (!rbd_.recursive_newton_euler(
+            data_.state.q,
+            data_.tmp.zero,
+            data_.tmp.zero,
+            data_.tmp.tau_gravity,
+            Eigen::Vector3d::Zero(),
+            Eigen::Vector3d::Zero())) {
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return controller_interface::return_type::ERROR;
+    }
+
+    // write mode torque into data_.tmp.tau_mode
     switch (mode_)
     {
     case Mode::GC:
@@ -230,6 +269,32 @@ controller_interface::return_type CartesianImpedanceController::update_and_write
         if (!compute_impedance_torque()) return controller_interface::return_type::ERROR;
         break;
     }
+
+    // joint limit protection: inside the limit zone scale mode torque towards limit
+    // + spring pushes outwards with up to joint_limit_push · effort
+    data_.tmp.tau_limiter.setZero();
+    for (size_t i = 0; i < rbd_.get_dof(); ++i) {
+        const auto & lim = joint_limits_[i];
+        const double zone = joint_limit_zone_[i];
+        if (lim.max <= lim.min || zone <= 0.0) continue;   // no position limits or protection disabled
+
+        // 0 outside the zone, 1 at (and beyond) the limit
+        const double s_upper = std::clamp((data_.state.q[i] - (lim.max - zone)) / zone, 0.0, 1.0);
+        const double s_lower = std::clamp(((lim.min + zone) - data_.state.q[i]) / zone, 0.0, 1.0);
+
+        // scale only torque towards the limit
+        if (s_upper > 0.0) {
+            if (data_.tmp.tau_mode[i] > 0.0) data_.tmp.tau_mode[i] *= (1.0 - s_upper);
+            data_.tmp.tau_limiter[i] = - s_upper * joint_limit_push_ * lim.effort;
+        }
+        else if (s_lower > 0.0) {
+            if (data_.tmp.tau_mode[i] < 0.0) data_.tmp.tau_mode[i] *= (1.0 - s_lower);
+            data_.tmp.tau_limiter[i] = s_lower * joint_limit_push_ * lim.effort;
+        }
+    }
+
+    // compute tau new
+    data_.tmp.tau_new.noalias() = data_.tmp.tau_gravity + data_.tmp.tau_mode + data_.tmp.tau_limiter;
 
     // smooth ramp in on startup
     if (ramp_elapsed_ < ramp_time_) {
@@ -268,8 +333,8 @@ controller_interface::return_type CartesianImpedanceController::update_and_write
 bool CartesianImpedanceController::compute_gc_torque()
 {
     for (size_t i=0; i<rbd_.get_dof(); ++i) {
-        if (hold_stiffness_[i] <= 0.0 || hold_breakaway_torque_[i] <= 0.0) continue;
-        double eps_max = hold_breakaway_torque_[i]/hold_stiffness_[i];
+        if (gc_.hold_stiffness[i] <= 0.0 || gc_.hold_breakaway_torque[i] <= 0.0) continue;
+        double eps_max = gc_.hold_breakaway_torque[i]/gc_.hold_stiffness[i];
         if (data_.state.q(i) - data_.ref.q_anchor(i) > eps_max) {
             data_.ref.q_anchor(i) = data_.state.q(i) - eps_max;
         }
@@ -278,29 +343,70 @@ bool CartesianImpedanceController::compute_gc_torque()
         }
     }
 
-    data_.ref.dq_ref.setZero();
-    data_.ref.ddq_ref.setZero();
-    data_.ref.F_tcp_ref.setZero();
-    data_.ref.M_tcp_ref.setZero();
-
-    if (!rbd_.recursive_newton_euler(
-            data_.state.q,
-            data_.ref.dq_ref,
-            data_.ref.ddq_ref,
-            data_.tmp.tau_ff,
-            data_.ref.F_tcp_ref,
-            data_.ref.M_tcp_ref)) {
-        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
-        return false;
-    }
     data_.tmp.tau_joint_damped.noalias() = - joint_damping_.cwiseProduct(data_.state.dq);
-    data_.tmp.tau_breakaway.noalias() = - hold_stiffness_.cwiseProduct(data_.state.q - data_.ref.q_anchor);
-    data_.tmp.tau_new.noalias() = data_.tmp.tau_ff + data_.tmp.tau_joint_damped + data_.tmp.tau_breakaway;
+    data_.tmp.tau_breakaway.noalias() = - gc_.hold_stiffness.cwiseProduct(data_.state.q - data_.ref.q_anchor);
+    data_.tmp.tau_mode.noalias() = data_.tmp.tau_joint_damped + data_.tmp.tau_breakaway;
     return true;
 }
 
 bool CartesianImpedanceController::compute_impedance_torque()
 {
+    // update references
+    fetch_references();
+
+    // compute intermediate values 
+    if (!rbd_.calculate_jacobian(data_.state.q, rbd_tcp_name_, data_.tmp.j)){
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+    if (!rbd_.calculate_jacobian(data_.ref.q_ref, rbd_tcp_name_, data_.tmp.j_ref)){
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+    Eigen::Isometry3d T;
+    if (!rbd_.calculate_link_transform(data_.state.q, rbd_tcp_name_, T)){
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+    Eigen::Isometry3d T_ref;
+    if (!rbd_.calculate_link_transform(data_.ref.q_ref, rbd_tcp_name_, T_ref)){
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+
+    // compute error
+    Eigen::Matrix<double, 6, 1> e;
+    // translation error
+    e.head<3>() = T.translation() - T_ref.translation();
+    // orientation error
+    Eigen::Matrix3d R_err = T.linear() * T_ref.linear().transpose();
+    Eigen::AngleAxisd aa_err(R_err);
+    e.tail<3>() = aa_err.angle() * aa_err.axis();
+
+    Eigen::Matrix<double, 6, 1> de;
+    de.noalias() = data_.tmp.j * data_.state.dq - data_.tmp.j_ref * data_.ref.dq_ref;
+
+    // compute impedance
+    Eigen::Matrix<double, 6, 1> F_spring = - impedance_.stiffness.cwiseProduct(e);
+    F_spring.head<3>() = clamp_norm(F_spring.head<3>(), impedance_.max_spring_force);
+    F_spring.tail<3>() = clamp_norm(F_spring.tail<3>(), impedance_.max_spring_moment);
+    Eigen::Matrix<double, 6, 1> F_damper = - impedance_.damping.cwiseProduct(de);
+
+    // compute tau
+    if (!rbd_.recursive_newton_euler(
+            data_.state.q,
+            data_.state.dq,
+            data_.ref.ddq_ref,
+            data_.tmp.tau_dyn_ff,
+            Eigen::Vector3d::Zero(),     // no F_ext
+            Eigen::Vector3d::Zero(),     // no M_ext
+            Eigen::Vector3d::Zero())) {  // no gravity, only dynamics
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+    data_.tmp.tau_impedance.noalias() = data_.tmp.j.transpose() * (F_spring + F_damper);
+    data_.tmp.tau_joint_damped.noalias() = - joint_damping_.cwiseProduct(data_.state.dq - data_.ref.dq_ref);
+    data_.tmp.tau_mode.noalias() = data_.tmp.tau_dyn_ff + data_.tmp.tau_impedance + data_.tmp.tau_joint_damped;
     return true;
 }
 
@@ -318,6 +424,16 @@ void CartesianImpedanceController::declare_parameters()
     node->declare_parameter<std::vector<double>>("joint_damping", std::vector<double>());
     node->declare_parameter<std::vector<double>>("hold_stiffness", std::vector<double>());
     node->declare_parameter<std::vector<double>>("hold_breakaway_torque", std::vector<double>());
+
+    // both modes, per joint
+    node->declare_parameter<std::vector<double>>("joint_limit_zone", std::vector<double>());
+    node->declare_parameter<double>("joint_limit_push", 0.0);
+
+    // impedance mode only, [x, y, z, rx, ry, rz] in the base frame
+    node->declare_parameter<std::vector<double>>("cartesian_stiffness", std::vector<double>());
+    node->declare_parameter<std::vector<double>>("cartesian_damping", std::vector<double>());
+    node->declare_parameter<double>("max_spring_force", 0.0);
+    node->declare_parameter<double>("max_spring_moment", 0.0);
 }
 
 controller_interface::CallbackReturn CartesianImpedanceController::read_parameters()
@@ -363,10 +479,83 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
         return controller_interface::CallbackReturn::ERROR;
     }
 
-    if (!read_non_negative_joint_array(node, "joint_damping", joint_damping_) ||
-        !read_non_negative_joint_array(node, "hold_stiffness", hold_stiffness_) ||
-        !read_non_negative_joint_array(node, "hold_breakaway_torque", hold_breakaway_torque_)) {
+    if (!read_non_negative_array(node, "joint_damping", joint_damping_) ||
+        !read_non_negative_array(node, "joint_limit_zone", joint_limit_zone_) ||
+        !read_non_negative_array(node, "hold_stiffness", gc_.hold_stiffness) ||
+        !read_non_negative_array(node, "hold_breakaway_torque", gc_.hold_breakaway_torque)) {
         return controller_interface::CallbackReturn::ERROR;
+    }
+
+    joint_limit_push_ = node->get_parameter("joint_limit_push").as_double();
+    if (!std::isfinite(joint_limit_push_) || joint_limit_push_ < 0.0 || joint_limit_push_ > 1.0) {
+        RCLCPP_ERROR(node->get_logger(), "Parameter joint_limit_push must be in [0, 1], got %f",
+                     joint_limit_push_);
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
+    Eigen::VectorXd cartesian_stiffness;
+    Eigen::VectorXd cartesian_damping;
+    if (!read_non_negative_array(node, "cartesian_stiffness", cartesian_stiffness) ||
+        !read_non_negative_array(node, "cartesian_damping", cartesian_damping)) {
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
+    const std::pair<const char*, double*> spring_limits[] = {
+        {"max_spring_force", &impedance_.max_spring_force},
+        {"max_spring_moment", &impedance_.max_spring_moment},
+    };
+    for (const auto & [name, value] : spring_limits) {
+        *value = node->get_parameter(name).as_double();
+        if (!std::isfinite(*value) || *value < 0.0) {
+            RCLCPP_ERROR(node->get_logger(), "Parameter %s must be finite and >= 0, got %f", name, *value);
+            return controller_interface::CallbackReturn::ERROR;
+        }
+    }
+
+    switch (mode_)
+    {
+    case Mode::GC:
+        if (cartesian_stiffness.size() > 0 || cartesian_damping.size() > 0 ||
+            impedance_.max_spring_force > 0.0 || impedance_.max_spring_moment > 0.0) {
+            RCLCPP_WARN(node->get_logger(), "Cartesian impedance parameters are ignored in gc mode");
+        }
+        impedance_ = ImpedanceParams{};
+        break;
+
+    case Mode::IMPEDANCE: {
+        const std::pair<const char*, const Eigen::VectorXd*> cartesian_arrays[] = {
+            {"cartesian_stiffness", &cartesian_stiffness},
+            {"cartesian_damping", &cartesian_damping},
+        };
+        for (const auto & [name, values] : cartesian_arrays) {
+            if (values->size() != 6) {
+                RCLCPP_ERROR(node->get_logger(),
+                             "Parameter %s needs 6 entries [x, y, z, rx, ry, rz] in impedance mode, got %ld",
+                             name, values->size());
+                return controller_interface::CallbackReturn::ERROR;
+            }
+        }
+        for (const auto & [name, value] : spring_limits) {
+            if (*value <= 0.0) {
+                RCLCPP_ERROR(node->get_logger(), "Parameter %s must be > 0 in impedance mode, got %f", name, *value);
+                return controller_interface::CallbackReturn::ERROR;
+            }
+        }
+        impedance_.stiffness = cartesian_stiffness;
+        impedance_.damping = cartesian_damping;
+
+        for (Eigen::Index i = 0; i < 6; ++i) {
+            if (impedance_.stiffness[i] > 0.0 && impedance_.damping[i] == 0.0) {
+                RCLCPP_WARN(node->get_logger(),
+                            "cartesian_stiffness[%ld] > 0 with cartesian_damping[%ld] = 0: undamped spring, "
+                            "only joint_damping damps this axis", i, i);
+            }
+        }
+        if (gc_.hold_stiffness.size() > 0 || gc_.hold_breakaway_torque.size() > 0) {
+            RCLCPP_WARN(node->get_logger(), "Breakaway hold parameters are ignored in impedance mode");
+        }
+        break;
+    }
     }
 
     return controller_interface::CallbackReturn::SUCCESS;
@@ -424,4 +613,16 @@ void CartesianImpedanceController::fetch_robotarm_state()
     }
 }
 
+void CartesianImpedanceController::fetch_references()
+{
+    for (size_t i = 0; i < rbd_joint_names_.size(); ++i) {
+        const double q   = reference_interfaces_[i * num_refs_per_joint_ + 0];
+        const double dq  = reference_interfaces_[i * num_refs_per_joint_ + 1];
+        const double ddq = reference_interfaces_[i * num_refs_per_joint_ + 2];
+        // NaN means no valid upstream reference, hold the last valid position at rest
+        if (std::isfinite(q)) data_.ref.q_ref(i) = q;
+        data_.ref.dq_ref(i)  = std::isfinite(dq)  ? dq  : 0.0;
+        data_.ref.ddq_ref(i) = std::isfinite(ddq) ? ddq : 0.0;
+    }
+}
 }

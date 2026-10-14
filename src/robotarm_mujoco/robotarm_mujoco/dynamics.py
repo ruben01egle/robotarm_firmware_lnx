@@ -13,7 +13,7 @@ import numpy as np
 from robotarm_mujoco import mjcf
 import yaml
 
-CONTROLLER = 'cartesian_impedance_controller'
+CONTROLLER = 'gc_controller'   # the hold (joint_damping, hold_stiffness) only exists in gc mode
 
 
 def default_controllers_file():
@@ -60,7 +60,7 @@ def full_mass_matrix(m, d, q):
 
 
 def load_gains(path=None):
-    """Return (joint_damping, hold_stiffness) of the impedance controller."""
+    """Return (joint_damping, hold_stiffness) of the gc controller."""
     with open(path or default_controllers_file()) as f:
         p = yaml.safe_load(f)[CONTROLLER]['ros__parameters']
     return np.array(p['joint_damping']), np.array(p['hold_stiffness'])

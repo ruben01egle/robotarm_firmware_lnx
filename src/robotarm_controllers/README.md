@@ -7,9 +7,13 @@
 |---|---|---|
 | `robotarm_controllers/CartesianJogController` | `cartesian_jog_controller::CartesianJogController` | Jerk limited Cartesian velocity jogging of the TCP |
 | `robotarm_controllers/JointStreamController` | `joint_stream_controller::JointStreamController` | Jerk limited joint space following of streamed position targets (e.g. teleoperation) |
+| `robotarm_controllers/CartesianImpedanceController` | `cartesian_impedance_controller::CartesianImpedanceController` | Gravity compensation (`gc`) or Cartesian impedance (`impedance`) on the joint torques, chainable |
 
-Both claim `position` + `velocity` command interfaces of all joints, so only one of them can be
-active at a time.
+The jog and the joint stream controller claim `position` + `velocity` command interfaces of all
+joints, so only one of them can drive the hardware at a time. With the `chain_to` parameter they
+instead write a joint space reference into the impedance controller, which claims `effort`
+([chaining](#chaining)). The hardware rejects `effort` together with `position`/`velocity` on the
+same joint.
 
 ---
 
@@ -30,6 +34,29 @@ active at a time.
   - [Realtime considerations](#realtime-considerations)
   - [Known limitations and roadmap](#known-limitations-and-roadmap)
 - [JointStreamController](#jointstreamcontroller)
+  - [Usage](#usage-1)
+  - [Overview of one control cycle](#overview-of-one-control-cycle-1)
+  - [Background I: Ruckig in position mode towards a standstill](#background-i-ruckig-in-position-mode-towards-a-standstill)
+  - [Background II: seeding and feedback](#background-ii-seeding-and-feedback)
+  - [Background III: speed scaling](#background-iii-speed-scaling)
+  - [Background IV: synchronization](#background-iv-synchronization)
+  - [Background V: switching controllers while moving](#background-v-switching-controllers-while-moving)
+  - [Safety and error handling](#safety-and-error-handling-1)
+  - [Realtime considerations](#realtime-considerations-1)
+  - [Known limitations and roadmap](#known-limitations-and-roadmap-1)
+- [CartesianImpedanceController](#cartesianimpedancecontroller)
+  - [Usage](#usage-2)
+  - [Overview of one control cycle](#overview-of-one-control-cycle-2)
+  - [Background A: from a wrench to joint torques](#background-a-from-a-wrench-to-joint-torques)
+  - [Background B: the pose error](#background-b-the-pose-error)
+  - [Background C: velocity error and damping](#background-c-velocity-error-and-damping)
+  - [Background D: feedforward](#background-d-feedforward)
+  - [Background E: the closed loop](#background-e-the-closed-loop)
+  - [Background F: joint limit protection](#background-f-joint-limit-protection)
+  - [Background G: the breakaway hold in gc mode](#background-g-the-breakaway-hold-in-gc-mode)
+  - [Safety and error handling](#safety-and-error-handling-2)
+  - [Realtime considerations](#realtime-considerations-2)
+  - [Known limitations and roadmap](#known-limitations-and-roadmap-2)
 
 ---
 
@@ -74,6 +101,7 @@ or by small relative steps (*increments*, e.g. "1 mm along x"). It does four thi
 | Type | Name | Notes |
 |---|---|---|
 | Command interfaces | `<joint>/position`, `<joint>/velocity` | for every joint of the kinematic chain, interleaved per joint |
+| Command interfaces, chained | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | instead of the above when `chain_to` is set, see [chained to the impedance controller](#chained-to-the-impedance-controller) |
 | State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
 | Subscription | `~/twist_cmds` (`geometry_msgs/msg/TwistStamped`) | i.e. `/cartesian_jog_controller/twist_cmds`, `header.frame_id` selects the frame |
 | Subscription | `~/increment_cmds` (`robotarm_interface/msg/CartesianIncrement`) | relative steps, `header.frame_id` selects the frame like for twists, see [incremental moves](#incremental-moves) |
@@ -176,6 +204,7 @@ acceleration or jerk limits only show up as a Ruckig error on the first `update(
 | `joint_limit_margin` | `0.02` | rad | ≥ 0 | The joint stops this far before its position limit |
 | `max_increment_linear` | `0.003` | m | > 0 | Per-axis clamp of one linear increment step |
 | `max_increment_angular` | `0.0524` | rad | > 0 | Per-axis clamp of one angular increment step (3°) |
+| `chain_to` | `""` | – | | Empty: drive the hardware. Otherwise the name of the downstream controller to write the reference into ([chained](#chained-to-the-impedance-controller)) |
 
 `dt` in the `kp` check is `1 / update_rate` of the controller manager. With the 500 Hz from
 `robotarm_bringup`, `kp < 500 1/s`. Values of 10–20 1/s are plenty, see
@@ -249,13 +278,51 @@ ros2 topic pub --once /cartesian_jog_controller/increment_cmds robotarm_interfac
   "{header: {frame_id: ''}, linear: {x: 0.001, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
 ```
 
+#### Chained to the impedance controller
+
+With `chain_to: "cartesian_impedance_controller"` the controller does not drive the hardware. It
+claims the reference interfaces the impedance controller exports, and the arm follows the jogged
+motion **compliantly** instead of position controlled. Nothing else changes: same topics, same
+Ruckig, same limits. A second instance with its own name keeps the direct mode available
+(`robotarm_bringup` uses `cartesian_jog_controller` and `cartesian_jog_controller_impedance`).
+
+| | Direct | Chained |
+|---|---|---|
+| Command interfaces | `<joint>/position`, `/velocity` | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` |
+| Written each cycle | $q_{cmd}$, $\dot q_{cmd}$ | $q_{cmd}$, $\dot q_{cmd}$, $\ddot q_{cmd}$ |
+| On activation | $q_{meas}$, 0 | $q_{meas}$, 0, 0 |
+
+The joint acceleration is the backward difference of the commanded velocity (0 if `period` is 0):
+
+$$
+\ddot q_{cmd,k} = \frac{\dot q_{cmd,k} - \dot q_{cmd,k-1}}{\Delta t}
+$$
+
+Ruckig limits the Cartesian jerk, so $\dot q_{cmd}$ is continuous and the difference is smooth. Only
+the [post-scaling](#post-scaling-after-ruckig-backstop) and the
+[hard position clamp](#hard-position-clamp-backstop) can make it jump, both backstops that
+practically never act. The impedance controller uses $\ddot q_{cmd}$ only as inertia feedforward.
+
+**Tracking check.** With a compliant arm the deviation $\lvert q_{cmd} - q_{meas}\rvert$ is large on
+purpose, e.g. when someone pushes the arm. The check still catches a stuck or runaway arm, but
+`max_tracking_error` has to be much larger in the chained instance (`robotarm_bringup`: 1.5 rad).
+
+Activate both in **one** switch, the impedance controller has to be active for its reference
+interfaces to exist:
+
+```bash
+ros2 control switch_controllers --activate cartesian_impedance_controller cartesian_jog_controller_impedance
+```
+
+If the jog controller stops (`ERROR`), the impedance controller keeps holding the last reference.
+
 #### Lifecycle behavior
 
 | Transition | What happens |
 |---|---|
 | `on_init` | Declares the parameters. |
-| `on_configure` | Reads and validates parameters, initializes the kinematic model from the URDF, scales the joint velocity limits, sizes all buffers, creates both subscriptions. |
-| `on_activate` | Reads the joint state (strict: all joints or fail), seeds `q_cmd` with it, commands velocity 0, computes `x_ref = FK(q_cmd)`, resets Ruckig to rest, the twist to zero, the pending increments and the mode to jog. |
+| `on_configure` | Reads and validates parameters, initializes the kinematic model from the URDF, scales the joint velocity limits, sizes all buffers, creates both subscriptions. `chain_to` selects the command interfaces. |
+| `on_activate` | Reads the joint state (strict: all joints or fail), seeds `q_cmd` with it, commands velocity 0 (and acceleration 0 when chained), computes `x_ref = FK(q_cmd)`, resets Ruckig to rest, the twist to zero, the pending increments and the mode to jog. |
 | `update` | One control cycle, see below. |
 | `on_deactivate` | Nothing. The hardware holds position when the interfaces are released. |
 | `on_cleanup` | Destroys both subscriptions. Their callbacks read parameters and frame names, which a following `on_configure` rewrites. |
@@ -307,7 +374,8 @@ In code order (`update()` in [src/CartesianJogController.cpp](src/CartesianJogCo
 9. Integrate $q_{cmd}$, advance `x_ref` by the realized feedforward $s\,J J^+ \dot x_{ff}$.
 10. Hard clamp $q_{cmd}$ to the joint position limits (backstop).
 11. Advance Ruckig's state (`pass_to_input`, or re-sync if $s<1$, including the position step).
-12. Write $q_{cmd}$ and $\dot q_{cmd}$ to the command interfaces.
+12. Write $q_{cmd}$ and $\dot q_{cmd}$ to the command interfaces, chained also $\ddot q_{cmd}$
+    (computed in step 8 as the difference to the previous $\dot q_{cmd}$).
 
 The following sections explain each of these steps.
 
@@ -1043,8 +1111,8 @@ the topic can queue up a long move. A new twist message (zero = stop) ends the r
 | Struct | Contents | Lifetime |
 |---|---|---|
 | `Measured state` | $q_{meas}$, $\dot q_{meas}$ | refreshed each cycle |
-| `Reference ref` | $q_{cmd}$, $\dot q_{cmd}$, `x_ref` | persistent, reset on activate |
-| `Scratch tmp` | $\dot q_{pred}$, $J$, $J^+$ | valid within one cycle only |
+| `Reference ref` | $q_{cmd}$, $\dot q_{cmd}$, $\ddot q_{cmd}$, `x_ref` | persistent, reset on activate |
+| `Scratch tmp` | $\dot q_{pred}$, $\dot q_{cmd,new}$, $J$, $J^+$ | valid within one cycle only |
 
 - Cartesian quantities (`Matrix<double,6,1>`, `Vector3d`, `Isometry3d`, `AngleAxisd`) are
   fixed size, so they're **stack locals at zero cost**, with no resize and no member needed.
@@ -1091,7 +1159,16 @@ the topic can queue up a long move. A new twist message (zero = stop) ends the r
 
 ## JointStreamController
 
-> **Status:** skeleton. This section will be expanded once the controller is reworked.
+The controller moves the joints to a streamed target position, e.g. from a teleoperation device or
+a leader arm. Every new message replaces the target, and the arm follows it with a jerk-limited
+joint space trajectory (Ruckig). It does three things:
+
+- turns a stream of (possibly jumping, irregular) joint targets into smooth motion,
+- stops exactly at the last target, never past it,
+- scales its speed at runtime without changing the shape of the motion.
+
+It knows nothing about Cartesian space, the URDF or joint limits: the joints and the limits are
+parameters, and a target is taken as it is.
 
 ### Usage
 
@@ -1099,37 +1176,759 @@ the topic can queue up a long move. A new twist message (zero = stop) ends the r
 
 | Type | Name | Notes |
 |---|---|---|
-| Command interfaces | `<joint>/position`, `<joint>/velocity` | joints from the `joints` parameter |
-| State interfaces | `<joint>/position`, `<joint>/velocity` | |
-| Subscription | `~/commands` (`std_msgs/msg/Float64MultiArray`) | target joint positions in rad, one per joint |
-| Service | `~/scale_speed` (`robotarm_interface/srv/SetFloat64`) | runtime speed scale |
+| Command interfaces | `<joint>/position`, `<joint>/velocity` | joints from the `joints` parameter, interleaved per joint |
+| Command interfaces, chained | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | instead of the above when `chain_to` is set, see [chained to the impedance controller](#chained-to-the-impedance-controller-1) |
+| State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
+| Subscription | `~/commands` (`std_msgs/msg/Float64MultiArray`) | i.e. `/joint_stream_controller/commands`, target joint positions in rad, one per joint, in `joints` order |
+| Service | `~/scale_speed` (`robotarm_interface/srv/SetFloat64`) | runtime speed scale in (0, 1], see [background III](#background-iii-speed-scaling) |
+
+**Command convention:** `data` holds exactly one target position per joint. The latest message
+wins: targets are not queued, a message that arrives while the arm is still moving replaces the
+target and Ruckig replans from the current motion. Messages with the wrong number of values (empty
+included) or a non-finite value are dropped in the subscriber callback (throttled warning). The
+expected size is captured when the subscription is created in `on_configure`, so the callback shares
+no state with a later reconfigure.
+
+There is no watchdog and no `header`: a target is a position, not a velocity, so when the sender
+goes quiet the arm simply arrives at the last target and stands still.
 
 #### Parameters
 
-| Parameter | Default | Unit | Meaning |
-|---|---|---|---|
-| `joints` | `[]` | – | Joint names (must not be empty) |
-| `max_velocity` | `1.5` | rad/s | Ruckig velocity limit, all joints |
-| `max_acceleration` | `2.0` | rad/s² | Ruckig acceleration limit |
-| `max_jerk` | `2.0` | rad/s³ | Ruckig jerk limit |
-| `sync_joints` | `false` | – | `true`: `Synchronization::Time` (all joints arrive together), `false`: `None` |
+All parameters are read in `on_configure`. Only `joints` is validated. Non-positive limits only show
+up as a Ruckig error on the first `update()`.
 
-### Behavior
+| Parameter | Default | Unit | Constraint | Meaning |
+|---|---|---|---|---|
+| `joints` | `[]` | – | not empty | Joint names, also the order of the values in `~/commands` |
+| `max_velocity` | `1.5` | rad/s | > 0 (not validated) | Ruckig velocity limit, the same for all joints |
+| `max_acceleration` | `2.0` | rad/s² | > 0 (not validated) | Ruckig acceleration limit, all joints |
+| `max_jerk` | `2.0` | rad/s³ | > 0 (not validated) | Ruckig jerk limit, all joints |
+| `sync_joints` | `false` | – | | `true`: `Synchronization::Time` (all joints arrive together), `false`: `None`, see [background IV](#background-iv-synchronization) |
+| `chain_to` | `""` | – | | Empty: drive the hardware. Otherwise the name of the downstream controller to write the reference into ([chained](#chained-to-the-impedance-controller-1)) |
 
-- Joint space Ruckig in **position mode**: the latest command is the target position, with target
-  velocity 0.
-- On the first cycle after activation, Ruckig is seeded from the measured state; after that, its
-  own output is fed back (`pass_to_input`).
-- Until the first command arrives, the reference is NaN and nothing is commanded.
-- **Speed scaling** applies a time scaling: scaling time by $1/k$ scales the $n$-th derivative by
-  $k^n$, so the limits are scaled as $v\cdot k$, $a\cdot k^2$, $j\cdot k^3$. That slows the motion
-  down while keeping its shape.
+Tuning hints:
+- **`max_velocity`**: one value for all joints, so it has to fit the slowest joint. `robotarm_bringup`
+  uses the lowest URDF velocity limit (axis2–6), and the speed scale lowers it at runtime.
+- **`max_acceleration` / `max_jerk`**: together with the velocity they set how far behind a moving
+  target the arm runs ([background I](#background-i-ruckig-in-position-mode-towards-a-standstill)).
+  Higher values follow more closely, lower values filter a jittery stream more.
 
-### Background
+Example (`robotarm_bringup/config/controllers.yaml`):
 
-<!-- TODO: design rationale, choice of position mode, synchronization, interaction with the
-     cartesian jog controller (switching while moving) -->
+```yaml
+joint_stream_controller:
+  ros__parameters:
+    joints: [axis1, axis2, axis3, axis4, axis5, axis6]
+    max_velocity: 2.5
+    max_acceleration: 4.0
+    max_jerk: 10.0
+    sync_joints: false
+```
 
-### Known limitations
+#### Running it
 
-<!-- TODO -->
+`robotarm_bringup/launch/robotarm.launch.py` spawns the controller **inactive**. To activate it (and
+release the jog controller, which claims the same interfaces):
+
+```bash
+ros2 control switch_controllers --activate joint_stream_controller --deactivate cartesian_jog_controller
+```
+
+Send a target (one message is enough, the arm moves there and stops):
+
+```bash
+ros2 topic pub --once /joint_stream_controller/commands std_msgs/msg/Float64MultiArray \
+  "{data: [0.0, -1.0, 1.0, 0.0, 0.5, 0.0]}"    # example values, check them against the joint limits
+```
+
+Halve the speed (also while moving):
+
+```bash
+ros2 service call /joint_stream_controller/scale_speed robotarm_interface/srv/SetFloat64 "{data: 0.5}"
+```
+
+#### Chained to the impedance controller
+
+With `chain_to: "cartesian_impedance_controller"` the controller claims the reference interfaces of
+the impedance controller instead of the hardware, and the arm follows the trajectory
+**compliantly**. Topic, service and Ruckig are the same. `robotarm_bringup` runs this as a second
+instance, `joint_stream_controller_impedance`.
+
+| | Direct | Chained |
+|---|---|---|
+| Command interfaces | `<joint>/position`, `/velocity` | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` |
+| Written each cycle | Ruckig position, velocity | Ruckig position, velocity, acceleration |
+| On activation | $q_{meas}$, 0 | $q_{meas}$, 0, 0 |
+
+Unlike the jog controller, the acceleration needs no finite difference: it is Ruckig's own
+`new_acceleration`, exactly consistent with position and velocity. The activation command is in the
+[impedance controller's section](#running-it-2).
+
+#### Lifecycle behavior
+
+| Transition | What happens |
+|---|---|
+| `on_init` | Declares the parameters. |
+| `on_configure` | Reads the parameters, creates Ruckig with the limits and the synchronization, creates the subscription and the service. `chain_to` selects the command interfaces. |
+| `on_activate` | Reads the joint positions (strict: all joints or fail), commands them with velocity 0 (and acceleration 0 when chained), resets the target to "none" (blocking `set`, so a target received while inactive is never executed), resets the speed scale to 1 and re-arms the seeding of Ruckig. |
+| `update` | One control cycle, see below. |
+| `on_deactivate` | Nothing. The hardware holds position when the interfaces are released. |
+| `on_cleanup` | Destroys the subscription and the service, resets the speed scale to 1. |
+
+If `update()` returns `ERROR`, the controller manager deactivates the controller in the same cycle
+and the hardware holds position.
+
+### Overview of one control cycle
+
+```
+ commands ─► latest target ──► target_position, target_velocity = 0 ──┐
+                                                                      ▼
+ speed scale k ─► v·k, a·k², j·k³ ─────────────────────────────► Ruckig (position mode)
+                                                                      │ position, velocity, acceleration
+   first cycle with a target: seed from q_meas, q̇_meas, 0             │
+   after that: pass_to_input (own output) ◄───────────────────────────┤
+                                                                      ▼
+                                                       hardware / chain_to reference
+```
+
+In code order (`update()` in [src/JointStreamController.cpp](src/JointStreamController.cpp)):
+
+1. Take the latest target from the realtime box. If there is none yet, return without writing:
+   the interfaces keep what `on_activate` wrote.
+2. Check the number of values against `joints` (`ERROR` on mismatch). A backstop: the callback
+   already drops such messages.
+3. **Ruckig state:** on the first cycle with a target, seed it from the measured position and
+   velocity with acceleration 0 (strict read, `ERROR` on a miss). Otherwise feed back the last
+   output (`pass_to_input`).
+4. Write the target (position, velocity 0) and the limits, scaled by the speed scale.
+5. Run Ruckig with the cycle's `period` as `delta_time` (`ERROR` if `result < 0`).
+6. Write position and velocity, chained also the acceleration.
+
+### Background I: Ruckig in position mode towards a standstill
+
+The controller runs one $n$-DOF Ruckig in **position mode**. The target is the latest streamed
+position with **target velocity 0**:
+
+```cpp
+input.target_position = latest command;
+input.target_velocity = 0;
+ruckig_.update(input, output);
+output.pass_to_input(input);
+```
+
+Ruckig plans the time-optimal jerk-limited trajectory from the current motion to a standstill at the
+target, and replans as soon as the target changes. Target velocity 0 is the conservative choice for
+a stream whose future is unknown:
+
+- **No overshoot.** Every plan ends at rest on the last target, so the arm never moves past a
+  position the sender actually asked for, and stops cleanly when the stream stops.
+- **No velocity estimate needed.** A target velocity would have to be estimated from the stream by
+  differentiation, which amplifies the jitter of a teleoperation device and of the network timing.
+
+The cost is **lag**. With a target moving at constant speed, the arm runs as fast as it can while
+always staying able to stop at the current target. It settles roughly a braking distance behind the
+target, about $v^2/(2a)$ plus a jerk term: at 0.5 rad/s with $a = 4$ rad/s² that's ~0.03 rad. Higher
+acceleration and jerk limits shrink the lag; a sender that streams small, dense steps sees smooth
+continuous motion rather than stop-and-go.
+
+A target jump (e.g. a new pose selected in a GUI) is handled the same way: the jump only moves the
+goal, the motion towards it stays within the limits.
+
+### Background II: seeding and feedback
+
+Like the jog controller ([background 4](#background-4-smooth-motion-with-ruckig)), Ruckig is fed its
+**own output**, not measurements. The measured state is noisy, and feeding it back would make Ruckig
+replan every cycle. Ruckig's state is the *intent*; the drives (or the impedance controller) make
+the arm follow it.
+
+The measured state is used once, to seed Ruckig, and the timing of that matters:
+
+| Moment | What is commanded |
+|---|---|
+| `on_activate` | measured position, velocity 0: the arm holds where it is |
+| no target yet | nothing new, the activation command stays on the interfaces |
+| first cycle with a target | Ruckig seeded from **measured** position and velocity, acceleration 0 |
+| every later cycle | Ruckig's own output |
+
+Seeding on the first *target* rather than on activation means the trajectory starts where the arm
+actually is when the stream starts. In the chained case the arm is compliant and may have been
+pushed in between; seeding on activation would start with a step back to the activation pose.
+
+### Background III: speed scaling
+
+`~/scale_speed` sets a factor $k \in (0, 1]$, stored in an atomic and read every cycle. It scales the
+limits as a **time scaling**: running a trajectory $q(t)$ as $q(k\,t)$ scales the $n$-th derivative
+by $k^n$, so
+
+$$
+v_{max} \leftarrow k\,v_{max}, \qquad a_{max} \leftarrow k^2\,a_{max}, \qquad j_{max} \leftarrow k^3\,j_{max}
+$$
+
+Scaling only the velocity would change the shape of the motion: a short move never reaches the
+velocity limit, so it would not slow down at all. With the time scaling, every move takes $1/k$ as
+long on the same path, which is what an operator expects from a speed override.
+
+The limits are written every cycle. Ruckig compares its input with the last call, so a change of $k$
+triggers exactly one replan. Lowered while moving, Ruckig first brings the motion back within the
+new limits and then continues towards the target. The service rejects values outside (0, 1] and
+non-finite values, because 0 or a negative limit would make Ruckig fail and stop the controller.
+
+### Background IV: synchronization
+
+| `sync_joints` | Ruckig | Behavior |
+|---|---|---|
+| `false` | `Synchronization::None` | every joint runs its own time-optimal profile; small moves finish first |
+| `true` | `Synchronization::Time` | all joints finish at the same time; fast joints are slowed down to the slowest |
+
+For a stream (teleoperation, leader arm), `None` gives the least lag: each joint follows its own
+target as quickly as possible, and the targets are close together anyway. `Time` makes single large
+moves (a jump to a new pose) look coordinated. The joint space path is then still not exactly a
+straight line; that would be `Phase`, which only works from rest or for collinear motion and falls
+back to `Time` otherwise (see [background 7](#synchronization-none-not-phase) for the same trade-off
+in the jog controller). Neither mode says anything about the Cartesian path of the TCP.
+
+### Background V: switching controllers while moving
+
+The joint stream and the jog controller claim the same interfaces, so they are switched, never run
+together. On activation each writes the measured position with **velocity 0**. Switching while the
+arm moves therefore stops it as hard as the drives' own limits allow, and the new controller starts
+from rest (the joint stream controller seeds the measured velocity of the then braking arm on its
+first target). Switch at rest.
+
+There is no handover of the motion state between the controllers: the jog controller's Ruckig is
+Cartesian, this one is in joint space, and both are re-seeded from measurements.
+
+### Safety and error handling
+
+| Case | Handling |
+|---|---|
+| Non-finite value in a command | dropped in the callback, throttled warning |
+| Command size ≠ number of joints (empty included) | dropped in the callback, throttled warning |
+| State read miss on the seeding cycle | `ERROR` (throttled log) |
+| Ruckig `result < 0` (e.g. non-positive limits) | `ERROR` (throttled log) |
+| Speed scale outside (0, 1] or non-finite | rejected by the service, `success = false` |
+| Target outside the joint limits | **not checked**, see [limitations](#known-limitations-and-roadmap-1) |
+
+What the controller does **not** have, compared to the jog controller:
+
+- **No joint limit handling.** The target is taken as it is. Only the hardware limits of the drives
+  (and in the chained case the impedance controller's [joint limit
+  protection](#background-f-joint-limit-protection)) stop a joint at its limit.
+- **No tracking check.** After seeding, measurements are not read at all. A blocked arm, a drive
+  fault or a frozen state are not detected by this controller.
+
+### Realtime considerations
+
+- The target is a `Float64MultiArray` in a `RealtimeThreadSafeBox`. `update()` reads it with
+  `try_get`; if the lock is contended, the previous target is used for one more cycle.
+- Copying the target into `joint_commands_` allocates on the first command after configure (the
+  vector grows from 0 to $n$) and whenever a message with a different size arrives. With the
+  expected size, the vector's capacity is reused.
+- Ruckig uses `DynamicDOFs`; its buffers are sized in `on_configure`.
+- The speed scale is a `std::atomic<double>`, written by the service and read in `update()` without
+  a lock.
+- There is no malloc counter test for this controller yet.
+
+### Known limitations and roadmap
+
+| Item | Status / notes |
+|---|---|
+| **No joint position limits** | Targets aren't clamped. Reading the limits from the URDF through `robotarm_rbd` (like the other two controllers) and clamping the target would fix it. |
+| **No tracking check** | A stuck or runaway arm isn't detected. Same check as in the jog controller would fit. |
+| Joints and limits as parameters | Not from the URDF, so they can disagree with the model. One velocity/acceleration/jerk limit for all joints. |
+| Limits not validated | `max_velocity/acceleration/jerk` aren't checked in `on_configure`. |
+| Lag behind a moving target | By design (target velocity 0, background I). A target velocity from the sender (e.g. `JointTrajectoryPoint`) would remove it without estimating anything. |
+| ~~Empty / wrong-size message~~ | **Done.** Dropped in the callback against the joint count captured at configure. |
+| ~~Reset on activation not guaranteed~~ | **Done.** `on_activate` clears the box with a blocking `set`. |
+| ~~Speed scale and `on_cleanup`~~ | **Done.** The scale is reset to 1 on activation and cleanup, `on_cleanup` destroys subscription and service. |
+| Switching while moving | Hard stop, see background V. |
+| Realtime test | No malloc counter test like `test_cartesian_jog_rt_alloc`. |
+
+---
+
+## CartesianImpedanceController
+
+A torque controller. It commands joint efforts computed from the rigid body model, so the arm is
+held by its model instead of by stiff position loops. It has two modes, selected at configure:
+
+- **`gc`**: gravity compensation with joint damping and a *breakaway hold* (a virtual static
+  friction). The arm floats and can be guided by hand; references are ignored.
+- **`impedance`**: the TCP behaves like a mass-spring-damper attached to a reference pose. The
+  reference comes as a joint space trajectory point from an upstream controller
+  ([chaining](#chaining)), without one the activation pose is held.
+
+In both modes, a joint limit protection makes sure no controller term pushes a joint into its
+position limit, and the commanded torque is ramped in, rate limited and clamped.
+
+The control law, with the reference $q_d, \dot q_d, \ddot q_d$:
+
+$$
+\tau = \underbrace{g(q)}_{\text{gravity}}
+     + \underbrace{M(q)\,\ddot q_d + C(q,\dot q)\,\dot q}_{\text{dynamics feedforward}}
+     + \underbrace{J^T(q)\,\big(F_{spring} + F_{damper}\big)}_{\text{Cartesian impedance}}
+     - \underbrace{D_j\,(\dot q - \dot q_d)}_{\text{joint damping}}
+     + \tau_{limit}
+$$
+
+### Usage
+
+#### Interfaces
+
+| Type | Name | Notes |
+|---|---|---|
+| Command interfaces | `<joint>/effort` | for every joint of the kinematic chain |
+| State interfaces | `<joint>/position`, `<joint>/velocity`, `<joint>/effort` | interleaved per joint, the effort seeds the start ramp |
+| Reference interfaces (exported) | `<name>/<joint>/position`, `/velocity`, `/acceleration` | `<name>` is the controller name, e.g. `cartesian_impedance_controller/axis1/position`. Read in `impedance` mode only |
+
+Like the jog controller, the joint names, limits and the TCP come from the URDF through
+`robotarm_rbd`. There are no topics and no services: the only input is the reference.
+
+#### Chaining
+
+The controller is a `ChainableControllerInterface`. An upstream controller claims its reference
+interfaces and writes a joint space reference every cycle, in the same realtime cycle and before
+this controller's update. Both upstream controllers of this package can do that, selected with
+their `chain_to` parameter:
+
+| Upstream | Reference | Acceleration |
+|---|---|---|
+| `JointStreamController` | joint space Ruckig towards streamed targets | Ruckig output |
+| `CartesianJogController` | jogged / incremented TCP motion, through $J^+$ | difference of $\dot q_{cmd}$, see [chained to the impedance controller](#chained-to-the-impedance-controller) |
+
+Any controller that writes `<joint>/position`, `/velocity`, `/acceleration` works, e.g. a
+`joint_trajectory_controller` for MoveIt.
+
+**Missing references.** Each value is checked every cycle:
+
+| Value | NaN (nobody wrote it yet) |
+|---|---|
+| position | hold: $q_d$ keeps its last value, on activation the measured pose |
+| velocity, acceleration | 0 |
+
+All references are set to NaN on activation, so values of a previous activation never come back.
+Without an upstream controller (or in `gc` mode, where they are ignored) the reference interfaces
+have no effect.
+
+#### Modes
+
+| | `gc` | `impedance` |
+|---|---|---|
+| Gravity compensation $g(q)$ | ✓ | ✓ |
+| Joint damping | $-D_j\,\dot q$ | $-D_j\,(\dot q - \dot q_d)$ |
+| Breakaway hold | ✓ | – |
+| Dynamics feedforward | – | $M\ddot q_d + C\dot q$ |
+| Cartesian spring and damper | – | ✓ |
+| References | ignored | read |
+| Joint limit protection, ramp, rate limit, clamp | ✓ | ✓ |
+
+A Cartesian stiffness of 0 is allowed per axis. For example a zero rotational stiffness with some
+rotational damping gives a translational impedance with a free but damped wrist.
+`robotarm_bringup` loads both modes as two instances, `gc_controller` and
+`cartesian_impedance_controller`.
+
+#### Parameters
+
+All parameters are read in `on_configure`. Values that violate a constraint make configuration fail
+with an error message. Parameters of the other mode are ignored with a warning if they are set.
+
+| Parameter | Default | Unit | Mode | Constraint | Meaning |
+|---|---|---|---|---|---|
+| `mode` | `"gc"` | – | – | `"gc"` or `"impedance"` | Control mode |
+| `lambda` | `0.01` | – | – | > 0 | Passed to `robotarm_rbd`, currently unused (no Jacobian inverse) |
+| `jinv_method` | `"svd"` | – | – | `"svd"` or `"ldlt"` | Passed to `robotarm_rbd`, currently unused |
+| `torque_scale` | `1.0` | – | both | (0, 1] | Fraction of the URDF effort limits used as torque limits (`effort` below) |
+| `torque_rise_time` | `0.0` | s | both | ≥ 0, 0 disables | Minimum time from 0 to `effort`, limits the torque rate per joint |
+| `joint_damping` | – | N·m·s/rad | both | ≥ 0, one per joint | Joint damping $D_j$ |
+| `joint_limit_zone` | – | rad | both | ≥ 0, one per joint, < half the joint range, 0 disables | Width of the protection zone in front of each limit |
+| `joint_limit_push` | `0.0` | – | both | [0, 1] | Outward push at the limit, as a fraction of `effort`, all joints |
+| `hold_stiffness` | – | N·m/rad | `gc` | ≥ 0, one per joint, 0 disables | Stiffness of the breakaway hold |
+| `hold_breakaway_torque` | – | N·m | `gc` | ≥ 0, one per joint, ≤ `effort` | Torque at which the hold slides |
+| `cartesian_stiffness` | – | N/m, N·m/rad | `impedance` | ≥ 0, 6 values | Diagonal $K$ in the base frame, $[x, y, z, r_x, r_y, r_z]$ |
+| `cartesian_damping` | – | N·s/m, N·m·s/rad | `impedance` | ≥ 0, 6 values | Diagonal $D$ in the base frame |
+| `max_spring_force` | `0.0` | N | `impedance` | > 0 | Limit on the norm of the translational spring force |
+| `max_spring_moment` | `0.0` | N·m | `impedance` | > 0 | Limit on the norm of the rotational spring moment |
+
+Per joint arrays are in URDF joint order. The start ramp time (1 s) is hard-coded.
+
+Tuning hints:
+- **`cartesian_damping`**: from a target damping ratio $\zeta$ and an assumed apparent mass $m$ per
+  axis, $D = 2\zeta\sqrt{K m}$. The apparent mass changes with the pose
+  ([background E](#background-e-the-closed-loop)), so take a typical value and start with
+  $\zeta \approx 0.7$.
+- **`joint_damping`**: in `impedance` mode it only has to damp what the Cartesian terms can't see
+  (motion in the null space at singularities), keep it small. In `gc` mode it is the only damping.
+- **`max_spring_force` / `max_spring_moment`**: bound the force a wrong or jumping reference can
+  produce. Keep the moment below the effort of the wrist joints.
+- **`joint_limit_zone`**: has to be longer than the braking distance of the joint at the expected
+  speed, since only joint damping and friction brake inside it. Not validated.
+- **`torque_rise_time`**: a backup against torque steps. It should never act in normal operation,
+  watch for the *"Torque rate limited"* warning. A rate limit inside the loop adds lag.
+
+Example (`robotarm_bringup/config/controllers.yaml`, values not tuned):
+
+```yaml
+cartesian_impedance_controller:
+  ros__parameters:
+    mode: "impedance"
+    torque_scale: 1.0
+    torque_rise_time: 0.03
+    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
+    joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    joint_limit_push: 0.2
+    cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]
+    cartesian_damping: [28.0, 28.0, 28.0, 0.22, 0.22, 0.22]
+    max_spring_force: 20.0
+    max_spring_moment: 2.0
+```
+
+#### Running it
+
+`robotarm_bringup/launch/robotarm.launch.py` spawns all instances from `controllers.yaml`
+**inactive**: `gc_controller`, `cartesian_impedance_controller` and the chained upstream controllers
+`joint_stream_controller_impedance` and `cartesian_jog_controller_impedance`.
+
+Gravity compensation (no position controller may be active on the same joints):
+
+```bash
+ros2 control switch_controllers --activate gc_controller --deactivate joint_stream_controller
+```
+
+Impedance with streamed joint targets, both in **one** switch:
+
+```bash
+ros2 control switch_controllers --deactivate gc_controller \
+  --activate cartesian_impedance_controller joint_stream_controller_impedance
+ros2 topic pub --once /joint_stream_controller_impedance/commands std_msgs/msg/Float64MultiArray \
+  "{data: [0.0, -1.0, 1.0, 0.0, 0.5, 0.0]}"    # example values, check them against the joint limits
+```
+
+Activated alone, `cartesian_impedance_controller` holds the activation pose compliantly.
+
+#### Lifecycle behavior
+
+| Transition | What happens |
+|---|---|
+| `on_init` | Declares the parameters. |
+| `on_configure` | Reads and validates the parameters for the selected mode, initializes the model from the URDF, scales the effort limits by `torque_scale`, checks the per joint array lengths and the limit zones, sizes all buffers. |
+| export | Creates the reference interfaces, 3 per joint, initialized to NaN. |
+| `on_activate` | Reads the joint state (strict: all joints or fail), sets the hold anchor and $q_d$ to the measured pose, resets the references to NaN, starts the torque ramp from the measured effort. |
+| `update_reference_from_subscribers` | Nothing, there is no standalone input (only called when not chained). |
+| `update_and_write_commands` | One control cycle, see below. |
+| `on_deactivate` | Nothing. When the `effort` interface is released, the drives hold their current position. |
+
+If an update returns `ERROR`, the controller manager deactivates it in the same cycle, and the
+drives hold position.
+
+### Overview of one control cycle
+
+```
+ q, q̇ ─► RNEA(q, 0, 0) ─────────────────────────────────────────► τ_gravity
+         │
+         ├ gc:        hold anchor update ─► −D_j·q̇ − K_h·(q − q_anchor) ─────────► τ_mode
+         └ impedance: references (NaN → hold / 0)
+                      FK, J at q and q_d ─► e, ė ─► F_spring (norm clamped), F_damper
+                      RNEA(q, q̇, q̈_d, no gravity) + Jᵀ(F_spring + F_damper)
+                      − D_j·(q̇ − q̇_d) ────────────────────────────────────────────► τ_mode
+                                                                                     │
+                      joint limit protection: scale τ_mode towards a limit, push ─► τ_limit
+                                                                                     │
+ τ = τ_gravity + τ_mode + τ_limit ─► start ramp ─► rate limit ─► clamp ─► effort ─► hardware
+```
+
+In code order (`update_and_write_commands()` in
+[src/CartesianImpedanceController.cpp](src/CartesianImpedanceController.cpp)):
+
+1. Read the joint state (best effort).
+2. **Gravity**: $g(q)$ from the RNEA with zero velocity and acceleration, both modes.
+3. **Mode torque** $\tau_{mode}$, everything the controller "wants" on top of gravity:
+   - *gc:* drag the hold anchors along, joint damping plus hold spring.
+   - *impedance:* read the references, forward kinematics and Jacobian at $q$ and $q_d$, pose and
+     velocity error, spring (norm clamped) and damper wrench, dynamics feedforward, joint damping.
+4. **Joint limit protection**: inside a zone, scale the part of $\tau_{mode}$ towards the limit
+   down, add the outward push $\tau_{limit}$. Gravity is not touched.
+5. Sum, **start ramp** (blend from the measured effort over 1 s after activation).
+6. **Rate limit** against the previous command, then **clamp** to the effort limits. Both fail on
+   NaN, which stops the controller.
+7. Write the efforts.
+
+### Background A: from a wrench to joint torques
+
+Springs and dampers at the TCP produce a **wrench** $F = [f^T\ m^T]^T$ (force and moment, base
+frame, moment about the TCP). The motors produce joint torques. The mapping follows from virtual
+work: the power the joints put in equals the power at the TCP, for every joint velocity,
+
+$$
+\tau^T \dot q = F^T \dot x = F^T J \dot q
+\quad\Rightarrow\quad
+\tau = J^T F
+$$
+
+with the same geometric Jacobian $J$ (rows $[v;\ \omega]$, base frame, TCP point) the jog controller
+uses for velocities ([background 1](#background-1-twists-frames-and-the-jacobian)). Per joint,
+$\tau_i = j_i^T F$: a joint gets as much torque as its own motion points along the force. A joint
+that moves the TCP perpendicular to $F$ gets none, its bearings carry that part.
+
+With the singular value decomposition $J = U \Sigma V^T$ the two directions read
+
+$$
+\dot q = J^{-1}\dot x = V \Sigma^{-1} U^T \dot x,
+\qquad
+\tau = J^T F = V \Sigma U^T F
+$$
+
+Velocities scale with $1/\sigma$, forces with $\sigma$. Near a singularity ($\sigma \to 0$) the
+inverse needs huge joint velocities, while a force in the singular direction needs **no** torque:
+the structure carries it. So $\tau = J^T F$ needs no inversion and never blows up. The spring just
+loses its effect in the singular direction.
+
+$J^T F$ is computed explicitly instead of passing the wrench to the RNEA (which could add it, in
+the TCP frame), so each term of the control law stays a separate, inspectable torque.
+
+### Background B: the pose error
+
+Current and reference pose come from forward kinematics, $T = FK(q)$ and $T_d = FK(q_d)$, both in
+the base frame. The error follows the **mechanics convention**, current minus reference, so the
+spring is $F = -K e$:
+
+$$
+e = \begin{bmatrix} p - p_d \\ \log(R R_d^T) \end{bmatrix}
+$$
+
+The orientation part is the **rotation vector** (axis times angle, $\theta \in [0, \pi]$) of the
+relative rotation, expressed in the base frame like the angular rows of $J$:
+
+```cpp
+Eigen::AngleAxisd aa(R * R_d.transpose());
+e_o = aa.angle() * aa.axis();
+```
+
+Differences of Euler or RPY angles would wrap around (179° vs −179° is a 358° difference), couple
+the axes and fail at gimbal lock. A rotation matrix has exactly one value per orientation, so the
+log map always gives the shortest rotation. $R_d R^T$ gives exactly $-e_o$; $R_d^T R$ is the same
+rotation expressed in the reference frame, not the negative.
+
+**The 180° flip.** Past 180° the shortest rotation is the other way round: 190° about $k$ becomes
+170° about $-k$, and the spring moment flips from pulling back to pulling forward. This depends
+only on the relative TCP orientation, not on the joint angles themselves. The spring clamp bounds
+the moment jump to $2\cdot$`max_spring_moment`. The error is not unwrapped: the winding of an
+orientation only exists in joint space, and the joint limit protection handles that side.
+
+**Spring clamp.** The spring wrench is limited by the **norm**, translation and rotation separately:
+
+$$
+f_s = -K_p e_p,\quad \lVert f_s \rVert \le f_{max};
+\qquad
+m_s = -K_o e_o,\quad \lVert m_s \rVert \le m_{max}
+$$
+
+A norm clamp keeps the direction (a per-axis clamp would bend it), works for any $K$ including 0,
+and is independent of the frame. The damper is not clamped: it only dissipates, and the torque
+clamp bounds it.
+
+### Background C: velocity error and damping
+
+A spring alone stores energy and oscillates. The damper removes it. The velocity error is
+**computed from the measured joint velocity**, not by differentiating $e$:
+
+$$
+\dot e = J(q)\,\dot q - J(q_d)\,\dot q_d,
+\qquad
+F_{damper} = -D\,\dot e
+$$
+
+The reference velocity uses the Jacobian at the **reference** pose, it is the velocity of the
+reference frame. The rotational part is $\omega - \omega_d$, the physical angular velocity, which is
+only the derivative of $e_o$ for small errors, but it is what dissipates power ($m^T \omega$).
+
+**Damping the velocity error, not the velocity.** With a reference moving at constant speed $v_d$,
+in steady state the spring has to hold whatever force the other terms leave:
+
+$$
+\text{damping } \dot x:\ K e = D v_d \;\Rightarrow\; e = D v_d / K
+\qquad
+\text{damping } \dot x - \dot x_d:\ e = 0
+$$
+
+E.g. $K = 500$ N/m, $D = 50$ N·s/m, $v_d = 0.1$ m/s would lag 1 cm with the first variant. What
+remains with the second is every force the model doesn't know, mostly friction:
+$e \approx F_{unmodeled} / K$.
+
+**Joint damping stays on in impedance mode.** At a singularity some joint motions don't move the
+TCP (e.g. axis4 and axis6 counter-rotating when aligned). $e$ and $\dot x$ don't change, so the
+Cartesian terms don't see them, and gravity compensation doesn't hold them either. Only $D_j$ brakes
+such motion. In Cartesian terms it adds the anisotropic damping $J^{-T} D_j J^{-1}$, so it is kept
+small.
+
+### Background D: feedforward
+
+The spring only reacts to deviations. The feedforward provides what the intended motion needs, so
+the spring only handles the rest. The RNEA computes the inverse dynamics, and the arguments decide
+what is compensated:
+
+$$
+\text{RNEA}(q, v, a) = M(q)\,a + C(q, v)\,v + g(q)
+$$
+
+| Term | Argument | Why |
+|---|---|---|
+| gravity $g$ | measured $q$, computed separately | gravity acts on the real pose. At the reference pose the mismatch $g(q_d) - g(q)$ acts like an extra, possibly negative, spring |
+| Coriolis / centrifugal | measured $\dot q$ | compensates the real velocity terms, like gravity |
+| inertia | reference $\ddot q_d$ | anticipates the intended acceleration |
+
+Feedforward uses reference values, state compensation uses measured values. A measured acceleration
+in the inertia term would be positive feedback: $M\ddot q_{meas}$ pushes along with exactly the
+force the inertia resists with, the arm feels massless, and any delay or model error makes the
+effective mass negative.
+
+$\dot J$ doesn't appear, because the reference is already in joint space. The dynamics part is
+computed with gravity switched off (`gravity = 0` in the RNEA), so gravity stays a separate torque
+that the joint limit protection does not touch.
+
+### Background E: the closed loop
+
+Inserting the control law into the robot dynamics $M\ddot q + C\dot q + g = \tau + J^T F_{ext}$,
+gravity and Coriolis cancel:
+
+$$
+M\,(\ddot q - \ddot q_d) + D_j\,(\dot q - \dot q_d) = J^T\big(-K e - D\dot e + F_{ext}\big)
+$$
+
+Without $D_j$ and the $\dot J$ terms, with $\ddot e = J(\ddot q - \ddot q_d)$ and multiplying by
+$J^{-T}$:
+
+$$
+\Lambda(q)\,\ddot e + D\,\dot e + K\,e = F_{ext},
+\qquad
+\Lambda = J^{-T} M J^{-1} = \big(J M^{-1} J^T\big)^{-1}
+$$
+
+The TCP behaves like the designed spring and damper, with the **apparent mass** $\Lambda(q)$ of the
+arm (the joint inertia seen from the TCP, $\tfrac12 \dot q^T M \dot q = \tfrac12 \dot x^T \Lambda
+\dot x$). This is impedance control **without inertia shaping**:
+
+| Property | Result |
+|---|---|
+| statics | exact: $K e = F_{ext}$ in every pose |
+| stiffness, damping force | as designed |
+| mass | $\Lambda(q)$: pose dependent, anisotropic, couples translation and rotation |
+| natural frequency, damping ratio | $\omega_n = \sqrt{K/\Lambda}$, $\zeta = D / (2\sqrt{K\Lambda})$ vary with pose and direction |
+| paths | curve: $\ddot x = \Lambda^{-1} F$ is not parallel to $F$ |
+
+Shaping the mass to a designed $\Lambda_d$ would need the external force itself,
+$F_{ctrl} = \Lambda\Lambda_d^{-1}(-Ke - D\dot e) + (\Lambda\Lambda_d^{-1} - I)\,F_{ext}$, i.e. a
+force/torque sensor (or an observer estimate). Without one, $\Lambda_d = \Lambda$.
+
+**Stability.** With a stationary reference the total energy only decreases:
+
+$$
+V = \tfrac12 \dot q^T M \dot q + \tfrac12 e^T K e,
+\qquad
+\dot V = -\dot x^T D \dot x - \dot q^T D_j \dot q \le 0
+$$
+
+(Coriolis does no work, $\dot M - 2C$ is skew symmetric.) The controlled arm is **passive**: coupled
+to any passive environment, a table or a hand, it stays stable. A reference 1 cm inside a table
+presses with $K \cdot 0.01$ m. The argument assumes continuous time, no saturation and a correct
+model, so $K$ and $D$ are bounded in practice by the 500 Hz loop and the velocity noise.
+
+### Background F: joint limit protection
+
+The Cartesian spring knows nothing about joint limits. Instead of a repelling spring that would
+have to win against it (and only does so for suitable gains), the torque **towards** a limit is
+scaled down in a zone in front of it. Per joint, with the penetration $s \in [0, 1]$ into the zone
+(0 at its start, 1 at the limit):
+
+$$
+s_{upper} = \operatorname{clamp}\!\left(\frac{q - (q_{max} - z)}{z},\, 0,\, 1\right)
+$$
+
+| In the upper zone | |
+|---|---|
+| mode torque towards the limit ($\tau_{mode} > 0$) | scaled by $(1 - s)$ |
+| mode torque away from the limit | untouched |
+| push | $\tau_{limit} = -s \cdot \text{push} \cdot \text{effort}$ |
+
+The lower zone is mirrored. At the limit no controller term can push further in, independent of
+$K$, the spring clamp or the reference, and the push moves the joint back out. Gravity is not
+scaled, it holds weight and drives nothing. Joint damping is part of $\tau_{mode}$: it contains the
+velocity feedforward $D_j \dot q_d$, which would otherwise push a joint into its limit when the
+reference moves towards it. The zones of a joint must not overlap (checked), and joints without
+limits in the URDF are skipped.
+
+What remains is physics: a joint arriving fast needs the zone as braking distance, and an external
+force can still press a joint in, against at most `effort`.
+
+### Background G: the breakaway hold in gc mode
+
+Gravity compensation alone leaves the arm drifting with every model error. The hold is a spring
+to an anchor per joint, and the anchor is dragged along once the spring torque exceeds the
+breakaway torque, like static friction:
+
+$$
+\varepsilon_{max} = \tau_{break} / k_h,
+\qquad
+q_{anchor} \leftarrow \operatorname{clamp}(q_{anchor},\, q - \varepsilon_{max},\, q + \varepsilon_{max}),
+\qquad
+\tau_{hold} = -k_h\,(q - q_{anchor})
+$$
+
+Pushed by hand, the arm moves freely once the push exceeds the breakaway torque and stays where it
+is let go. The breakaway torque has to exceed the gravity model error, otherwise the arm sags. In
+`impedance` mode the hold is off, the Cartesian spring takes its place.
+
+### Safety and error handling
+
+| Case | Handling |
+|---|---|
+| RNEA / FK / Jacobian failure | `ERROR` |
+| NaN in the torque | `ERROR` (rate limit and clamp check `allFinite`) |
+| Missing reference (NaN) | hold the last position, velocity and acceleration 0 |
+| Wrong or jumping reference | spring force bounded by `max_spring_force` / `max_spring_moment`, limits protected |
+| Torque step | rate limited (`torque_rise_time`), throttled warning |
+| Torque above the limit | clamped to `effort` (URDF effort times `torque_scale`) |
+| State read misses | keep last value, continue, throttled warning |
+| Joint at its limit | mode torque towards it scaled to 0, pushed out |
+
+On `ERROR` the controller manager deactivates the controller (and a chained upstream loses its
+reference interfaces), the drives hold their position. The start ramp blends from the measured
+effort to the computed torque over 1 s, so activation doesn't step the torque.
+
+**Order of the torque post-processing:** sum → ramp → rate limit → clamp. The clamp comes last, so
+the effort limit is always the final guarantee.
+
+### Realtime considerations
+
+Same rules as the [jog controller](#realtime-considerations): members only for state that survives
+a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
+
+| Struct | Contents | Lifetime |
+|---|---|---|
+| `Measured state` | $q$, $\dot q$, $\tau$ | refreshed each cycle |
+| `Reference ref` | last command, start torque, hold anchor, $q_d$, $\dot q_d$, $\ddot q_d$ | persistent, reset on activate |
+| `Scratch tmp` | one vector per torque term, $J$, $J(q_d)$, a zero vector for the gravity call | valid within one cycle only |
+
+- $\dot e$ is computed as two products, $J\dot q - J_d \dot q_d$, each giving a fixed size result.
+  $J(\dot q - \dot q_d)$ would create a heap temporary for the `VectorXd` difference.
+- The gravity RNEA gets a preallocated zero vector, not the references, so the order of the
+  computations can't corrupt them.
+- `Eigen::Vector3d::Zero()` for the TCP wrench and the gravity argument is fixed size, no
+  allocation.
+- There is no malloc counter test for this controller yet.
+
+### Known limitations and roadmap
+
+| Item | Status / notes |
+|---|---|
+| Gains not tuned | `cartesian_stiffness`, `cartesian_damping` and the spring limits are placeholders. $D$ should come from the apparent mass sampled in the simulation. |
+| Constant damping | $\zeta$ varies with $\Lambda(q)$. Planned: mass-aware damping (double diagonalization) with $\Lambda = (J M^{-1} J^T + \lambda^2 I)^{-1}$. |
+| Reflected rotor inertia | Not in `robotarm_rbd` (it is in the MuJoCo model as `armature`). Makes the inertia feedforward too small, prerequisite for mass-aware damping. |
+| No inertia shaping | Needs a force/torque sensor or an observer, see [background E](#background-e-the-closed-loop). |
+| Friction | Not compensated, causes lag and a dead band ($e \approx F_{friction}/K$). |
+| Coriolis term | $C(q,\dot q)\dot q$ with the measured velocity instead of the PD+ term $C(q,\dot q)\dot q_d$, irrelevant at slow speeds. Switch to $\dot q_d$ if the velocity noise shows. |
+| Stiffness frame | Diagonal in the base frame. A tool frame stiffness ($K = R K_{tool} R^T$) would be more intuitive for rotations. |
+| Zone sizing | `joint_limit_zone` is not checked against the braking distance. |
+| Standalone input | No topic for a reference pose, `update_reference_from_subscribers` is empty. |
+| Reference export API | Uses the classic `on_export_reference_interfaces()` (deprecated in Jazzy, still works). |
+| `lambda`, `jinv_method` | Read and passed to `robotarm_rbd`, unused. |
+| Start ramp | 1 s, hard-coded. |
+| Realtime test | No malloc counter test like `test_cartesian_jog_rt_alloc`. |

@@ -74,11 +74,34 @@ def launch_setup(context):
         arguments=['joint_state_broadcaster'],
     )
 
-    # effort only: joint stream and cartesian jog (position/velocity) cannot run in the sim
+    # effort only: joint stream and cartesian jog driving the hardware directly (position/velocity)
+    # cannot run in the sim, their instances chained to the impedance controller can
+    gc_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['gc_controller', '--inactive'],
+        output='screen',
+    )
+
     cartesian_impedance_controller_spawner = Node(
         package='controller_manager',
         executable='spawner',
         arguments=['cartesian_impedance_controller', '--inactive'],
+        output='screen',
+    )
+
+    # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
+    joint_stream_controller_impedance_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['joint_stream_controller_impedance', '--inactive'],
+        output='screen',
+    )
+
+    cartesian_jog_controller_impedance_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['cartesian_jog_controller_impedance', '--inactive'],
         output='screen',
     )
 
@@ -96,7 +119,10 @@ def launch_setup(context):
         control_node,
         robot_state_pub_node,
         joint_state_broadcaster_spawner,
+        gc_controller_spawner,
         cartesian_impedance_controller_spawner,
+        joint_stream_controller_impedance_spawner,
+        cartesian_jog_controller_impedance_spawner,
         rviz_node,
     ]
 
