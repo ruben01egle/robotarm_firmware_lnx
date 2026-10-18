@@ -3,7 +3,8 @@
 Snapshot of the joint space mass matrix `M(q)` of the MuJoCo model, used to pick the `joint_damping` and
 `hold_stiffness` of the `cartesian_impedance_controller` from a target damping ratio instead of by trial
 and error. Sampled 2026-10-11 from [`mass_matrix_sampling.py`](mass_matrix_sampling.py), which uses the
-model helpers in `robotarm_mujoco.dynamics`.
+model helpers in `robotarm_mujoco.dynamics`. The task space counterpart (Cartesian inertia `Λ(q)` at the TCP, for
+the Cartesian damping) is [task_space_inertia.md](task_space_inertia.md).
 
 ## Method
 
@@ -20,8 +21,9 @@ T   = M_ii / D                     decay time constant with damping only (hold s
 
 `M(q)` comes from `mujoco.mj_fullM`, so it already contains the reflected rotor inertia (`armature`) that
 `sim_params.yaml` adds to each joint. The same matrix can be built from `RobotarmRbd::recursive_newton_euler`
-with `q̇ = 0`, gravity off and `q̈ = e_i` (column `i`), plus the armature on the diagonal, since the rbd does not
-model it.
+with `q̇ = 0`, gravity off and `q̈ = e_i` (column `i`). The rbd adds the URDF `<armature>` of each joint as
+`armature_i·q̈_i`, so the columns already contain it on the diagonal. Note: the URDF values are placeholders (0)
+until measured, the numbers below use the `sim_params.yaml` estimates.
 
 Poses are sampled uniformly within the joint limits (2000 poses, seed 0). Some of them would self collide, so
 the min/max spread is a bit wider than in real use.

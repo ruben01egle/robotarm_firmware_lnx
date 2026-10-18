@@ -1932,7 +1932,7 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 |---|---|
 | Gains not tuned | `cartesian_stiffness`, `cartesian_damping` and the spring limits are placeholders. $D$ should come from the apparent mass sampled in the simulation. |
 | Constant damping | $\zeta$ varies with $\Lambda(q)$. Planned: mass-aware damping (double diagonalization) with $\Lambda = (J M^{-1} J^T + \lambda^2 I)^{-1}$. |
-| Reflected rotor inertia | Not in `robotarm_rbd` (it is in the MuJoCo model as `armature`). Makes the inertia feedforward too small, prerequisite for mass-aware damping. |
+| Reflected rotor inertia | `robotarm_rbd` reads the URDF `<armature>` and adds it in the RNEA, so the inertia feedforward uses it. The URDF values are placeholders (0) for now, while the MuJoCo plant uses the `sim_params.yaml` estimates: until they match, the feedforward is too small. Prerequisite for mass-aware damping. |
 | No inertia shaping | Needs a force/torque sensor or an observer, see [background E](#background-e-the-closed-loop). |
 | Friction | Not compensated, causes lag and a dead band ($e \approx F_{friction}/K$). |
 | Coriolis term | $C(q,\dot q)\dot q$ with the measured velocity instead of the PD+ term $C(q,\dot q)\dot q_d$, irrelevant at slow speeds. Switch to $\dot q_d$ if the velocity noise shows. |

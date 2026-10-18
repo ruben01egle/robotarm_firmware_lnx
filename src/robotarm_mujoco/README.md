@@ -152,8 +152,8 @@ pulls in several extra Python packages.
   for checking gravity compensation, because friction would hide model errors.
 
 Current values are **estimates**: the LA8308 rotor inertia (about 180 kg·mm², no datasheet value
-found) and the axis5/axis6 armature (left at 0). They are marked `ESTIMATE` or `TODO` in the file.
-With armature 0, axis6's inertia is only 2.6e-5 kg·m², which is why its controller gains in
+found) and the wrist motor rotor inertia behind the axis5/axis6 armature. They are marked `ESTIMATE`
+in the file. Without armature, axis6's inertia is only 2.6e-5 kg·m², which is why its controller gains in
 `robotarm_bringup` are so small; revisit them once the wrist motors are known.
 
 ## Joint list duplication

@@ -307,7 +307,7 @@ What the model itself gets wrong, and shows up as a static error `e ≈ F_unmode
 |---|---|
 | joint friction (gears, belts) | tracking lag and a dead band around the target, usually the largest error |
 | mass / CoM error | static gravity offset, can act as negative stiffness in some poses |
-| missing reflected rotor inertia (`armature`) | inertia feedforward too small (axis2 ~21% of `M`, see [docs/dynamics](../dynamics/README.md)) |
+| reflected rotor inertia (`armature`) still 0 in the URDF (placeholder) | inertia feedforward too small (axis2 ~21% of `M`, see [docs/dynamics](../dynamics/README.md)) |
 | Coriolis from one RNEA call | `C(q,q̇)·q̇` instead of the PD+ term `C(q,q̇)·q̇_d`, irrelevant at slow speeds |
 | velocity noise | amplified by `D` (and quadratically by the Coriolis term), limits how large `D` can be |
 | log map past 180° | spring flips direction, limited by error saturation |
@@ -318,7 +318,7 @@ Roughly ordered by effort and benefit.
 
 | Extension | What it fixes | Needs | Caveats |
 |---|---|---|---|
-| **armature in the rbd** | inertia feedforward, prerequisite for anything using `M` | `armature` per joint, `τ_i += armature_i·q̈_i` in the RNEA, single source with `sim_params.yaml` | rotor inertia values are estimates |
+| **armature values** | inertia feedforward, prerequisite for anything using `M` | rbd side done (`<armature>` per joint, `τ_i += armature_i·q̈_i` in the RNEA). Open: real values in `ORT.yaml` (placeholders 0), MuJoCo reading them from the URDF instead of `sim_params.yaml` | rotor inertia values are estimates |
 | **friction compensation** | lag and dead band from friction | friction model per joint (Coulomb + viscous), identified on the robot | overcompensation adds energy, keep it below the real friction |
 | **stiffness in the tool frame** | intuitive rotation stiffness ("soft about the tool axis") | `K_base = R·K_tool·Rᵀ` per cycle | none worth mentioning |
 | **mass-aware damping** (double diagonalization) | constant `ζ` over all poses, uniform discrete time damping limit | `M(q)` (6 RNEA calls), `Λ = (J·M⁻¹·Jᵀ + λ²·I)⁻¹`, symmetric eigen decomposition, all fixed size 6×6 | needs armature first, regularize near singularities. Stability unaffected while `D(q)` stays positive definite |
