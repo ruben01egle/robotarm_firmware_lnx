@@ -2,7 +2,7 @@
 Sample the task space inertia Λ(q) of the MuJoCo model at the TCP over random collision free poses and
 check the Cartesian damping of the cartesian_impedance_controller (impedance mode) against it.
 
-Per Cartesian axis: the range of Λ_ii(q) and the damping ratio of the constant cartesian_damping. Then the
+Per Cartesian axis: the range of Λ_ii(q) and the damping ratio of a constant diagonal D. Then the
 damping ratio of the closed loop (linearized, smallest over its modes) per pose for three damping laws:
 the constant D, D per axis from Λ_ii (simplified) and D from the full Λ (generalized eigenproblem). The
 adaptive laws are also evaluated with a wrong armature in the controller model. Last, the damping the joints
@@ -36,7 +36,12 @@ def parse_args():
     parser.add_argument('--controllers', default=CONTROLLERS, help='controllers.yaml with the gains')
     parser.add_argument('--site', default='tcp', help='MuJoCo site of the TCP')
     parser.add_argument('--samples', type=int, default=2000, help='number of collision free random poses')
-    parser.add_argument('--zeta', type=float, default=0.7, help='target damping ratio of the adaptive laws')
+    parser.add_argument('--zeta', type=float, default=None,
+                        help='target damping ratio of the adaptive laws (default: cartesian_damping_ratio of the yaml)')
+    parser.add_argument('--constant-damping', type=float, nargs=6, metavar='D',
+                        default=[28.0, 28.0, 28.0, 0.22, 0.22, 0.22],
+                        help='constant diagonal D to compare against, N·s/m and Nm·s/rad (default: the former '
+                             'cartesian_damping placeholder)')
     parser.add_argument('--armature-error', type=float, nargs='*', default=[0.5, 2.0],
                         help='factors on the armature in the controller model (the plant keeps the nominal one)')
     parser.add_argument('--sigma-regular', type=float, default=0.05,
@@ -49,7 +54,7 @@ def parse_args():
 def load_impedance_gains(path):
     with open(path) as f:
         p = yaml.safe_load(f)[CONTROLLER]['ros__parameters']
-    return (np.array(p['cartesian_stiffness']), np.array(p['cartesian_damping']),
+    return (np.array(p['cartesian_stiffness']), p.get('cartesian_damping_ratio', 0.7),
             np.array(p['joint_damping']), float(p['lambda']))
 
 
@@ -102,8 +107,10 @@ def main():
     d = mujoco.MjData(m)
     site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, args.site)
     lo, hi = m.jnt_range[:, 0], m.jnt_range[:, 1]
-    K, D_const, D_joint, lam = load_impedance_gains(args.controllers)
-    D_const = np.diag(D_const)
+    K, zeta_yaml, D_joint, lam = load_impedance_gains(args.controllers)
+    if args.zeta is None:
+        args.zeta = zeta_yaml
+    D_const = np.diag(args.constant_damping)
     arm = np.diag(m.dof_armature)
     zeta = np.full(6, args.zeta)
 
@@ -168,7 +175,7 @@ def main():
             print(f'| {a} | {UNITS[i]} | {L[:, i].min():.3g} | {p5[i]:.3g} | {med[i]:.3g} '
                   f'| {p95[i]:.3g} | {L[:, i].max():.3g} | {p95[i] / p5[i]:.1f} | {share[i]:.0%} |')
 
-        print(f'\n| axis | K | D now | ζ now p5 – p95 | f_n p5 – p95 [Hz] | D for ζ={args.zeta:g} p5 – p95 |')
+        print(f'\n| axis | K | D const | ζ const p5 – p95 | f_n p5 – p95 [Hz] | D for ζ={args.zeta:g} p5 – p95 |')
         print('|---|---|---|---|---|---|')
         for i, a in enumerate(AXES):
             z = D_const[i, i] / (2 * np.sqrt(K[i] * L[:, i]))

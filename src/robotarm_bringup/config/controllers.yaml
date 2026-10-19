@@ -182,7 +182,7 @@ gc_controller:
   ros__parameters:
     mode: "gc"                      # "gc" or "impedance"
 
-    lambda: 0.01                   # damping of the damped least squares jacobian inverse
+    lambda: 0.01                   # regularization of the task space inertia, unused in gc mode
     jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
 
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
@@ -210,14 +210,16 @@ cartesian_impedance_controller:
   ros__parameters:
     mode: "impedance"               # "gc" or "impedance"
 
-    lambda: 0.01                   # damping of the damped least squares jacobian inverse
-    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast)
+    lambda: 0.01                   # regularization λ²I of the inverse task space inertia: caps Λ at ~1/λ² near singularities
+    jinv_method: "svd"              # jacobian inverse: "svd" (selective, adaptive damping, accurate) or "ldlt" (constant damping lambda, fast). Unused here
 
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
 
-    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
-    # hold_stiffness at the median pose inertia, see docs/dynamics/README.md (axis1 varies 0.6..2.2 with the pose)
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). STILL THE GC VALUES: in impedance mode joint damping
+    # acts in parallel to the cartesian damper and only has to brake what the cartesian terms can't see (null space at
+    # singularities, axes with zero cartesian stiffness). At these values it dominates, every mode is overdamped and an
+    # elbow motion creeps back over seconds (docs/dynamics/task_space_inertia.md). Reduce when tuning.
     joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
@@ -230,6 +232,9 @@ cartesian_impedance_controller:
 
     # impedance mode only. Cartesian impedance, diagonal in the base frame, [x, y, z, rx, ry, rz]
     cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]      # N/m, Nm/rad, NOT TUNED
-    cartesian_damping: [28.0, 28.0, 28.0, 0.22, 0.22, 0.22]        # N·s/m, Nm·s/rad, zeta ~0.7 at ESTIMATED 2 kg / 0.005 kg·m²
+    # zeta of every mode in every pose: the damping matrix follows the stiffness and the task space inertia Λ(q)
+    # (double diagonalization, see the robotarm_controllers README, background H). 0.7 ≈ 5 % overshoot. With the
+    # armature still 0 in the urdf, Λ is ~20-30 % too light and the real zeta lower. Zero stiffness → no cartesian damping
+    cartesian_damping_ratio: 0.7    # unitless, NOT TUNED
     max_spring_force: 20.0          # N, norm of the translational spring force
     max_spring_moment: 2.0          # Nm, norm of the rotational spring moment, below the 4 Nm of the wrist motors

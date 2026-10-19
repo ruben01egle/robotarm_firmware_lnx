@@ -65,7 +65,7 @@ public:
             tau_impedance.resize(n);
             zero.setZero(n);
             j.resize(6, n);
-            j_ref.resize(6, n); }
+            j_ref.resize(6, n);}
     };
 
     struct RobotarmData {
@@ -88,7 +88,7 @@ public:
 
     struct ImpedanceParams {                // impedance mode only, diagonal in the base frame, [x, y, z, rx, ry, rz]
         Eigen::Matrix<double, 6, 1> stiffness = Eigen::Matrix<double, 6, 1>::Zero();   // N/m, Nm/rad
-        Eigen::Matrix<double, 6, 1> damping = Eigen::Matrix<double, 6, 1>::Zero();     // N·s/m, Nm·s/rad
+        double damping_ratio = 0.0;         // zeta, unitless, same for all axes
         double max_spring_force = 0.0;      // N, limit on the norm of the translational spring force
         double max_spring_moment = 0.0;     // Nm, limit on the norm of the rotational spring moment
     };

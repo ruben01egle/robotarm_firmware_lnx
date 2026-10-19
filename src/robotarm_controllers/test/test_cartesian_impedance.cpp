@@ -7,8 +7,10 @@
 // the same URDF:
 //
 //   - physical properties instead of a copy of the formulas where possible: the spring pulls
-//     towards the reference and linearizes to Jᵀ·K·J, the damping dissipates, the spring wrench
-//     stays within its limits, no torque pushes a joint into its limit
+//     towards the reference and linearizes to Jᵀ·K·J, the damping dissipates, every mode of the
+//     linearized closed loop has the configured damping ratio, the joint damping stays bounded
+//     through a singularity, the spring wrench stays within its limits, no torque pushes a joint
+//     into its limit
 //   - exact torques where the law is fixed by design (gravity, feedforward, damping on the velocity
 //     error), to 1e-9
 //
@@ -21,13 +23,16 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <Eigen/Cholesky>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include <Eigen/QR>
 
@@ -62,8 +67,9 @@ constexpr int settle_cycles = 1100;  // > 1 s start ramp at 1 kHz
 // test gains, not the robot's: stiff enough to give clear torques, small enough to stay below the
 // effort limits in a regular pose
 const std::vector<double> stiffness = {500.0, 500.0, 500.0, 10.0, 10.0, 10.0};
-const std::vector<double> damping = {50.0, 50.0, 50.0, 1.0, 1.0, 1.0};
+constexpr double damping_ratio = 0.7;
 const std::vector<double> joint_damping = {1.0, 2.0, 1.0, 0.1, 0.1, 0.1};
+const std::vector<double> no_joint_damping(6, 0.0);
 const std::vector<double> limit_zone = {0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
 constexpr double limit_push = 0.2;
 
@@ -82,7 +88,7 @@ std::vector<rclcpp::Parameter> make_params(const std::string & mode,
         p.emplace_back("hold_breakaway_torque", std::vector<double>{1.0, 2.5, 1.5, 0.4, 0.1, 0.1});
     } else {
         p.emplace_back("cartesian_stiffness", stiffness);
-        p.emplace_back("cartesian_damping", damping);
+        p.emplace_back("cartesian_damping_ratio", damping_ratio);
         p.emplace_back("max_spring_force", 1e6);    // no clamp unless a test sets one
         p.emplace_back("max_spring_moment", 1e6);
     }
@@ -282,6 +288,45 @@ protected:
         return Eigen::Map<const Eigen::Matrix<double, 6, 1>>(v.data()).asDiagonal();
     }
 
+    Eigen::MatrixXd mass_matrix(const Eigen::VectorXd & q)
+    {
+        Eigen::MatrixXd M(dof_, dof_);
+        EXPECT_TRUE(rbd_.calculate_mass_matrix(q, M)) << rbd_.last_error();
+        return M;
+    }
+
+    // Cartesian damping for damping_ratio in every mode, formulated independently of the controller:
+    // generalized eigenproblem K·v = μ·Λ·v with Vᵀ·Λ·V = I and Vᵀ·K·V = diag(μ). Each mode is a unit
+    // mass on a spring μ and needs 2ζ·√μ, back in Cartesian coordinates D = Λ·V·diag(2ζ·√μ)·Vᵀ·Λ.
+    Eigen::Matrix<double, 6, 6> modal_damping(const Eigen::VectorXd & q)
+    {
+        Eigen::Matrix<double, 6, 6> Lambda;
+        EXPECT_TRUE(rbd_.calculate_task_space_inertia(q, tcp_, Lambda)) << rbd_.last_error();
+        const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> ges(diag6(stiffness), Lambda);
+        const Eigen::Matrix<double, 6, 1> d = 2.0 * damping_ratio * ges.eigenvalues().cwiseMax(0.0).cwiseSqrt();
+        const Eigen::Matrix<double, 6, 6> LV = Lambda * ges.eigenvectors();
+        return LV * d.asDiagonal() * LV.transpose();
+    }
+
+    // joint space damping matrix the controller applies at q, measured column by column from its
+    // torque for a small velocity of one joint (reference at q and at rest, so no spring acts).
+    // Includes joint_damping, start the controller with no_joint_damping to get Jᵀ·D·J alone.
+    Eigen::MatrixXd measured_joint_damping(const Eigen::VectorXd & q)
+    {
+        constexpr double v = 1e-2;   // rad/s, small enough to stay far below the effort limits
+        Eigen::MatrixXd C(dof_, dof_);
+        set_reference(q);
+        for (size_t i = 0; i < dof_; ++i) {
+            Eigen::VectorXd dq = Eigen::VectorXd::Zero(dof_);
+            dq[i] = v;
+            set_state(q, dq);
+            EXPECT_TRUE(step(1).ok) << "update failed at q = " << q.transpose();
+            C.col(i) = -(tau() - gravity(q) - dynamics(q, dq, Eigen::VectorXd::Zero(dof_))) / v;
+        }
+        set_state(q, Eigen::VectorXd::Zero(dof_));
+        return C;
+    }
+
     double effort(size_t j) const {return limits_[j].effort;}
 
     // a regular pose away from singularities and joint limits (same as the jog test)
@@ -353,8 +398,8 @@ TEST_F(CartesianImpedanceTest, ConfigureRejectsInvalidParameters)
          make_params("impedance", {rclcpp::Parameter("cartesian_stiffness", std::vector<double>{})})},
         {"stiffness with 5 entries",
          make_params("impedance", {rclcpp::Parameter("cartesian_stiffness", std::vector<double>{1, 1, 1, 1, 1})})},
-        {"negative damping",
-         make_params("impedance", {rclcpp::Parameter("cartesian_damping", std::vector<double>{1, 1, -1, 1, 1, 1})})},
+        {"negative damping ratio", make_params("impedance", {rclcpp::Parameter("cartesian_damping_ratio", -0.1)})},
+        {"non-finite damping ratio", make_params("impedance", {rclcpp::Parameter("cartesian_damping_ratio", nan)})},
         {"no spring force limit", make_params("impedance", {rclcpp::Parameter("max_spring_force", 0.0)})},
         {"no spring moment limit", make_params("impedance", {rclcpp::Parameter("max_spring_moment", 0.0)})},
         {"gc without hold", make_params("gc", {rclcpp::Parameter("hold_stiffness", std::vector<double>{})})},
@@ -576,7 +621,9 @@ TEST_F(CartesianImpedanceTest, SpringWrenchIsClampedByNorm)
 TEST_F(CartesianImpedanceTest, DampingDissipates)
 {
     // at the reference pose, moving with a reference at rest: only the dampers act, and they take
-    // energy out (τᵀ·dq < 0). Exact: -Jᵀ·D·J·dq - D_j·dq on top of gravity and Coriolis
+    // energy out (τᵀ·dq < 0). Exact: -Jᵀ·D·J·dq - D_j·dq on top of gravity and Coriolis, with D from
+    // the generalized eigenproblem (a different route than the controller's Cholesky + eigen
+    // decomposition, so equal up to the rounding of the decompositions, not to 1e-9)
     const Eigen::VectorXd q = regular_pose();
     start(q, make_params("impedance"));
     settle();
@@ -592,8 +639,78 @@ TEST_F(CartesianImpedanceTest, DampingDissipates)
 
     const auto J = jacobian(q);
     const Eigen::Map<const Eigen::VectorXd> d_j(joint_damping.data(), dof_);
-    const Eigen::VectorXd expected = -J.transpose() * diag6(damping) * J * dq - d_j.cwiseProduct(dq);
-    EXPECT_VEC_NEAR(damping_torque, expected, exact);
+    const Eigen::VectorXd expected = -J.transpose() * modal_damping(q) * J * dq - d_j.cwiseProduct(dq);
+    EXPECT_VEC_NEAR(damping_torque, expected, 1e-7);
+}
+
+TEST_F(CartesianImpedanceTest, EveryModeHasTheConfiguredDampingRatio)
+{
+    // the physical property the damping law is for: linearized around the reference, the closed loop
+    // M·q̈ + C·q̇ + Jᵀ·K·J·q = 0 has the damping ratio ζ in every mode and in every pose, even though
+    // the apparent mass changes with the pose. C is measured from the controller's torques, its
+    // eigenvalues -ζω ± iω·√(1-ζ²) give ζ = -Re/|λ|. Off by the λ² regularization of Λ (~1e-3).
+    Eigen::VectorXd q_far(6), q_folded(6);
+    q_far << 0.0, -0.6, 0.6, -0.8, 1.2, 0.5;
+    q_folded << -0.8, -1.5, 1.8, 1.0, -0.7, 1.2;
+    start(regular_pose(), make_params("impedance", {rclcpp::Parameter("joint_damping", no_joint_damping)}));
+    settle();
+
+    for (const Eigen::VectorXd & q : {regular_pose(), q_far, q_folded}) {
+        SCOPED_TRACE("q = " + std::to_string(q[0]) + " " + std::to_string(q[1]) + " " + std::to_string(q[2]));
+        const Eigen::MatrixXd C = measured_joint_damping(q);
+        const Eigen::MatrixXd M = mass_matrix(q);
+        const auto J = jacobian(q);
+        const Eigen::MatrixXd S = J.transpose() * diag6(stiffness) * J;
+
+        const Eigen::Index n = static_cast<Eigen::Index>(dof_);
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(2 * n, 2 * n);
+        A.topRightCorner(n, n).setIdentity();
+        A.bottomLeftCorner(n, n) = -M.ldlt().solve(S);
+        A.bottomRightCorner(n, n) = -M.ldlt().solve(C);
+        const Eigen::VectorXcd poles = Eigen::EigenSolver<Eigen::MatrixXd>(A).eigenvalues();
+        for (Eigen::Index k = 0; k < poles.size(); ++k) {
+            EXPECT_GT(std::abs(poles[k].imag()), 1e-6) << "mode does not oscillate, pole " << poles[k];
+            EXPECT_NEAR(-poles[k].real() / std::abs(poles[k]), damping_ratio, 5e-3) << "pole " << poles[k];
+        }
+    }
+}
+
+TEST_F(CartesianImpedanceTest, DampingStaysBoundedThroughWristSingularity)
+{
+    // Λ grows without bound towards a singularity, but the motors only feel Jᵀ·D·J: in the singular
+    // direction √Λ ~ 1/σ against J·J ~ σ², so the joint damping must neither blow up nor jump while
+    // the wrist passes through axis5 = 0 (axis4 and axis6 aligned).
+    Eigen::VectorXd q = regular_pose();
+    q[4] = 0.0;
+    Eigen::Matrix<double, Eigen::Dynamic, 6> j_inv(dof_, 6);
+    robotarm_rbd::RobotarmRbd::SingularityInfo info;
+    ASSERT_TRUE(rbd_.calculate_jacobian_inverse(q, tcp_, j_inv, &info)) << rbd_.last_error();
+    ASSERT_LT(info.sigma_min(), 1e-6) << "axis5 = 0 is not singular in this pose, adjust the scenario";
+
+    start(regular_pose(), make_params("impedance", {rclcpp::Parameter("joint_damping", no_joint_damping)}));
+    settle();
+
+    constexpr int samples = 41;
+    constexpr double half_range = 0.2;   // rad around axis5 = 0
+    std::vector<Eigen::MatrixXd> C(samples);
+    double largest_at_ends = 0.0;
+    double largest = 0.0;
+    for (int k = 0; k < samples; ++k) {
+        q[4] = -half_range + 2.0 * half_range * k / (samples - 1);
+        C[k] = measured_joint_damping(q);
+        const Eigen::MatrixXd C_sym = 0.5 * (C[k] + C[k].transpose());
+        const double max_eig = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(C_sym).eigenvalues().maxCoeff();
+        largest = std::max(largest, max_eig);
+        if (k == 0 || k == samples - 1) {
+            largest_at_ends = std::max(largest_at_ends, max_eig);
+        }
+    }
+    EXPECT_LT(largest, 2.0 * largest_at_ends) << "joint damping grows towards the singularity";
+    for (int k = 1; k < samples; ++k) {
+        EXPECT_LT((C[k] - C[k - 1]).norm(), 0.1 * largest)
+            << "joint damping jumps between axis5 = " << -half_range + 2.0 * half_range * (k - 1) / (samples - 1)
+            << " and the next sample";
+    }
 }
 
 TEST_F(CartesianImpedanceTest, DampingActsOnVelocityError)

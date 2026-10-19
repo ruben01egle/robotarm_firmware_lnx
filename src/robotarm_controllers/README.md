@@ -54,6 +54,7 @@ same joint.
   - [Background E: the closed loop](#background-e-the-closed-loop)
   - [Background F: joint limit protection](#background-f-joint-limit-protection)
   - [Background G: the breakaway hold in gc mode](#background-g-the-breakaway-hold-in-gc-mode)
+  - [Background H: damping from a damping ratio](#background-h-damping-from-a-damping-ratio)
   - [Safety and error handling](#safety-and-error-handling-2)
   - [Realtime considerations](#realtime-considerations-2)
   - [Known limitations and roadmap](#known-limitations-and-roadmap-2)
@@ -87,8 +88,10 @@ interposer and log exclusion, and writes the exported reference interfaces like 
 controller. There is no physics: the test sets the measured state, so each cycle is a static
 evaluation of the control law, checked against its own `RobotarmRbd`. Besides the allocation count
 in both modes it checks physical properties (gravity at rest, the spring pulls towards the
-reference and linearizes to $J^T K J$, the damping dissipates and acts on the velocity error, the
-spring wrench stays within its norms, no torque pushes into a joint limit), the post-processing
+reference and linearizes to $J^T K J$, the damping dissipates and acts on the velocity error, every
+mode of the linearized closed loop has the configured damping ratio in several poses, the joint
+damping stays bounded and continuous through the wrist singularity, the spring wrench stays within
+its norms, no torque pushes into a joint limit), the post-processing
 (rate limit, effort clamp, start ramp), stale references after reactivation and the parameter
 validation. Shared helpers (URDF, log handlers) are in `test/test_helpers.hpp`.
 
@@ -1480,6 +1483,10 @@ $$
      + \tau_{limit}
 $$
 
+with the spring $F_{spring} = -K e$ and the damper $F_{damper} = -D(q)\,\dot e$. $D(q)$ is computed
+every cycle from one damping ratio $\zeta$ and the apparent mass of the arm, so every mode of the
+TCP has the same $\zeta$ in every pose ([background H](#background-h-damping-from-a-damping-ratio)).
+
 ### Usage
 
 #### Interfaces
@@ -1531,8 +1538,9 @@ have no effect.
 | References | ignored | read |
 | Joint limit protection, ramp, rate limit, clamp | ✓ | ✓ |
 
-A Cartesian stiffness of 0 is allowed per axis. For example a zero rotational stiffness with some
-rotational damping gives a translational impedance with a free but damped wrist.
+A Cartesian stiffness of 0 is allowed per axis. The damping follows the stiffness, so an axis
+without stiffness also gets no Cartesian damping: a zero rotational stiffness gives a translational
+impedance with a free wrist, braked only by `joint_damping` (and friction).
 `robotarm_bringup` loads both modes as two instances, `gc_controller` and
 `cartesian_impedance_controller`.
 
@@ -1544,8 +1552,8 @@ with an error message. Parameters of the other mode are ignored with a warning i
 | Parameter | Default | Unit | Mode | Constraint | Meaning |
 |---|---|---|---|---|---|
 | `mode` | `"gc"` | – | – | `"gc"` or `"impedance"` | Control mode |
-| `lambda` | `0.01` | – | – | > 0 | Passed to `robotarm_rbd`, currently unused (no Jacobian inverse) |
-| `jinv_method` | `"svd"` | – | – | `"svd"` or `"ldlt"` | Passed to `robotarm_rbd`, currently unused |
+| `lambda` | `0.01` | – | `impedance` | > 0 | Passed to `robotarm_rbd`: regularization $\lambda^2 I$ of the inverse apparent mass, caps $\Lambda$ at about $1/\lambda^2$ near singularities ([background H](#background-h-damping-from-a-damping-ratio)) |
+| `jinv_method` | `"svd"` | – | – | `"svd"` or `"ldlt"` | Passed to `robotarm_rbd`, currently unused (no Jacobian inverse) |
 | `torque_scale` | `1.0` | – | both | (0, 1] | Fraction of the URDF effort limits used as torque limits (`effort` below) |
 | `torque_rise_time` | `0.0` | s | both | ≥ 0, 0 disables | Minimum time from 0 to `effort`, limits the torque rate per joint |
 | `joint_damping` | – | N·m·s/rad | both | ≥ 0, one per joint | Joint damping $D_j$ |
@@ -1554,19 +1562,22 @@ with an error message. Parameters of the other mode are ignored with a warning i
 | `hold_stiffness` | – | N·m/rad | `gc` | ≥ 0, one per joint, 0 disables | Stiffness of the breakaway hold |
 | `hold_breakaway_torque` | – | N·m | `gc` | ≥ 0, one per joint, ≤ `effort` | Torque at which the hold slides |
 | `cartesian_stiffness` | – | N/m, N·m/rad | `impedance` | ≥ 0, 6 values | Diagonal $K$ in the base frame, $[x, y, z, r_x, r_y, r_z]$ |
-| `cartesian_damping` | – | N·s/m, N·m·s/rad | `impedance` | ≥ 0, 6 values | Diagonal $D$ in the base frame |
+| `cartesian_damping_ratio` | `0.0` | – | `impedance` | finite, ≥ 0 | Damping ratio $\zeta$, one value for every mode; $D(q)$ follows from it, $K$ and $\Lambda(q)$ |
 | `max_spring_force` | `0.0` | N | `impedance` | > 0 | Limit on the norm of the translational spring force |
 | `max_spring_moment` | `0.0` | N·m | `impedance` | > 0 | Limit on the norm of the rotational spring moment |
 
 Per joint arrays are in URDF joint order. The start ramp time (1 s) is hard-coded.
 
 Tuning hints:
-- **`cartesian_damping`**: from a target damping ratio $\zeta$ and an assumed apparent mass $m$ per
-  axis, $D = 2\zeta\sqrt{K m}$. The apparent mass changes with the pose
-  ([background E](#background-e-the-closed-loop)), so take a typical value and start with
-  $\zeta \approx 0.7$.
-- **`joint_damping`**: in `impedance` mode it only has to damp what the Cartesian terms can't see
-  (motion in the null space at singularities), keep it small. In `gc` mode it is the only damping.
+- **`cartesian_damping_ratio`**: start with $\zeta \approx 0.7$ (about 5 % overshoot after a
+  release). It holds for any `cartesian_stiffness`, so changing $K$ needs no damping retuning. A
+  model armature that is too small lowers the real $\zeta$ by an almost constant factor, which this
+  value absorbs. Watch for buzzing: $D$ is large in heavy directions and amplifies velocity noise.
+- **`joint_damping`**: acts in parallel to the Cartesian damper. In `impedance` mode it has to damp
+  what the Cartesian terms can't see (motion in the null space at singularities, axes with zero
+  stiffness), keep it small: with the gc values it dominates, every mode is overdamped and an elbow
+  motion creeps back over seconds ([task space inertia](../../docs/dynamics/task_space_inertia.md)).
+  In `gc` mode it is the only damping.
 - **`max_spring_force` / `max_spring_moment`**: bound the force a wrong or jumping reference can
   produce. Keep the moment below the effort of the wrist joints.
 - **`joint_limit_zone`**: has to be longer than the braking distance of the joint at the expected
@@ -1586,7 +1597,7 @@ cartesian_impedance_controller:
     joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     joint_limit_push: 0.2
     cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]
-    cartesian_damping: [28.0, 28.0, 28.0, 0.22, 0.22, 0.22]
+    cartesian_damping_ratio: 0.7
     max_spring_force: 20.0
     max_spring_moment: 2.0
 ```
@@ -1636,7 +1647,9 @@ drives hold position.
          │
          ├ gc:        hold anchor update ─► −D_j·q̇ − K_h·(q − q_anchor) ─────────► τ_mode
          └ impedance: references (NaN → hold / 0)
-                      FK, J at q and q_d ─► e, ė ─► F_spring (norm clamped), F_damper
+                      FK, J at q and q_d ─► e, ė
+                      Λ(q) ─► D(q) from ζ, K (double diagonalization)
+                      ─► F_spring (norm clamped), F_damper = −D·ė
                       RNEA(q, q̇, q̈_d, no gravity) + Jᵀ(F_spring + F_damper)
                       − D_j·(q̇ − q̇_d) ────────────────────────────────────────────► τ_mode
                                                                                      │
@@ -1653,7 +1666,8 @@ In code order (`update_and_write_commands()` in
 3. **Mode torque** $\tau_{mode}$, everything the controller "wants" on top of gravity:
    - *gc:* drag the hold anchors along, joint damping plus hold spring.
    - *impedance:* read the references, forward kinematics and Jacobian at $q$ and $q_d$, pose and
-     velocity error, spring (norm clamped) and damper wrench, dynamics feedforward, joint damping.
+     velocity error, apparent mass $\Lambda(q)$ and the damping matrix $D(q)$, spring (norm
+     clamped) and damper wrench, dynamics feedforward, joint damping.
 4. **Joint limit protection**: inside a zone, scale the part of $\tau_{mode}$ towards the limit
    down, add the outward push $\tau_{limit}$. Gravity is not touched.
 5. Sum, **start ramp** (blend from the measured effort over 1 s after activation).
@@ -1743,8 +1757,11 @@ A spring alone stores energy and oscillates. The damper removes it. The velocity
 $$
 \dot e = J(q)\,\dot q - J(q_d)\,\dot q_d,
 \qquad
-F_{damper} = -D\,\dot e
+F_{damper} = -D(q)\,\dot e
 $$
+
+$D(q)$ is a full symmetric 6×6 matrix, recomputed every cycle
+([background H](#background-h-damping-from-a-damping-ratio)).
 
 The reference velocity uses the Jacobian at the **reference** pose, it is the velocity of the
 reference frame. The rotational part is $\omega - \omega_d$, the physical angular velocity, which is
@@ -1821,7 +1838,8 @@ arm (the joint inertia seen from the TCP, $\tfrac12 \dot q^T M \dot q = \tfrac12
 | statics | exact: $K e = F_{ext}$ in every pose |
 | stiffness, damping force | as designed |
 | mass | $\Lambda(q)$: pose dependent, anisotropic, couples translation and rotation |
-| natural frequency, damping ratio | $\omega_n = \sqrt{K/\Lambda}$, $\zeta = D / (2\sqrt{K\Lambda})$ vary with pose and direction |
+| natural frequency | $\omega_n = \sqrt{K/\Lambda}$ varies with pose and direction |
+| damping ratio | the configured $\zeta$ in every mode and pose, because $D(q)$ follows $\Lambda(q)$ ([background H](#background-h-damping-from-a-damping-ratio)). A constant $D$ would give $\zeta = D / (2\sqrt{K\Lambda})$ varying with the pose |
 | paths | curve: $\ddot x = \Lambda^{-1} F$ is not parallel to $F$ |
 
 Shaping the mass to a designed $\Lambda_d$ would need the external force itself,
@@ -1836,7 +1854,8 @@ V = \tfrac12 \dot q^T M \dot q + \tfrac12 e^T K e,
 \dot V = -\dot x^T D \dot x - \dot q^T D_j \dot q \le 0
 $$
 
-(Coriolis does no work, $\dot M - 2C$ is skew symmetric.) The controlled arm is **passive**: coupled
+(Coriolis does no work, $\dot M - 2C$ is skew symmetric.) This holds for the pose dependent $D(q)$
+too, it only has to stay positive semidefinite, which it is by construction. The controlled arm is **passive**: coupled
 to any passive environment, a table or a hand, it stays stable. A reference 1 cm inside a table
 presses with $K \cdot 0.01$ m. The argument assumes continuous time, no saturation and a correct
 model, so $K$ and $D$ are bounded in practice by the 500 Hz loop and the velocity noise.
@@ -1886,6 +1905,53 @@ Pushed by hand, the arm moves freely once the push exceeds the breakaway torque 
 is let go. The breakaway torque has to exceed the gravity model error, otherwise the arm sags. In
 `impedance` mode the hold is off, the Cartesian spring takes its place.
 
+### Background H: damping from a damping ratio
+
+For one mass $m$ on a spring $k$ the damper $d = 2\zeta\sqrt{k m}$ gives the damping ratio $\zeta$.
+The TCP mass is the matrix $\Lambda(q)$, which changes with the pose (5–7× in translation, 17–25× in
+rotation over the workspace, see [task space inertia](../../docs/dynamics/task_space_inertia.md)), and
+couples the axes. A constant $D$ therefore rings in heavy poses and creeps in light ones. Instead,
+$D(q)$ is computed every cycle so that every **mode** of $\Lambda\ddot e + D\dot e + K e = 0$ has the
+same $\zeta$:
+
+| Step | Where | Computation |
+|---|---|---|
+| apparent mass | `RobotarmRbd::calculate_task_space_inertia` | $M(q)$ from 6 RNEA calls (armature included), $\Lambda = (J M^{-1} J^T + \lambda^2 I)^{-1}$, both inverses by Cholesky |
+| mass becomes $I$ | controller | $\Lambda = L L^T$ (Cholesky), $\tilde K = L^{-1} K L^{-T}$ |
+| modes | controller | $\tilde K = V \operatorname{diag}(k_0) V^T$ (symmetric eigen decomposition), $k_0 = \omega^2$ per mode |
+| damp each mode | controller | $d_i = 2\zeta\sqrt{k_{0,i}}$ (mass 1 in these coordinates) |
+| back to Cartesian | controller | $D = (L V)\operatorname{diag}(d)\,(L V)^T$ |
+
+In the coordinates $w = (LV)^T x$ the mass is $I$ and the stiffness is diagonal, so the system splits
+into six independent 1D oscillators, each damped exactly. The transformation back keeps the
+dissipated power, which gives the last line.
+
+Properties:
+
+- **One $\zeta$ for all modes** makes $D = 2\zeta\,L\sqrt{\tilde K}\,L^T$ a matrix square root, unique and
+  continuous in $q$ even where two mode frequencies cross. A $\zeta$ per mode would let $D$ jump when
+  the modes swap order.
+- **Any symmetric $K$ works**, also a non diagonal one (e.g. a stiffness rotated into the tool frame).
+  Per-axis damping $D_i = 2\zeta\sqrt{K_i\Lambda_{ii}}$ would ignore the coupling: it under-damps the
+  heaviest mode (0.36–0.48 for a target of 0.7) and its level depends on the stiffness ratio.
+- **Bounded at singularities.** $\Lambda$ grows like $1/\sigma^2$ in the singular direction, but the
+  motors only feel $J^T D J$: $\sqrt\Lambda \sim 1/\sigma$ against $J \cdot J \sim \sigma^2$, so the joint
+  damping stays bounded and goes to zero in that direction (where the spring has no effect either).
+  Per-axis damping would leak the large $\Lambda_{ii}$ into joint directions that can move.
+- **Why $(J M^{-1} J^T + \lambda^2 I)^{-1}$ and not $J^{+T} M J^{+}$:** the damped $J^+$ of the jog
+  controller shrinks the inverse in the singular direction, so $\Lambda$ would drop back to 0 at the
+  singularity, the opposite of the physics, and its Cholesky would fail there. Regularizing the
+  inverse mass instead caps $\Lambda$ at about $1/\lambda^2$ and changes it by
+  $\approx \lambda^2 \Lambda$ elsewhere (0.05 % at 4.6 kg).
+- **Zero stiffness** in a mode gives $k_0 = 0$ and no Cartesian damping there, `joint_damping`
+  brakes it.
+- **Armature:** a too small model armature makes $\Lambda$ too light, the real $\zeta$ ends up lower
+  by an almost constant factor. A too large one costs almost nothing.
+
+Cost: about 7 µs per cycle on a Ryzen 7 5800H, everything fixed size 6×6 on the stack, no
+allocation. The derivation step by step is in the
+[theory notes](../../docs/cartesian_impedance/README.md#8-damping-from-a-damping-ratio).
+
 ### Safety and error handling
 
 | Case | Handling |
@@ -1923,6 +1989,8 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
   computations can't corrupt them.
 - `Eigen::Vector3d::Zero()` for the TCP wrench and the gravity argument is fixed size, no
   allocation.
+- The damping law works on fixed size 6×6 locals (`LLT`, `SelfAdjointEigenSolver`). $M$ and its
+  Cholesky have the runtime size $n$ and are preallocated in the scratch of `RobotarmRbd`.
 - `test_cartesian_impedance` enforces this in both modes from the first cycle after activation,
   including streamed references, the limit zone and a rate limited torque step.
 
@@ -1930,16 +1998,17 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 
 | Item | Status / notes |
 |---|---|
-| Gains not tuned | `cartesian_stiffness`, `cartesian_damping` and the spring limits are placeholders. $D$ should come from the apparent mass sampled in the simulation. |
-| Constant damping | $\zeta$ varies with $\Lambda(q)$. Planned: mass-aware damping (double diagonalization) with $\Lambda = (J M^{-1} J^T + \lambda^2 I)^{-1}$. |
-| Reflected rotor inertia | `robotarm_rbd` reads the URDF `<armature>` and adds it in the RNEA, so the inertia feedforward uses it. The URDF values are placeholders (0) for now, while the MuJoCo plant uses the `sim_params.yaml` estimates: until they match, the feedforward is too small. Prerequisite for mass-aware damping. |
+| Gains not tuned | `cartesian_stiffness`, `cartesian_damping_ratio`, `joint_damping` and the spring limits are placeholders. `joint_damping` still has the gc values and dominates the Cartesian damping in `impedance` mode, reduce it when tuning. |
+| Damping ratio not validated | The tests check $\zeta$ on the model only. Open: release tests with `push_test` in the simulation in several poses, then on the hardware. |
+| Reflected rotor inertia | `robotarm_rbd` reads the URDF `<armature>` and adds it in the RNEA, so the inertia feedforward and $\Lambda$ use it. The URDF values are placeholders (0) until the robot changes are final, while the MuJoCo plant uses the `sim_params.yaml` estimates: until they match, the feedforward is too small and $\Lambda$ about 20–30 % too light, so the real $\zeta$ is lower than configured. Planned: one source for both. |
 | No inertia shaping | Needs a force/torque sensor or an observer, see [background E](#background-e-the-closed-loop). |
 | Friction | Not compensated, causes lag and a dead band ($e \approx F_{friction}/K$). |
 | Coriolis term | $C(q,\dot q)\dot q$ with the measured velocity instead of the PD+ term $C(q,\dot q)\dot q_d$, irrelevant at slow speeds. Switch to $\dot q_d$ if the velocity noise shows. |
-| Stiffness frame | Diagonal in the base frame. A tool frame stiffness ($K = R K_{tool} R^T$) would be more intuitive for rotations. |
+| Stiffness frame | Diagonal in the base frame. A tool frame stiffness ($K = R_6 K_{tool} R_6^T$ with $R_6 = \operatorname{diag}(R, R)$, per cycle) would be more intuitive for rotations. The damping law already handles a non diagonal $K$; the spring becomes $-K e$ as a matrix product. |
+| Stiffness changes at runtime | Changing $K$ needs deactivate, reconfigure, activate (start ramp, interrupts the upstream). Planned: a service on the controller node (stiffnesses, damping ratio, base or tool frame, transition time), handed to `update()` through a `RealtimeThreadSafeBox`. A new $K$ with an existing error steps the spring force ($\Delta K \cdot e$), so blend old to new gains over the transition time, also when switching the frame. Apply one request as one consistent set, reject it in `gc` mode. The damping follows automatically. |
 | Zone sizing | `joint_limit_zone` is not checked against the braking distance. |
 | Standalone input | No topic for a reference pose, `update_reference_from_subscribers` is empty. |
 | Reference export API | Uses the classic `on_export_reference_interfaces()` (deprecated in Jazzy, still works). |
-| `lambda`, `jinv_method` | Read and passed to `robotarm_rbd`, unused. |
+| `lambda`, `jinv_method` | `lambda` regularizes $\Lambda$, `jinv_method` is unused (no Jacobian inverse). In `robotarm_rbd` the same `lambda` also damps the Jacobian inverse, one value for two meanings. |
 | Start ramp | 1 s, hard-coded. |
 | ~~Realtime test~~ | **Done.** `test_cartesian_impedance`, see [building and testing](#building-and-testing). |

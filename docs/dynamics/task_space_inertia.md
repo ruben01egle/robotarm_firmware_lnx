@@ -1,10 +1,13 @@
 # Task space inertia and Cartesian damping ballpark
 
 Snapshot of the task space inertia `Λ(q)` at the TCP of the MuJoCo model, used to decide on mass-adaptive
-damping for the `cartesian_impedance_controller`
-([NEXT_STEPS.md, part 1](../cartesian_impedance/NEXT_STEPS.md#1-mass-adaptive-damping)). Sampled 2026-10-14
-from [`task_space_inertia_sampling.py`](task_space_inertia_sampling.py), with the gains of the
-`cartesian_impedance_controller` in `controllers.yaml` at that time:
+damping for the `cartesian_impedance_controller`. Decided and implemented: the full law (double
+diagonalization) with one `cartesian_damping_ratio`, see background H of the
+[controller README](../../src/robotarm_controllers/README.md#background-h-damping-from-a-damping-ratio) and the
+[theory notes](../cartesian_impedance/README.md#8-damping-from-a-damping-ratio). Sampled 2026-10-14 from
+[`task_space_inertia_sampling.py`](task_space_inertia_sampling.py), with the gains of the
+`cartesian_impedance_controller` in `controllers.yaml` at that time (`cartesian_damping` was the constant diagonal
+`D` before the damping ratio replaced it):
 
 ```
 cartesian_stiffness: [200, 200, 200, 5, 5, 5]          # N/m, Nm/rad
@@ -14,7 +17,7 @@ lambda: 0.01
 ```
 
 **These gains are placeholders**, copied from the gc mode estimate and not tested. Results that depend on them
-(how well the current `cartesian_damping` fits, how much `joint_damping` dominates) describe these placeholders,
+(how well the former constant `cartesian_damping` fits, how much `joint_damping` dominates) describe these placeholders,
 not a tuned controller. The spread of `Λ`, the armature sensitivity, the comparison of the damping laws and the
 behavior near singularities do not depend on the gains (the stiffness only enters through the ratio of
 translation to rotation, see [Other stiffnesses](#other-stiffnesses)).
@@ -52,7 +55,7 @@ Damping laws compared, all with one ζ for every axis:
 
 | law | D |
 |---|---|
-| constant D | `cartesian_damping` from the yaml |
+| constant D | `--constant-damping`, default the former `cartesian_damping` placeholder above |
 | simplified, `Λ_ii` | `D_i = 2·ζ·sqrt(K_i·Λ_ii(q))`, diagonal |
 | simplified, `1/(Λ⁻¹)_ii` | same, with the inertia felt when the other axes are free, cheaper (no 6×6 inverse) |
 | full, generalized eig | `D = 2·Qᵀ·diag(ζ·sqrt(k0))·Q` with `Λ = QᵀQ`, `K = Qᵀ·diag(k0)·Q` (double diagonalization), full 6×6 |
@@ -80,7 +83,7 @@ far more often than real use, so the regular subset is the one to read for the w
 
 Armature share: how much `Λ_ii` drops when the armature is removed from `M`.
 
-| axis | K | D now | ζ now p5 – p95 | f_n p5 – p95 [Hz] | D for ζ=0.7 p5 – p95 |
+| axis | K | D const | ζ const p5 – p95 | f_n p5 – p95 [Hz] | D for ζ=0.7 p5 – p95 |
 |---|---|---|---|---|---|
 | x | 200 | 28 | 0.27 – 0.61 | 0.6 – 1.4 | 32.1 – 73.5 |
 | y | 200 | 28 | 0.27 – 0.61 | 0.6 – 1.4 | 32.2 – 73.4 |
@@ -224,5 +227,6 @@ python3 docs/dynamics/task_space_inertia_sampling.py --tool none
 python3 docs/dynamics/task_space_inertia_sampling.py --zeta 1.1 --armature-error 0.5 2
 ```
 
-Other options: `--samples`, `--sigma-regular` (threshold for the regular poses), `--site`, `--seed`, `--params`,
-`--controllers` (e.g. a copy with other stiffnesses). About 4 s for 2000 poses.
+`--zeta` defaults to `cartesian_damping_ratio` from the yaml, `--constant-damping` (6 values) sets the constant `D`
+of the comparison. Other options: `--samples`, `--sigma-regular` (threshold for the regular poses), `--site`,
+`--seed`, `--params`, `--controllers` (e.g. a copy with other stiffnesses). About 4 s for 2000 poses.

@@ -386,11 +386,47 @@ bool CartesianImpedanceController::compute_impedance_torque()
     Eigen::Matrix<double, 6, 1> de;
     de.noalias() = data_.tmp.j * data_.state.dq - data_.tmp.j_ref * data_.ref.dq_ref;
 
+    // compute damping
+    // Λ = L·Lᵀ
+    Eigen::Matrix<double, 6, 6> Lambda;
+    if (!rbd_.calculate_task_space_inertia(
+            data_.state.q,
+            rbd_tcp_name_,
+            Lambda)) {
+        RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
+        return false;
+    }
+    const Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt_lambda(Lambda);
+    if (llt_lambda.info() != Eigen::Success) {
+		RCLCPP_ERROR(get_node()->get_logger(), "Task space inertia is not positive definite");
+        return false;
+	}
+    Eigen::Matrix<double, 6, 6> L = llt_lambda.matrixL();
+    const Eigen::Matrix<double, 6, 6> L_inv = L.triangularView<Eigen::Lower>().solve(Eigen::Matrix<double, 6, 6>::Identity());
+
+    // K̃ = L⁻¹·K·L⁻ᵀ, then symmetrize (rounding)
+    const auto& K = impedance_.stiffness.asDiagonal();
+    Eigen::Matrix<double, 6, 6> K_tilde = L_inv * K * L_inv.transpose();
+    K_tilde = 0.5 * (K_tilde + K_tilde.transpose()).eval();   // eval: K_tilde is read and written
+
+    // Eigenvalues of K̃
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> eig(K_tilde);
+    const Eigen::Vector<double, 6> k0 = eig.eigenvalues().cwiseMax(0.0);
+    const Eigen::Matrix<double, 6, 6> V  = eig.eigenvectors();
+
+    // damp each 1d oscillator
+    const auto& zeta = impedance_.damping_ratio;
+    const Eigen::Vector<double, 6> d_w = 2.0*k0.cwiseSqrt()*zeta;
+
+    // transform back to cartesian coordinates
+    const Eigen::Matrix<double, 6, 6> LV = L * V;
+    const Eigen::Matrix<double, 6, 6> D = LV * d_w.asDiagonal() * LV.transpose();
+
     // compute impedance
     Eigen::Matrix<double, 6, 1> F_spring = - impedance_.stiffness.cwiseProduct(e);
     F_spring.head<3>() = clamp_norm(F_spring.head<3>(), impedance_.max_spring_force);
     F_spring.tail<3>() = clamp_norm(F_spring.tail<3>(), impedance_.max_spring_moment);
-    Eigen::Matrix<double, 6, 1> F_damper = - impedance_.damping.cwiseProduct(de);
+    Eigen::Matrix<double, 6, 1> F_damper = - D * de;
 
     // compute tau
     if (!rbd_.recursive_newton_euler(
@@ -431,7 +467,7 @@ void CartesianImpedanceController::declare_parameters()
 
     // impedance mode only, [x, y, z, rx, ry, rz] in the base frame
     node->declare_parameter<std::vector<double>>("cartesian_stiffness", std::vector<double>());
-    node->declare_parameter<std::vector<double>>("cartesian_damping", std::vector<double>());
+    node->declare_parameter<double>("cartesian_damping_ratio", 0.0);
     node->declare_parameter<double>("max_spring_force", 0.0);
     node->declare_parameter<double>("max_spring_moment", 0.0);
 }
@@ -494,9 +530,14 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     }
 
     Eigen::VectorXd cartesian_stiffness;
-    Eigen::VectorXd cartesian_damping;
-    if (!read_non_negative_array(node, "cartesian_stiffness", cartesian_stiffness) ||
-        !read_non_negative_array(node, "cartesian_damping", cartesian_damping)) {
+    if (!read_non_negative_array(node, "cartesian_stiffness", cartesian_stiffness)) {
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
+    const double cartesian_damping_ratio = node->get_parameter("cartesian_damping_ratio").as_double();
+    if (!std::isfinite(cartesian_damping_ratio) || cartesian_damping_ratio < 0.0) {
+        RCLCPP_ERROR(node->get_logger(), "Parameter cartesian_damping_ratio must be finite and >= 0, got %f",
+                     cartesian_damping_ratio);
         return controller_interface::CallbackReturn::ERROR;
     }
 
@@ -515,7 +556,7 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     switch (mode_)
     {
     case Mode::GC:
-        if (cartesian_stiffness.size() > 0 || cartesian_damping.size() > 0 ||
+        if (cartesian_stiffness.size() > 0 || cartesian_damping_ratio > 0.0 ||
             impedance_.max_spring_force > 0.0 || impedance_.max_spring_moment > 0.0) {
             RCLCPP_WARN(node->get_logger(), "Cartesian impedance parameters are ignored in gc mode");
         }
@@ -523,17 +564,11 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
         break;
 
     case Mode::IMPEDANCE: {
-        const std::pair<const char*, const Eigen::VectorXd*> cartesian_arrays[] = {
-            {"cartesian_stiffness", &cartesian_stiffness},
-            {"cartesian_damping", &cartesian_damping},
-        };
-        for (const auto & [name, values] : cartesian_arrays) {
-            if (values->size() != 6) {
-                RCLCPP_ERROR(node->get_logger(),
-                             "Parameter %s needs 6 entries [x, y, z, rx, ry, rz] in impedance mode, got %ld",
-                             name, values->size());
-                return controller_interface::CallbackReturn::ERROR;
-            }
+        if (cartesian_stiffness.size() != 6) {
+            RCLCPP_ERROR(node->get_logger(),
+                         "Parameter cartesian_stiffness needs 6 entries [x, y, z, rx, ry, rz] in impedance mode, got %ld",
+                         cartesian_stiffness.size());
+            return controller_interface::CallbackReturn::ERROR;
         }
         for (const auto & [name, value] : spring_limits) {
             if (*value <= 0.0) {
@@ -542,14 +577,12 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
             }
         }
         impedance_.stiffness = cartesian_stiffness;
-        impedance_.damping = cartesian_damping;
+        impedance_.damping_ratio = cartesian_damping_ratio;
 
-        for (Eigen::Index i = 0; i < 6; ++i) {
-            if (impedance_.stiffness[i] > 0.0 && impedance_.damping[i] == 0.0) {
-                RCLCPP_WARN(node->get_logger(),
-                            "cartesian_stiffness[%ld] > 0 with cartesian_damping[%ld] = 0: undamped spring, "
-                            "only joint_damping damps this axis", i, i);
-            }
+        if (impedance_.damping_ratio == 0.0 && (impedance_.stiffness.array() > 0.0).any()) {
+            RCLCPP_WARN(node->get_logger(),
+                        "cartesian_stiffness > 0 with cartesian_damping_ratio = 0: undamped spring, "
+                        "only joint_damping damps the cartesian axes");
         }
         if (gc_.hold_stiffness.size() > 0 || gc_.hold_breakaway_torque.size() > 0) {
             RCLCPP_WARN(node->get_logger(), "Breakaway hold parameters are ignored in impedance mode");

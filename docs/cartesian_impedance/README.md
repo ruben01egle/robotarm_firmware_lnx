@@ -22,6 +22,7 @@ Conventions used throughout:
 - [5. The closed loop](#5-the-closed-loop)
 - [6. Why no inertia shaping](#6-why-no-inertia-shaping)
 - [7. Accuracy and future extensions](#7-accuracy-and-future-extensions)
+- [8. Damping from a damping ratio](#8-damping-from-a-damping-ratio)
 - [Open items](#open-items)
 
 ---
@@ -36,7 +37,7 @@ Conventions used throughout:
 | Reference | joint space `q_d`, `q̇_d`, `q̈_d` through controller chaining (JointStream, CartesianJog, later JTC/MoveIt) |
 | No upstream | NaN in a reference → hold the activation pose, NaN velocity/acceleration → 0 |
 | Feedforward | `RNEA(q, q̇, q̈_d)`, measured `q̇` for Coriolis, fall back to `q̇_d` if the noise is too much |
-| Damping | on the velocity error `ẋ − ẋ_d`, never on `ẋ` alone |
+| Damping | on the velocity error `ẋ − ẋ_d`, never on `ẋ` alone. `D(q)` from one damping ratio `ζ`, the same in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)) |
 | Safety | NaN check, torque rate limit (`torque_rise_time`), torque clamp, later error saturation and joint limit protection |
 
 ---
@@ -238,7 +239,8 @@ section 1. `D_j` shows up as the extra anisotropic damping `J⁻ᵀ·D_j·J⁻¹
 | statics | exact, `K·e = F_ext` (1 kg at the TCP with `K_p = 500` sags 2 cm in every pose) |
 | stiffness, damping force | exactly as chosen |
 | mass | `Λ(q)`, pose dependent, anisotropic, couples translation and rotation |
-| `ω_n = √(K/Λ)`, `ζ = D / (2·√(K·Λ))` | vary with pose and direction. 4× the mass → `ζ` and `ω_n` halve, critical damping becomes ~16% overshoot |
+| `ω_n = √(K/Λ)` | varies with pose and direction |
+| `ζ = D / (2·√(K·Λ))` | with a constant `D` it varies too: 4× the mass → `ζ` halves, critical damping becomes ~16% overshoot. Fixed by computing `D(q)` from `Λ(q)`, [section 8](#8-damping-from-a-damping-ratio) |
 
 **Stability.** With a stationary reference the total energy
 
@@ -296,7 +298,8 @@ Assuming a correct model, option A gives:
 | Accurate | Not accurate |
 |---|---|
 | static stiffness: `K·e = F_ext` in every pose | apparent mass: `Λ(q)` instead of a designed `Λ_d`, pose dependent, anisotropic, coupled |
-| stiffness and damping **force** laws as designed | damping **ratio** and natural frequency: `ζ`, `ω_n` vary with pose and direction |
+| stiffness and damping **force** laws as designed | natural frequency `ω_n` varies with pose and direction |
+| damping ratio `ζ` in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)) | `ζ` only as good as `Λ`: armature still 0 in the URDF |
 | no tracking lag from the damper (velocity error) | return paths curve (`Λ` coupling, `J̇·q̇`, `C·q̇`) |
 | stable and passive, also in contact | contact impact is set by `Λ`, not shaped |
 | no blow up at singularities (`Jᵀ`, no inverse) | spring has no effect in a singular direction, null space motion only damped by `D_j` |
@@ -307,7 +310,7 @@ What the model itself gets wrong, and shows up as a static error `e ≈ F_unmode
 |---|---|
 | joint friction (gears, belts) | tracking lag and a dead band around the target, usually the largest error |
 | mass / CoM error | static gravity offset, can act as negative stiffness in some poses |
-| reflected rotor inertia (`armature`) still 0 in the URDF (placeholder) | inertia feedforward too small (axis2 ~21% of `M`, see [docs/dynamics](../dynamics/README.md)) |
+| reflected rotor inertia (`armature`) still 0 in the URDF (placeholder) | inertia feedforward too small (axis2 ~21% of `M`, see [docs/dynamics](../dynamics/README.md)), `Λ` ~20–30% too light, so the real `ζ` is lower than configured |
 | Coriolis from one RNEA call | `C(q,q̇)·q̇` instead of the PD+ term `C(q,q̇)·q̇_d`, irrelevant at slow speeds |
 | velocity noise | amplified by `D` (and quadratically by the Coriolis term), limits how large `D` can be |
 | log map past 180° | spring flips direction, limited by error saturation |
@@ -318,22 +321,160 @@ Roughly ordered by effort and benefit.
 
 | Extension | What it fixes | Needs | Caveats |
 |---|---|---|---|
-| **armature values** | inertia feedforward, prerequisite for anything using `M` | rbd side done (`<armature>` per joint, `τ_i += armature_i·q̈_i` in the RNEA). Open: real values in `ORT.yaml` (placeholders 0), MuJoCo reading them from the URDF instead of `sim_params.yaml` | rotor inertia values are estimates |
+| **armature values** | inertia feedforward and `Λ` for the damping | rbd side done (`<armature>` per joint, `τ_i += armature_i·q̈_i` in the RNEA). Open: real values in `ORT.yaml` (placeholders 0, waiting for the robot changes to be final), MuJoCo reading them from the URDF instead of `sim_params.yaml` | rotor inertia values are estimates, too high costs almost nothing, too low lowers `ζ` |
 | **friction compensation** | lag and dead band from friction | friction model per joint (Coulomb + viscous), identified on the robot | overcompensation adds energy, keep it below the real friction |
-| **stiffness in the tool frame** | intuitive rotation stiffness ("soft about the tool axis") | `K_base = R·K_tool·Rᵀ` per cycle | none worth mentioning |
-| **mass-aware damping** (double diagonalization) | constant `ζ` over all poses, uniform discrete time damping limit | `M(q)` (6 RNEA calls), `Λ = (J·M⁻¹·Jᵀ + λ²·I)⁻¹`, symmetric eigen decomposition, all fixed size 6×6 | needs armature first, regularize near singularities. Stability unaffected while `D(q)` stays positive definite |
+| **stiffness in the tool frame** | intuitive rotation stiffness ("soft about the tool axis") | `K_base = R₆·K_tool·R₆ᵀ` per cycle (`R₆ = diag(R, R)`), the spring as a matrix product. The damping already handles a non diagonal `K` | switching the frame with an existing error changes the force direction, blend it |
+| **stiffness changes at runtime** | new `K` (or frame) without deactivating, which restarts the ramp and drops the upstream | a service (stiffnesses, `ζ`, frame, transition time), handed to `update()` through a `RealtimeThreadSafeBox` | `ΔK·e` steps the spring force: blend old to new over the transition time, apply a request as one set, reject in `gc` mode. The damping follows `K` on its own |
 | **momentum observer** | estimate of `F_ext` without a sensor, also usable for collision detection | measured joint torques (`state.tau`), `M`, `C`, `g` | lag (limited bandwidth), friction shows up as phantom forces |
 | **inertia shaping without sensor** | designed apparent mass | observer estimate of `F_ext` | only **increasing** the mass is safe. Reducing it with a lagging estimate injects energy, passivity is lost |
 | **inertia shaping with an F/T sensor** | designed, pose independent, decoupled apparent mass: straight return paths, same feel everywhere | wrist F/T sensor, `Λ`, `J̇·q̇` | sensor noise and delay, sensor sees only forces beyond the wrist, full passivity needs care when reducing the mass |
 
 ---
 
+## 8. Damping from a damping ratio
+
+The goal: one damping ratio `ζ` that holds in every pose and every direction, although `Λ(q)` changes (5–7× in
+translation, 17–25× in rotation over the workspace, [task space inertia](../dynamics/task_space_inertia.md)). Measured
+there before deciding: worth it, and the full version below rather than a per-axis shortcut.
+
+### One mass, one spring, one damper
+
+```
+m·ẍ + d·ẋ + k·x = 0       try x = e^(s·t):   m·s² + d·s + k = 0
+s = −d/(2m) ± √((d/2m)² − k/m)
+```
+
+The guess turns derivatives into multiplications by `s` (the same polynomial is the denominator of the Laplace
+transfer function, its roots are the poles). `Re s` is the decay rate, `Im s` the oscillation frequency. The square
+root decides: comparing `d/(2m)` with `ω_n = √(k/m)` gives
+
+```
+ζ = d / (2·√(k·m))        d = 2·ζ·√(k·m)
+```
+
+`ζ < 1` rings (overshoot 37 % at 0.3, 16 % at 0.5, 4.6 % at 0.7), `ζ = 1` returns fastest without overshoot, `ζ > 1`
+creeps (slow pole at `ω_n·(−ζ + √(ζ²−1))`). Same `ζ` means the same response shape, only stretched in time by
+`1/ω_n`. So `ζ` is the setting, `d` only the number that produces it for one `m`.
+
+> **Aha: same D, heavier mass, worse in every way.**
+> Tuned for `ζ = 0.7` at 2.6 kg, the same `D` gives `ζ = 0.3` at 13.8 kg: 37 % overshoot, half the frequency, and a
+> 5× slower decay, since the decay rate `d/(2m)` does not depend on the spring. Tuned for the heavy pose instead, the
+> light one creeps at `ζ = 1.6`. A constant `D` only chooses where it goes wrong.
+
+### The mass matrix
+
+```
+τ = M(q)·q̈ + C(q, q̇)·q̇ + g(q)
+```
+
+`M` is torque **per** acceleration (kg·m²), `τ = M·q̈` exactly, since inertial forces are linear in the acceleration.
+Column `i` is the torque at every joint when only joint `i` accelerates with 1 rad/s² and all others are held at
+zero acceleration. `M_ji` is the torque joint `j` needs to **hold still** (swing the forearm fast, the shoulder has to
+brace). `M` is `n×n` for `n` joints, symmetric and positive definite in every pose, from the kinetic energy
+
+```
+T = ½·q̇ᵀ·M·q̇ = ½·Σ_k (m_k·|J_v,k·q̇|² + (J_ω,k·q̇)ᵀ·I_k·(J_ω,k·q̇))      every term Aᵀ·B·A with B symmetric
+```
+
+The rotor turns `N` times faster than the joint, so it adds `J_rotor·N²` on the diagonal (armature). Built from the
+RNEA: `q̇ = 0` removes Coriolis, gravity off removes `g`, `q̈ = e_i` leaves column `i`. Then `½·(M + Mᵀ)` against
+rounding.
+
+> **Aha: `M` never loses rank, `J` does.**
+> Every motion has positive kinetic energy, so `M` is always invertible. A singularity is purely kinematic: `Λ` blows
+> up because `J` loses rank, not because of the masses.
+
+> **Aha: forgetting `gravity = 0` breaks more than the symmetry.**
+> Every column gets `g(q)` added, tens of Nm against entries below 1 kg·m², so `M` stops being positive definite.
+> Symmetrizing hides the asymmetry but not the error, so test poses need large gravity torques (and check `M − Mᵀ`
+> before symmetrizing).
+
+### What `Λ` means entry by entry
+
+`F = Λ·ẍ`: `Λ_ii` is the force along `i` per acceleration along `i` with the **other axes held**, `Λ_ji` the force
+needed in `j` to hold it. With the others **free**, a unit force gives `a = Λ⁻¹·e_i`, so the felt mass is
+`1/(Λ⁻¹)_ii`, which for `Λ = [[a, b], [b, c]]` is `a − b²/c ≤ a`: freeing a constraint never makes motion harder. Off
+diagonals are couplings, not masses: `Λ_xy = 0` means pushing along `x` does not swerve into `y`.
+
+> **Aha: rotating the TCP in place is 10× heavier than turning a wrist joint.**
+> Held position means the arm has to move along, because the wrist axes don't pass through the TCP. In the pose where
+> axis6 lies along a base axis and through the TCP, `Λ_rz` drops to exactly the axis6 inertia (7.5e-4 kg·m²), which
+> is why rotation spreads so much more than translation.
+
+### Why damping per axis lands too low
+
+`D_i = 2ζ·√(K_i·Λ_ii)` treats every axis as a 1D system. Exact when `Λ` and `K` are both diagonal, otherwise the
+modes are mixed directions. Example `Λ = [[1, 0.8], [0.8, 1]]`, `K = I`: modes `(1, 1)` with mass 1.8 and `(1, −1)` with
+0.2, both damped as if they had mass 1, so `ζ = 0.52` and `1.57` for a target of 0.7. A diagonal entry always lies
+between the smallest and largest eigenvalue, so the heaviest mode is always under-damped. On the arm: 0.36–0.48, at a
+level that depends on the stiffness ratio.
+
+### Double diagonalization
+
+Find coordinates where mass **and** stiffness are diagonal. A rotation can only diagonalize one symmetric matrix at a
+time, so first turn the mass into `I`, the one matrix that stays diagonal under every rotation:
+
+```
+a)  Λ = L·Lᵀ (Cholesky),  z = Lᵀ·x       mass I,  stiffness K̃ = L⁻¹·K·L⁻ᵀ
+b)  K̃ = V·diag(k0)·Vᵀ,     w = Vᵀ·z       mass I,  stiffness diag(k0),  k0 = ω² per mode
+c)  d_i = 2ζ·√k0_i                         each mode a unit mass, damped exactly
+d)  D = (L·V)·diag(d)·(L·V)ᵀ               back: same dissipated power ẋᵀ·D·ẋ = ẇᵀ·diag(d)·ẇ
+```
+
+Step a is the matrix version of measuring position in units of `√m` (`z = √m·x` turns `m·ẍ + k·x = 0` into
+`z̈ + (k/m)·z = 0`). Step b uses that a symmetric matrix has perpendicular eigenvectors: displaced along one, the
+spring pushes back exactly along it, which is what a mode is. Step d is the same pattern as `τ = Jᵀ·F`: velocities go
+in with a matrix, forces come back with its transpose. Check: `(L·V)⁻¹·Λ·(L·V)⁻ᵀ = I`, `(L·V)⁻¹·D·(L·V)⁻ᵀ = diag(d)`.
+
+> **Aha: step a messes up `K` too, that's fine.**
+> `K` was diagonal and `K̃` is not. But after step a the mass is `I`, so step b is free to rotate for `K̃` alone.
+> The other order fails: `K` is already diagonal, step a would still couple it.
+
+> **Aha: one `ζ` for all modes is what makes `D` smooth.**
+> Then `D = 2ζ·L·√K̃·Lᵀ`, a matrix square root, unique and continuous even where two `k0` cross and `V` is not
+> unique. A `ζ` per mode would let `D` jump when the modes swap order.
+
+### At singularities
+
+```
+Λ = (J·M⁻¹·Jᵀ + λ²·I)⁻¹
+```
+
+`J·M⁻¹·Jᵀ` is the inverse mass, bounded, only small in the singular direction. Adding `λ²` there caps `Λ` at
+`1/λ²` and changes it by `≈ λ²·Λ` elsewhere (0.05 % at 4.6 kg).
+
+> **Aha: the damped `J⁺` is the wrong inverse here.**
+> `Λ = J⁻ᵀ·M·J⁻¹` needs the inverse to be **large** in the singular direction, that is what makes the arm heavy. The
+> damped `J⁺` of the jog controller shrinks it on purpose (`σ/(σ² + λ²) → 0`), so `Λ` would peak near `σ ≈ λ` and
+> drop back to 0 at the singularity, and the Cholesky would fail exactly there.
+
+> **Aha: `Λ` blows up, the motors don't feel it.**
+> The motors produce `Jᵀ·D·J`. In the singular direction `√Λ ~ 1/σ` and `J·J ~ σ²`, so the joint damping goes like
+> `σ → 0`, the same place where the spring has no effect. For 6 joints the whole problem can be written in joint
+> space with `M` and `Jᵀ·K·J`, both bounded, so it has to stay bounded. Sampled: at most 13.7 Nm·s/rad near
+> singularities against 12.3 in regular poses. Per-axis damping reaches 875, because its diagonal `D` is not aligned
+> with the singular direction and `J` does not cancel it.
+
+### In the controller
+
+`RobotarmRbd::calculate_task_space_inertia` returns `Λ` (Cholesky of `M`, `M⁻¹·Jᵀ` by solve, Cholesky of the inverse
+mass). The controller does steps a–d with fixed size 6×6 types, about 7 µs per cycle. A wrong armature shifts `ζ` by
+a nearly constant factor (half the armature: 0.51 instead of 0.70; double: 0.72), so estimate it high. Zero stiffness
+gives `k0 = 0` and no Cartesian damping in that mode, `D_j` brakes it.
+
+---
+
 ## Open items
 
-1. **Mapping to the code:** FK of `q` and `q_d`, wrench into the RNEA (`F_tcp`/`M_tcp`, TCP frame, force on the
-   environment) or an explicit `Jᵀ`, error saturation, NaN handling of the references
-2. **Joint limit protection:** joint space repulsive spring/damper in a zone in front of each limit, the cartesian
-   spring knows nothing about joint limits
-3. **Tuning:** `K`, `D`, `ζ`, units, starting values, check the `torque_rise_time` is never active in normal use
-4. **Later:** see [future extensions](#future-extensions). Planned next, with a handoff:
-   [NEXT_STEPS.md](NEXT_STEPS.md) (mass-adaptive damping, stiffness changes at runtime, tool frame)
+Done and documented in the [controller README](../../src/robotarm_controllers/README.md#cartesianimpedancecontroller):
+mapping to the code (explicit `Jᵀ`, norm clamped spring, NaN references), joint limit protection, damping from a
+damping ratio.
+
+1. **Armature:** real values in the URDF once the robot changes are final, one source for the controller and the
+   simulation
+2. **Validation of the damping:** release tests with `push_test` in several poses in the simulation (the measured `ζ`
+   should match everywhere), then on the hardware
+3. **Tuning:** `K`, `ζ`, `joint_damping` (still the gc values, too large for impedance mode), check the
+   `torque_rise_time` is never active in normal use
+4. **Later:** see [future extensions](#future-extensions), next in line are the tool frame and stiffness changes at
+   runtime
