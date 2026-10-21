@@ -54,7 +54,8 @@ def parse_args():
 def load_impedance_gains(path):
     with open(path) as f:
         p = yaml.safe_load(f)[CONTROLLER]['ros__parameters']
-    return (np.array(p['cartesian_stiffness']), p.get('cartesian_damping_ratio', 0.7),
+    stiffness = np.concatenate([p['cartesian_linear_stiffness'], p['cartesian_angular_stiffness']])
+    return (stiffness, p.get('cartesian_damping_ratio', 0.7),
             np.array(p['joint_damping']), float(p['lambda']))
 
 

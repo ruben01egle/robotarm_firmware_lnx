@@ -186,6 +186,14 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_configure(
 
     data_.resize(rbd_.get_dof());
 
+    // the box always holds the committed stiffness, also for values set while inactive
+    rt_stiffness_.set(StiffnessCmd{impedance_.stiffness_frame, impedance_.stiffness});
+    // a reconfigure replaces the handles, dropping the old ones unregisters their callbacks
+    on_set_parameters_handle_ = get_node()->add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& params) { return on_set_parameters(params); });
+    on_parameters_set_handle_ = get_node()->add_post_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& params) { on_parameters_set(params); });
+
     RCLCPP_INFO(get_node()->get_logger(), "configure successful");
     return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -203,6 +211,9 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_activate(c
     data_.ref.tau_start = data_.state.tau;
     data_.ref.tau_cmd = data_.state.tau;
     ramp_elapsed_ = 0;
+    const StiffnessCmd stiffness = rt_stiffness_.get();
+    impedance_.stiffness_frame = stiffness.frame;
+    impedance_.stiffness = stiffness.k;
 
     RCLCPP_INFO(get_node()->get_logger(), "activate successful");
     return controller_interface::CallbackReturn::SUCCESS;
@@ -353,6 +364,11 @@ bool CartesianImpedanceController::compute_impedance_torque()
 {
     // update references
     fetch_references();
+    // runtime stiffness, keeps the last value if the box is locked by a parameter callback
+    rt_stiffness_.try_get([this](const StiffnessCmd& cmd){
+        impedance_.stiffness_frame = cmd.frame;
+        impedance_.stiffness = cmd.k;
+    });
 
     // compute intermediate values 
     if (!rbd_.calculate_jacobian(data_.state.q, rbd_tcp_name_, data_.tmp.j)){
@@ -404,8 +420,16 @@ bool CartesianImpedanceController::compute_impedance_torque()
     Eigen::Matrix<double, 6, 6> L = llt_lambda.matrixL();
     const Eigen::Matrix<double, 6, 6> L_inv = L.triangularView<Eigen::Lower>().solve(Eigen::Matrix<double, 6, 6>::Identity());
 
+    // K in the base frame, a tcp diagonal is rotated per block as R·K·Rᵀ (error into tcp, force back to base)
+    Eigen::Matrix<double, 6, 6> K = Eigen::Matrix<double, 6, 6>::Zero();
+    if (impedance_.stiffness_frame == Frame::TCP) {
+        const Eigen::Matrix3d R = T_ref.linear();
+        K.topLeftCorner<3, 3>()     = R * impedance_.stiffness.head<3>().asDiagonal() * R.transpose();
+        K.bottomRightCorner<3, 3>() = R * impedance_.stiffness.tail<3>().asDiagonal() * R.transpose();
+    } else {
+        K.diagonal() = impedance_.stiffness;
+    }
     // K̃ = L⁻¹·K·L⁻ᵀ, then symmetrize (rounding)
-    const auto& K = impedance_.stiffness.asDiagonal();
     Eigen::Matrix<double, 6, 6> K_tilde = L_inv * K * L_inv.transpose();
     K_tilde = 0.5 * (K_tilde + K_tilde.transpose()).eval();   // eval: K_tilde is read and written
 
@@ -423,7 +447,7 @@ bool CartesianImpedanceController::compute_impedance_torque()
     const Eigen::Matrix<double, 6, 6> D = LV * d_w.asDiagonal() * LV.transpose();
 
     // compute impedance
-    Eigen::Matrix<double, 6, 1> F_spring = - impedance_.stiffness.cwiseProduct(e);
+    Eigen::Matrix<double, 6, 1> F_spring = - K * e;
     F_spring.head<3>() = clamp_norm(F_spring.head<3>(), impedance_.max_spring_force);
     F_spring.tail<3>() = clamp_norm(F_spring.tail<3>(), impedance_.max_spring_moment);
     Eigen::Matrix<double, 6, 1> F_damper = - D * de;
@@ -465,8 +489,12 @@ void CartesianImpedanceController::declare_parameters()
     node->declare_parameter<std::vector<double>>("joint_limit_zone", std::vector<double>());
     node->declare_parameter<double>("joint_limit_push", 0.0);
 
-    // impedance mode only, [x, y, z, rx, ry, rz] in the base frame
-    node->declare_parameter<std::vector<double>>("cartesian_stiffness", std::vector<double>());
+    // impedance mode only, [x, y, z] and [rx, ry, rz] in cartesian_stiffness_frame, settable at runtime
+    node->declare_parameter<std::string>("cartesian_stiffness_frame", "base");   // "base" or "tcp"
+    node->declare_parameter<std::vector<double>>("cartesian_linear_stiffness", std::vector<double>());
+    node->declare_parameter<std::vector<double>>("cartesian_angular_stiffness", std::vector<double>());
+    node->declare_parameter<double>("max_linear_stiffness", 0.0);       // in N/m, per axis
+    node->declare_parameter<double>("max_angular_stiffness", 0.0);      // in Nm/rad, per axis
     node->declare_parameter<double>("cartesian_damping_ratio", 0.0);
     node->declare_parameter<double>("max_spring_force", 0.0);
     node->declare_parameter<double>("max_spring_moment", 0.0);
@@ -529,10 +557,10 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
         return controller_interface::CallbackReturn::ERROR;
     }
 
-    Eigen::VectorXd cartesian_stiffness;
-    if (!read_non_negative_array(node, "cartesian_stiffness", cartesian_stiffness)) {
-        return controller_interface::CallbackReturn::ERROR;
-    }
+    // validated against the stiffness limits below, in impedance mode only
+    const std::string stiffness_frame = node->get_parameter("cartesian_stiffness_frame").as_string();
+    const std::vector<double> linear_stiffness = node->get_parameter("cartesian_linear_stiffness").as_double_array();
+    const std::vector<double> angular_stiffness = node->get_parameter("cartesian_angular_stiffness").as_double_array();
 
     const double cartesian_damping_ratio = node->get_parameter("cartesian_damping_ratio").as_double();
     if (!std::isfinite(cartesian_damping_ratio) || cartesian_damping_ratio < 0.0) {
@@ -544,6 +572,8 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     const std::pair<const char*, double*> spring_limits[] = {
         {"max_spring_force", &impedance_.max_spring_force},
         {"max_spring_moment", &impedance_.max_spring_moment},
+        {"max_linear_stiffness", &impedance_.max_linear_stiffness},
+        {"max_angular_stiffness", &impedance_.max_angular_stiffness},
     };
     for (const auto & [name, value] : spring_limits) {
         *value = node->get_parameter(name).as_double();
@@ -556,32 +586,35 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     switch (mode_)
     {
     case Mode::GC:
-        if (cartesian_stiffness.size() > 0 || cartesian_damping_ratio > 0.0 ||
-            impedance_.max_spring_force > 0.0 || impedance_.max_spring_moment > 0.0) {
+        if (!linear_stiffness.empty() || !angular_stiffness.empty() || cartesian_damping_ratio > 0.0 ||
+            impedance_.max_spring_force > 0.0 || impedance_.max_spring_moment > 0.0 ||
+            impedance_.max_linear_stiffness > 0.0 || impedance_.max_angular_stiffness > 0.0) {
             RCLCPP_WARN(node->get_logger(), "Cartesian impedance parameters are ignored in gc mode");
         }
         impedance_ = ImpedanceParams{};
         break;
 
     case Mode::IMPEDANCE: {
-        if (cartesian_stiffness.size() != 6) {
-            RCLCPP_ERROR(node->get_logger(),
-                         "Parameter cartesian_stiffness needs 6 entries [x, y, z, rx, ry, rz] in impedance mode, got %ld",
-                         cartesian_stiffness.size());
-            return controller_interface::CallbackReturn::ERROR;
-        }
         for (const auto & [name, value] : spring_limits) {
             if (*value <= 0.0) {
                 RCLCPP_ERROR(node->get_logger(), "Parameter %s must be > 0 in impedance mode, got %f", name, *value);
                 return controller_interface::CallbackReturn::ERROR;
             }
         }
-        impedance_.stiffness = cartesian_stiffness;
+        // same rules as at runtime, needs the stiffness limits from above
+        StiffnessCmd stiffness;
+        std::string reason;
+        if (!validate_stiffness(stiffness_frame, linear_stiffness, angular_stiffness, stiffness, reason)) {
+            RCLCPP_ERROR(node->get_logger(), "%s", reason.c_str());
+            return controller_interface::CallbackReturn::ERROR;
+        }
+        impedance_.stiffness_frame = stiffness.frame;
+        impedance_.stiffness = stiffness.k;
         impedance_.damping_ratio = cartesian_damping_ratio;
 
         if (impedance_.damping_ratio == 0.0 && (impedance_.stiffness.array() > 0.0).any()) {
             RCLCPP_WARN(node->get_logger(),
-                        "cartesian_stiffness > 0 with cartesian_damping_ratio = 0: undamped spring, "
+                        "cartesian stiffness > 0 with cartesian_damping_ratio = 0: undamped spring, "
                         "only joint_damping damps the cartesian axes");
         }
         if (gc_.hold_stiffness.size() > 0 || gc_.hold_breakaway_torque.size() > 0) {
@@ -592,6 +625,104 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
     }
 
     return controller_interface::CallbackReturn::SUCCESS;
+}
+
+bool CartesianImpedanceController::validate_stiffness(
+    const std::string& frame, const std::vector<double>& linear,
+    const std::vector<double>& angular, StiffnessCmd& out, std::string& reason) const
+{
+    StiffnessCmd cmd;
+    if (frame == "base") {
+        cmd.frame = Frame::BASE;
+    } else if (frame == "tcp") {
+        cmd.frame = Frame::TCP;
+    } else {
+        reason = "Parameter cartesian_stiffness_frame must be 'base' or 'tcp', got '" + frame + "'";
+        return false;
+    }
+
+    const struct { const char* name; const std::vector<double>* values; double max; } parts[] = {
+        {"cartesian_linear_stiffness", &linear, impedance_.max_linear_stiffness},
+        {"cartesian_angular_stiffness", &angular, impedance_.max_angular_stiffness},
+    };
+    for (size_t p = 0; p < 2; ++p) {
+        const auto & [name, values, max] = parts[p];
+        if (values->size() != 3) {
+            reason = std::string("Parameter ") + name + " needs 3 entries, got " + std::to_string(values->size());
+            return false;
+        }
+        for (size_t i = 0; i < 3; ++i) {
+            const double v = (*values)[i];
+            if (!std::isfinite(v) || v < 0.0 || v > max) {
+                reason = std::string("Parameter ") + name + "[" + std::to_string(i) + "] must be in [0, " +
+                         std::to_string(max) + "], got " + std::to_string(v);
+                return false;
+            }
+            cmd.k[3 * p + i] = v;
+        }
+    }
+    out = cmd;
+    return true;
+}
+
+rcl_interfaces::msg::SetParametersResult CartesianImpedanceController::on_set_parameters(
+    const std::vector<rclcpp::Parameter>& params)
+{
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    // a request may carry only some of the three, the others keep their current value
+    auto node = get_node();
+    std::string frame = node->get_parameter("cartesian_stiffness_frame").as_string();
+    std::vector<double> linear = node->get_parameter("cartesian_linear_stiffness").as_double_array();
+    std::vector<double> angular = node->get_parameter("cartesian_angular_stiffness").as_double_array();
+    bool stiffness_changed = false;
+    for (const auto & param : params) {
+        if (param.get_name() == "cartesian_stiffness_frame") {
+            frame = param.as_string();
+            stiffness_changed = true;
+        } else if (param.get_name() == "cartesian_linear_stiffness") {
+            linear = param.as_double_array();
+            stiffness_changed = true;
+        } else if (param.get_name() == "cartesian_angular_stiffness") {
+            angular = param.as_double_array();
+            stiffness_changed = true;
+        }
+    }
+    if (!stiffness_changed) return result;
+
+    if (mode_ != Mode::IMPEDANCE) {
+        result.successful = false;
+        result.reason = "Cartesian stiffness can only be set in impedance mode";
+        return result;
+    }
+    StiffnessCmd stiffness;
+    if (!validate_stiffness(frame, linear, angular, stiffness, result.reason)) {
+        result.successful = false;
+    }
+    return result;
+}
+
+void CartesianImpedanceController::on_parameters_set(const std::vector<rclcpp::Parameter>& params)
+{
+    const bool stiffness_changed = std::any_of(params.begin(), params.end(), [](const rclcpp::Parameter& p) {
+        return p.get_name() == "cartesian_stiffness_frame" || p.get_name() == "cartesian_linear_stiffness" ||
+               p.get_name() == "cartesian_angular_stiffness";
+    });
+    if (!stiffness_changed) return;
+
+    // committed and validated in on_set_parameters, the conversion can not fail here
+    auto node = get_node();
+    StiffnessCmd stiffness;
+    std::string reason;
+    if (!validate_stiffness(node->get_parameter("cartesian_stiffness_frame").as_string(),
+                            node->get_parameter("cartesian_linear_stiffness").as_double_array(),
+                            node->get_parameter("cartesian_angular_stiffness").as_double_array(),
+                            stiffness, reason)) {
+        RCLCPP_ERROR(node->get_logger(), "Committed stiffness is invalid, keeping the previous one: %s", reason.c_str());
+        return;
+    }
+    rt_stiffness_.set(stiffness);
 }
 
 bool CartesianImpedanceController::fetch_robotarm_state_strict()

@@ -230,8 +230,13 @@ cartesian_impedance_controller:
     joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]             # rad
     joint_limit_push: 0.2           # fraction of the scaled effort limit at the limit, all joints, 0..1
 
-    # impedance mode only. Cartesian impedance, diagonal in the base frame, [x, y, z, rx, ry, rz]
-    cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]      # N/m, Nm/rad, NOT TUNED
+    # impedance mode only. Cartesian impedance, diagonal in cartesian_stiffness_frame. The stiffness and its frame can
+    # be set at runtime (ros2 param set), the values are checked against the per axis limits at startup and on every set
+    cartesian_stiffness_frame: "base"                   # "base" or "tcp"
+    cartesian_linear_stiffness: [200.0, 200.0, 200.0]   # N/m, [x, y, z], NOT TUNED
+    cartesian_angular_stiffness: [5.0, 5.0, 5.0]        # Nm/rad, [rx, ry, rz], NOT TUNED
+    max_linear_stiffness: 2000.0    # N/m, per axis, NOT TUNED
+    max_angular_stiffness: 50.0     # Nm/rad, per axis, NOT TUNED
     # zeta of every mode in every pose: the damping matrix follows the stiffness and the task space inertia Λ(q)
     # (double diagonalization, see the robotarm_controllers README, background H). 0.7 ≈ 5 % overshoot. With the
     # armature still 0 in the urdf, Λ is ~20-30 % too light and the real zeta lower. Zero stiffness → no cartesian damping

@@ -87,7 +87,10 @@ std::vector<rclcpp::Parameter> make_params(const std::string & mode,
         p.emplace_back("hold_stiffness", std::vector<double>{20.0, 50.0, 30.0, 4.0, 1.0, 1.0});
         p.emplace_back("hold_breakaway_torque", std::vector<double>{1.0, 2.5, 1.5, 0.4, 0.1, 0.1});
     } else {
-        p.emplace_back("cartesian_stiffness", stiffness);
+        p.emplace_back("cartesian_linear_stiffness", std::vector<double>(stiffness.begin(), stiffness.begin() + 3));
+        p.emplace_back("cartesian_angular_stiffness", std::vector<double>(stiffness.begin() + 3, stiffness.end()));
+        p.emplace_back("max_linear_stiffness", 1e6);    // above every stiffness a test sets
+        p.emplace_back("max_angular_stiffness", 1e6);
         p.emplace_back("cartesian_damping_ratio", damping_ratio);
         p.emplace_back("max_spring_force", 1e6);    // no clamp unless a test sets one
         p.emplace_back("max_spring_moment", 1e6);
@@ -382,7 +385,7 @@ TEST_F(CartesianImpedanceTest, ConfigureIgnoresParametersOfTheOtherMode)
 {
     // gc with impedance parameters set, impedance without the hold: both only warn
     std::vector<rclcpp::Parameter> gc = make_params("gc", {
-        rclcpp::Parameter("cartesian_stiffness", stiffness),
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{500.0, 500.0, 500.0}),
         rclcpp::Parameter("max_spring_force", 10.0),
     });
     EXPECT_EQ(configure(gc), State::PRIMARY_STATE_INACTIVE);
@@ -394,10 +397,18 @@ TEST_F(CartesianImpedanceTest, ConfigureRejectsInvalidParameters)
 {
     const std::vector<std::pair<std::string, std::vector<rclcpp::Parameter>>> cases = {
         {"unknown mode", make_params("gc", {rclcpp::Parameter("mode", "position")})},
-        {"impedance without stiffness",
-         make_params("impedance", {rclcpp::Parameter("cartesian_stiffness", std::vector<double>{})})},
-        {"stiffness with 5 entries",
-         make_params("impedance", {rclcpp::Parameter("cartesian_stiffness", std::vector<double>{1, 1, 1, 1, 1})})},
+        {"impedance without linear stiffness",
+         make_params("impedance", {rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{})})},
+        {"angular stiffness with 2 entries",
+         make_params("impedance", {rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>{1, 1})})},
+        {"negative linear stiffness",
+         make_params("impedance", {rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{1, -1, 1})})},
+        {"angular stiffness above limit",
+         make_params("impedance", {rclcpp::Parameter("max_angular_stiffness", 5.0)})},
+        {"unknown stiffness frame",
+         make_params("impedance", {rclcpp::Parameter("cartesian_stiffness_frame", "tool")})},
+        {"no linear stiffness limit", make_params("impedance", {rclcpp::Parameter("max_linear_stiffness", 0.0)})},
+        {"no angular stiffness limit", make_params("impedance", {rclcpp::Parameter("max_angular_stiffness", 0.0)})},
         {"negative damping ratio", make_params("impedance", {rclcpp::Parameter("cartesian_damping_ratio", -0.1)})},
         {"non-finite damping ratio", make_params("impedance", {rclcpp::Parameter("cartesian_damping_ratio", nan)})},
         {"no spring force limit", make_params("impedance", {rclcpp::Parameter("max_spring_force", 0.0)})},
@@ -580,6 +591,163 @@ TEST_F(CartesianImpedanceTest, SpringLinearizesToJacobianStiffness)
     const Eigen::VectorXd actual = tau() - gravity(q);
     EXPECT_LT((actual - expected).norm(), 1e-3 * expected.norm())
         << "\n  actual:   " << actual.transpose() << "\n  expected: " << expected.transpose();
+}
+
+TEST_F(CartesianImpedanceTest, StiffnessCanBeSetAtRuntime)
+{
+    // same linearization as above, with the stiffness changed while active
+    const Eigen::VectorXd q = regular_pose();
+    start(q, make_params("impedance"));
+    settle();
+
+    const std::vector<double> k_new = {1000.0, 200.0, 800.0, 5.0, 20.0, 15.0};
+    auto node = controller_->get_node();
+    ASSERT_TRUE(node->set_parameters_atomically({
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>(k_new.begin(), k_new.begin() + 3)),
+        rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>(k_new.begin() + 3, k_new.end())),
+    }).successful);
+
+    Eigen::VectorXd dq_offset(6);
+    dq_offset << 1.0, -0.5, 0.8, -1.2, 0.6, 1.5;
+    dq_offset *= 1e-5;
+    set_reference(q + dq_offset);
+    const StepResult r = step(1);
+    ASSERT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+
+    const auto J = jacobian(q);
+    const Eigen::VectorXd expected = J.transpose() * diag6(k_new) * J * dq_offset;
+    const Eigen::VectorXd actual = tau() - gravity(q);
+    EXPECT_LT((actual - expected).norm(), 1e-3 * expected.norm())
+        << "\n  actual:   " << actual.transpose() << "\n  expected: " << expected.transpose();
+}
+
+TEST_F(CartesianImpedanceTest, StiffnessSetWhileInactiveIsUsedOnActivate)
+{
+    ASSERT_EQ(configure(make_params("impedance")), State::PRIMARY_STATE_INACTIVE);
+    const std::vector<double> k_new = {1000.0, 200.0, 800.0, 5.0, 20.0, 15.0};
+    auto node = controller_->get_node();
+    ASSERT_TRUE(node->set_parameter(
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>(k_new.begin(), k_new.begin() + 3))).successful);
+    ASSERT_TRUE(node->set_parameter(
+        rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>(k_new.begin() + 3, k_new.end()))).successful);
+
+    const Eigen::VectorXd q = regular_pose();
+    refs_ = controller_->export_reference_interfaces();
+    assign(q);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    settle();
+
+    Eigen::VectorXd dq_offset(6);
+    dq_offset << 1.0, -0.5, 0.8, -1.2, 0.6, 1.5;
+    dq_offset *= 1e-5;
+    set_reference(q + dq_offset);
+    ASSERT_TRUE(step(1).ok);
+
+    const auto J = jacobian(q);
+    const Eigen::VectorXd expected = J.transpose() * diag6(k_new) * J * dq_offset;
+    const Eigen::VectorXd actual = tau() - gravity(q);
+    EXPECT_LT((actual - expected).norm(), 1e-3 * expected.norm())
+        << "\n  actual:   " << actual.transpose() << "\n  expected: " << expected.transpose();
+}
+
+TEST_F(CartesianImpedanceTest, InvalidRuntimeStiffnessIsRejected)
+{
+    start(regular_pose(), make_params("impedance", {rclcpp::Parameter("max_linear_stiffness", 2000.0)}));
+    auto node = controller_->get_node();
+    const std::vector<std::pair<std::string, rclcpp::Parameter>> cases = {
+        {"above limit", rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{3000.0, 1.0, 1.0})},
+        {"negative", rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>{1.0, -1.0, 1.0})},
+        {"non-finite", rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>{1.0, nan, 1.0})},
+        {"wrong length", rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{1.0, 1.0})},
+        {"unknown frame", rclcpp::Parameter("cartesian_stiffness_frame", "world")},
+    };
+    for (const auto & [what, param] : cases) {
+        const auto result = node->set_parameter(param);
+        EXPECT_FALSE(result.successful) << what;
+        EXPECT_FALSE(result.reason.empty()) << what;
+    }
+    // the committed values are untouched
+    EXPECT_EQ(node->get_parameter("cartesian_stiffness_frame").as_string(), "base");
+    EXPECT_EQ(node->get_parameter("cartesian_linear_stiffness").as_double_array(),
+              std::vector<double>(stiffness.begin(), stiffness.begin() + 3));
+    EXPECT_EQ(node->get_parameter("cartesian_angular_stiffness").as_double_array(),
+              std::vector<double>(stiffness.begin() + 3, stiffness.end()));
+}
+
+TEST_F(CartesianImpedanceTest, RuntimeStiffnessIsRejectedInGcMode)
+{
+    start(regular_pose(), make_params("gc"));
+    auto node = controller_->get_node();
+    EXPECT_FALSE(node->set_parameter(
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{100.0, 100.0, 100.0})).successful);
+    EXPECT_FALSE(node->set_parameter(rclcpp::Parameter("cartesian_stiffness_frame", "tcp")).successful);
+}
+
+TEST_F(CartesianImpedanceTest, StiffnessFrameCanBeSetAtRuntime)
+{
+    start(regular_pose(), make_params("impedance"));
+    auto node = controller_->get_node();
+    EXPECT_TRUE(node->set_parameter(rclcpp::Parameter("cartesian_stiffness_frame", "tcp")).successful);
+    EXPECT_TRUE(node->set_parameter(rclcpp::Parameter("cartesian_stiffness_frame", "base")).successful);
+    const StepResult r = step(1);
+    ASSERT_TRUE(r.ok);
+    EXPECT_NO_RT_ALLOCATIONS(r);
+}
+
+TEST_F(CartesianImpedanceTest, TcpStiffnessLinearizesToRotatedJacobianStiffness)
+{
+    // anisotropic diagonal in the tcp frame: τ - g = Jᵀ·R6·K·R6ᵀ·J·δq, R from the own model at the reference
+    const Eigen::VectorXd q = regular_pose();
+    const std::vector<double> k = {1000.0, 200.0, 500.0, 5.0, 20.0, 12.0};
+    start(q, make_params("impedance", {
+        rclcpp::Parameter("cartesian_stiffness_frame", "tcp"),
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>(k.begin(), k.begin() + 3)),
+        rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>(k.begin() + 3, k.end())),
+    }));
+    settle();
+
+    Eigen::VectorXd dq_offset(6);
+    dq_offset << 1.0, -0.5, 0.8, -1.2, 0.6, 1.5;
+    dq_offset *= 1e-5;
+    set_reference(q + dq_offset);
+    ASSERT_TRUE(step(1).ok);
+
+    Eigen::Isometry3d T_ref;
+    ASSERT_TRUE(rbd_.calculate_link_transform(q + dq_offset, tcp_, T_ref)) << rbd_.last_error();
+    const Eigen::Matrix3d R = T_ref.linear();
+    ASSERT_GT((R - Eigen::Matrix3d::Identity()).norm(), 0.5) << "tcp too close to the base orientation";
+    Eigen::Matrix<double, 6, 6> R6 = Eigen::Matrix<double, 6, 6>::Zero();
+    R6.topLeftCorner<3, 3>() = R;
+    R6.bottomRightCorner<3, 3>() = R;
+    const Eigen::Matrix<double, 6, 6> K_base = R6 * diag6(k) * R6.transpose();
+
+    const auto J = jacobian(q);
+    const Eigen::VectorXd expected = J.transpose() * K_base * J * dq_offset;
+    const Eigen::VectorXd expected_if_base = J.transpose() * diag6(k) * J * dq_offset;
+    ASSERT_GT((expected - expected_if_base).norm(), 0.1 * expected.norm()) << "frames indistinguishable here";
+    const Eigen::VectorXd actual = tau() - gravity(q);
+    EXPECT_LT((actual - expected).norm(), 1e-3 * expected.norm())
+        << "\n  actual:   " << actual.transpose() << "\n  expected: " << expected.transpose();
+}
+
+TEST_F(CartesianImpedanceTest, IsotropicStiffnessIsTheSameInBothFrames)
+{
+    // equal values per block: R·k·I·Rᵀ = k·I, switching the frame at runtime must not change the torque
+    const Eigen::VectorXd q = regular_pose();
+    start(q, make_params("impedance", {rclcpp::Parameter("cartesian_stiffness_frame", "tcp")}));
+    settle();
+
+    Eigen::VectorXd offset(6);
+    offset << 0.02, -0.01, 0.03, -0.02, 0.01, 0.02;
+    set_reference(q + offset);
+    ASSERT_TRUE(step(1).ok);
+    const Eigen::VectorXd tau_tcp = tau();
+
+    ASSERT_TRUE(controller_->get_node()->set_parameter(
+        rclcpp::Parameter("cartesian_stiffness_frame", "base")).successful);
+    ASSERT_TRUE(step(1).ok);
+    EXPECT_VEC_NEAR(tau(), tau_tcp, 1e-9);
 }
 
 TEST_F(CartesianImpedanceTest, SpringPullsTowardsReference)
@@ -899,7 +1067,8 @@ TEST_F(CartesianImpedanceTest, TorqueIsClampedToScaledEffort)
     const Eigen::VectorXd q = regular_pose();
     start(q, make_params("impedance", {
         rclcpp::Parameter("torque_scale", scale),
-        rclcpp::Parameter("cartesian_stiffness", std::vector<double>{1e5, 1e5, 1e5, 1e3, 1e3, 1e3}),
+        rclcpp::Parameter("cartesian_linear_stiffness", std::vector<double>{1e5, 1e5, 1e5}),
+        rclcpp::Parameter("cartesian_angular_stiffness", std::vector<double>{1e3, 1e3, 1e3}),
     }));
     settle();
     set_reference(q + Eigen::VectorXd::Constant(dof_, 0.3));

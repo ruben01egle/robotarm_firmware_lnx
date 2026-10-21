@@ -1561,16 +1561,35 @@ with an error message. Parameters of the other mode are ignored with a warning i
 | `joint_limit_push` | `0.0` | – | both | [0, 1] | Outward push at the limit, as a fraction of `effort`, all joints |
 | `hold_stiffness` | – | N·m/rad | `gc` | ≥ 0, one per joint, 0 disables | Stiffness of the breakaway hold |
 | `hold_breakaway_torque` | – | N·m | `gc` | ≥ 0, one per joint, ≤ `effort` | Torque at which the hold slides |
-| `cartesian_stiffness` | – | N/m, N·m/rad | `impedance` | ≥ 0, 6 values | Diagonal $K$ in the base frame, $[x, y, z, r_x, r_y, r_z]$ |
+| `cartesian_stiffness_frame` | `"base"` | – | `impedance` | `"base"` or `"tcp"` | Frame the diagonal $K$ is given in, settable at runtime. `"tcp"` rotates it per block with the reference orientation, $R K R^T$ |
+| `cartesian_linear_stiffness` | – | N/m | `impedance` | [0, `max_linear_stiffness`], 3 values | Translational part of the diagonal $K$ in `cartesian_stiffness_frame`, $[x, y, z]$, settable at runtime |
+| `cartesian_angular_stiffness` | – | N·m/rad | `impedance` | [0, `max_angular_stiffness`], 3 values | Rotational part of the diagonal $K$ in `cartesian_stiffness_frame`, $[r_x, r_y, r_z]$, settable at runtime |
+| `max_linear_stiffness` | `0.0` | N/m | `impedance` | > 0 | Per axis upper bound of `cartesian_linear_stiffness`, at startup and at runtime |
+| `max_angular_stiffness` | `0.0` | N·m/rad | `impedance` | > 0 | Per axis upper bound of `cartesian_angular_stiffness`, at startup and at runtime |
 | `cartesian_damping_ratio` | `0.0` | – | `impedance` | finite, ≥ 0 | Damping ratio $\zeta$, one value for every mode; $D(q)$ follows from it, $K$ and $\Lambda(q)$ |
 | `max_spring_force` | `0.0` | N | `impedance` | > 0 | Limit on the norm of the translational spring force |
 | `max_spring_moment` | `0.0` | N·m | `impedance` | > 0 | Limit on the norm of the rotational spring moment |
 
 Per joint arrays are in URDF joint order. The start ramp time (1 s) is hard-coded.
 
+The stiffness and its frame are the only runtime parameters, all others are only read in `on_configure`. A set is
+validated against the same rules as at startup and rejected with a reason otherwise (also in `gc`
+mode). It takes effect in the next cycle when active, or on the next activation when inactive. The
+new value applies immediately, without a ramp, so $\Delta K \cdot e$ steps the spring force (bounded
+by `max_spring_force` / `max_spring_moment`), also on a frame switch. Set the frame and the values
+that belong to it in one `set_parameters_atomically` call, otherwise the new frame can act on the
+old values for a cycle:
+
+```bash
+ros2 param set /cartesian_impedance_controller cartesian_linear_stiffness "[500.0, 500.0, 300.0]"
+```
+
+A GUI reads the current values, the frame and the limits with `get_parameters` (the limits only
+change on a reconfigure) and follows changes from other clients on `/parameter_events`.
+
 Tuning hints:
 - **`cartesian_damping_ratio`**: start with $\zeta \approx 0.7$ (about 5 % overshoot after a
-  release). It holds for any `cartesian_stiffness`, so changing $K$ needs no damping retuning. A
+  release). It holds for any stiffness, so changing $K$ needs no damping retuning. A
   model armature that is too small lowers the real $\zeta$ by an almost constant factor, which this
   value absorbs. Watch for buzzing: $D$ is large in heavy directions and amplifies velocity noise.
 - **`joint_damping`**: acts in parallel to the Cartesian damper. In `impedance` mode it has to damp
@@ -1596,7 +1615,10 @@ cartesian_impedance_controller:
     joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
     joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     joint_limit_push: 0.2
-    cartesian_stiffness: [200.0, 200.0, 200.0, 5.0, 5.0, 5.0]
+    cartesian_linear_stiffness: [200.0, 200.0, 200.0]
+    cartesian_angular_stiffness: [5.0, 5.0, 5.0]
+    max_linear_stiffness: 2000.0
+    max_angular_stiffness: 50.0
     cartesian_damping_ratio: 0.7
     max_spring_force: 20.0
     max_spring_moment: 2.0
@@ -1630,10 +1652,11 @@ Activated alone, `cartesian_impedance_controller` holds the activation pose comp
 | Transition | What happens |
 |---|---|
 | `on_init` | Declares the parameters. |
-| `on_configure` | Reads and validates the parameters for the selected mode, initializes the model from the URDF, scales the effort limits by `torque_scale`, checks the per joint array lengths and the limit zones, sizes all buffers. |
+| `on_configure` | Reads and validates the parameters for the selected mode, initializes the model from the URDF, scales the effort limits by `torque_scale`, checks the per joint array lengths and the limit zones, sizes all buffers, writes the stiffness to the realtime box and registers the parameter callbacks. |
 | export | Creates the reference interfaces, 3 per joint, initialized to NaN. |
-| `on_activate` | Reads the joint state (strict: all joints or fail), sets the hold anchor and $q_d$ to the measured pose, resets the references to NaN, starts the torque ramp from the measured effort. |
-| `update_reference_from_subscribers` | Nothing, there is no standalone input (only called when not chained). |
+| `on_activate` | Reads the joint state (strict: all joints or fail), sets the hold anchor and $q_d$ to the measured pose, resets the references to NaN, starts the torque ramp from the measured effort, takes the committed stiffness and frame from the box (blocking, so the first cycle uses them). |
+| `update_reference_from_subscribers` | Nothing by design (only called when not chained): standalone, the controller holds the activation pose. |
+| parameter set (any state) | Stiffness and frame: validated in the on-set callback (rejected with a reason, always in `gc` mode), written to the box in the post-set callback once committed. Other parameters are accepted and only act on the next configure. |
 | `update_and_write_commands` | One control cycle, see below. |
 | `on_deactivate` | Nothing. When the `effort` interface is released, the drives hold their current position. |
 
@@ -1646,8 +1669,8 @@ drives hold position.
  q, q̇ ─► RNEA(q, 0, 0) ─────────────────────────────────────────► τ_gravity
          │
          ├ gc:        hold anchor update ─► −D_j·q̇ − K_h·(q − q_anchor) ─────────► τ_mode
-         └ impedance: references (NaN → hold / 0)
-                      FK, J at q and q_d ─► e, ė
+         └ impedance: references (NaN → hold / 0), stiffness from the box (try_get)
+                      FK, J at q and q_d ─► e, ė, K (tcp: R_d·K·R_dᵀ per block)
                       Λ(q) ─► D(q) from ζ, K (double diagonalization)
                       ─► F_spring (norm clamped), F_damper = −D·ė
                       RNEA(q, q̇, q̈_d, no gravity) + Jᵀ(F_spring + F_damper)
@@ -1665,8 +1688,9 @@ In code order (`update_and_write_commands()` in
 2. **Gravity**: $g(q)$ from the RNEA with zero velocity and acceleration, both modes.
 3. **Mode torque** $\tau_{mode}$, everything the controller "wants" on top of gravity:
    - *gc:* drag the hold anchors along, joint damping plus hold spring.
-   - *impedance:* read the references, forward kinematics and Jacobian at $q$ and $q_d$, pose and
-     velocity error, apparent mass $\Lambda(q)$ and the damping matrix $D(q)$, spring (norm
+   - *impedance:* read the references and the stiffness (`try_get`, keeps the last value when the
+     box is locked), forward kinematics and Jacobian at $q$ and $q_d$, pose and velocity error, $K$
+     in the base frame (a tcp diagonal rotated per block with the reference orientation), apparent mass $\Lambda(q)$ and the damping matrix $D(q)$, spring (norm
      clamped) and damper wrench, dynamics feedforward, joint damping.
 4. **Joint limit protection**: inside a zone, scale the part of $\tau_{mode}$ towards the limit
    down, add the outward push $\tau_{limit}$. Gravity is not touched.
@@ -1998,16 +2022,16 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 
 | Item | Status / notes |
 |---|---|
-| Gains not tuned | `cartesian_stiffness`, `cartesian_damping_ratio`, `joint_damping` and the spring limits are placeholders. `joint_damping` still has the gc values and dominates the Cartesian damping in `impedance` mode, reduce it when tuning. |
+| Gains not tuned | `cartesian_linear_stiffness`, `cartesian_angular_stiffness`, their limits, `cartesian_damping_ratio`, `joint_damping` and the spring limits are placeholders. `joint_damping` still has the gc values and dominates the Cartesian damping in `impedance` mode, reduce it when tuning. |
 | Damping ratio not validated | The tests check $\zeta$ on the model only. Open: release tests with `push_test` in the simulation in several poses, then on the hardware. |
 | Reflected rotor inertia | `robotarm_rbd` reads the URDF `<armature>` and adds it in the RNEA, so the inertia feedforward and $\Lambda$ use it. The URDF values are placeholders (0) until the robot changes are final, while the MuJoCo plant uses the `sim_params.yaml` estimates: until they match, the feedforward is too small and $\Lambda$ about 20–30 % too light, so the real $\zeta$ is lower than configured. Planned: one source for both. |
 | No inertia shaping | Needs a force/torque sensor or an observer, see [background E](#background-e-the-closed-loop). |
 | Friction | Not compensated, causes lag and a dead band ($e \approx F_{friction}/K$). |
 | Coriolis term | $C(q,\dot q)\dot q$ with the measured velocity instead of the PD+ term $C(q,\dot q)\dot q_d$, irrelevant at slow speeds. Switch to $\dot q_d$ if the velocity noise shows. |
-| Stiffness frame | Diagonal in the base frame. A tool frame stiffness ($K = R_6 K_{tool} R_6^T$ with $R_6 = \operatorname{diag}(R, R)$, per cycle) would be more intuitive for rotations. The damping law already handles a non diagonal $K$; the spring becomes $-K e$ as a matrix product. |
-| Stiffness changes at runtime | Changing $K$ needs deactivate, reconfigure, activate (start ramp, interrupts the upstream). Planned: a service on the controller node (stiffnesses, damping ratio, base or tool frame, transition time), handed to `update()` through a `RealtimeThreadSafeBox`. A new $K$ with an existing error steps the spring force ($\Delta K \cdot e$), so blend old to new gains over the transition time, also when switching the frame. Apply one request as one consistent set, reject it in `gc` mode. The damping follows automatically. |
+| ~~Stiffness frame~~ | **Done.** `cartesian_stiffness_frame`: diagonal in the base or the tcp frame, $K = R_6 K_{tcp} R_6^T$ with $R_6 = \operatorname{diag}(R_d, R_d)$ from the reference orientation, per cycle. |
+| Stiffness changes at runtime | **Done** as parameters (stiffness and frame, through a `RealtimeThreadSafeBox`), see [parameters](#parameters-2). The damping follows automatically, $\zeta$ stays a configure parameter. Open: no blending, a new $K$ with an existing error steps the spring force ($\Delta K \cdot e$, bounded by the spring limits), also on a frame switch. Test on the hardware with the arm held off the reference, add a first order filter on the diagonal (in its own frame) if the step is too harsh. |
 | Zone sizing | `joint_limit_zone` is not checked against the braking distance. |
-| Standalone input | No topic for a reference pose, `update_reference_from_subscribers` is empty. |
+| Standalone input | None by design: standalone, the controller holds the activation pose. References come only from a chained upstream controller, which guarantees a smooth trajectory. |
 | Reference export API | Uses the classic `on_export_reference_interfaces()` (deprecated in Jazzy, still works). |
 | `lambda`, `jinv_method` | `lambda` regularizes $\Lambda$, `jinv_method` is unused (no Jacobian inverse). In `robotarm_rbd` the same `lambda` also damps the Jacobian inverse, one value for two meanings. |
 | Start ramp | 1 s, hard-coded. |
