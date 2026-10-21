@@ -1,11 +1,17 @@
 # robotarm_mujoco
 
-MuJoCo simulation of the robotarm, for the controllers that command **effort**. The position and
-velocity controllers (joint stream, Cartesian jog) keep using `mock_components` through
-`robotarm_bringup`, since the moteus internal loop is what they rely on.
+MuJoCo simulation of the robotarm, a stand-in for the real arm with the same controllers, the same
+`controllers.yaml` and the same command interfaces: `effort` for the torque controllers (gravity compensation,
+Cartesian impedance), `position` + `velocity` for joint stream and Cartesian jog.
 
-The sim runs [`mujoco_ros2_control`](https://github.com/ros-controls/mujoco_ros2_control) as the
-ros2_control hardware plugin, and uses the same `controllers.yaml` as the real robot.
+The hardware plugin is [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware), a thin layer over
+[`mujoco_ros2_control`](https://github.com/ros-controls/mujoco_ros2_control).
+
+> **Position and velocity are followed by a generic sim PID, not by a model of the moteus position loop.**
+> The gains ([config/sim_pids.yaml](config/sim_pids.yaml)) are tuned for stable, stiff tracking in the sim
+> only, and `torque_ff` does not exist here. Use the sim to check wiring, interface claims, controller
+> switching and what a controller does with the arm, not tracking performance or gains for the real arm. The
+> model parameters are not accurate enough for that either.
 
 ## Usage
 
@@ -20,24 +26,31 @@ ros2 launch robotarm_mujoco sim.launch.py headless:=true rviz:=true
 | `headless` | `false` | no MuJoCo viewer |
 | `rviz` | `false` | also start RViz |
 | `software_rendering` | `true` | Mesa software OpenGL for the viewer and RViz. In the dev container, hardware rendering hangs on VS Code's forwarded X display; set `false` once the container has working GPU access |
-| `sim_params` | installed `config/sim_params.yaml` | simulation parameters (armature, friction, timestep) |
+| `sim_params` | installed `config/sim_params.yaml` | simulation parameters (friction, timestep) |
+| `sim_pids` | installed `config/sim_pids.yaml` | PID gains of the position/velocity interfaces |
 | `controller_params` | none | yaml applied after `robotarm_bringup/config/controllers.yaml`, for gains you only want in the sim |
 | `joint_state_rate` | `50` | Hz, `/joint_states` rate. `500` for the push test, 50 Hz is too coarse to fit a response |
 
-As on the real robot, the hardware component starts `inactive` and the controllers are only loaded:
-`gc_controller`, `cartesian_impedance_controller` and the upstream controllers chained to it,
-`joint_stream_controller_impedance` and `cartesian_jog_controller_impedance`. The joint stream and jog
-instances that drive position/velocity directly can't run here.
+In VS Code: **Run Sim** in the tasks, next to Run Robot and Run Mock.
+
+As on the real robot, the hardware component starts `inactive` and all controllers of
+`robotarm_bringup/launch/controllers.launch.py` are only loaded, the same set as on the real robot and the
+mock. Activate them like there:
 
 ```bash
 ros2 control set_hardware_component_state moteus_hardware_system active
-ros2 control switch_controllers --activate gc_controller                     # gravity compensation and hold
+ros2 control switch_controllers --activate joint_stream_controller          # position/velocity, sim PID
+ros2 control switch_controllers --deactivate joint_stream_controller \
+  --activate gc_controller                                                   # gravity compensation and hold
 ros2 control switch_controllers --deactivate gc_controller \
   --activate cartesian_impedance_controller joint_stream_controller_impedance   # impedance, streamed targets
 ```
 
-Physics runs from the start, so the arm falls limp onto its joint limits before you activate
-anything, like the real arm with the motors off. To start from a defined pose, pause the sim, reset
+A joint no controller claims holds its position, like the moteus in its idle mode: after activating the
+hardware, and after a controller is released. While the hardware is `inactive` the arm hangs limp.
+
+Physics runs from the start, so the arm falls limp onto its joint limits before you activate the
+hardware, like the real arm with the motors off. To start from a defined pose, pause the sim, reset
 it with a pose override, then resume:
 
 ```bash
@@ -47,7 +60,8 @@ ros2 service call /mujoco_ros2_control_node/reset_world mujoco_ros2_control_msgs
 ros2 service call /mujoco_ros2_control_node/set_pause mujoco_ros2_control_msgs/srv/SetPause "{paused: false}"
 ```
 
-With the controller already active, its hold is still anchored at the old pose. Activating it after the
+A reset keeps the controllers' claims (see [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware)), joints
+nobody claims hold the reset pose. With the controller already active, its hold is still anchored at the old pose. Activating it after the
 reset by hand is too slow: the CLI needs over a second after the unpause, and the limp arm falls in the
 meantime. `push_test --pose` does the whole sequence correctly, see below.
 
@@ -132,7 +146,8 @@ cannot express:
   collision pieces go in group 3, hidden by default.
 - **Sites.** `Base_1`, `flange`, `tcp` and tool links sit on fixed joints, so MuJoCo merges them into
   their parent body. Each one gets a site at its frame instead.
-- **Joint parameters** from `config/sim_params.yaml`: `armature`, `damping`, `frictionloss`.
+- **Joint parameters:** `armature` from the URDF `<armature>`, `damping` and `frictionloss` from
+  `config/sim_params.yaml`.
 - **Actuators.** One `<motor>` per joint, named like the joint and limited to the URDF effort limit.
 - **Contacts.** The base is excluded against the first link, because MuJoCo's parent/child contact
   filter does not cover bodies fused into the world.
@@ -143,31 +158,52 @@ pulls in several extra Python packages.
 
 ## Simulation parameters
 
-[`config/sim_params.yaml`](config/sim_params.yaml) holds what the URDF does not have, per joint:
+[`config/sim_params.yaml`](config/sim_params.yaml) holds what the URDF does not have, per joint `damping` and
+`frictionloss` (belt and bearing friction; `frictionloss: 0` is the strict setting for checking gravity
+compensation, because friction would hide model errors), plus timestep, integrator and the viewer's drag
+spring.
 
-- `armature`, or `rotor_inertia` with `gear_ratio`: the reflected rotor inertia,
-  `rotor_inertia · gear_ratio²`. It dominates on the geared joints; for axis2, 30² multiplies the
-  rotor inertia by 900.
-- `damping` and `frictionloss`: belt and bearing friction. `frictionloss: 0` is the strict setting
-  for checking gravity compensation, because friction would hide model errors.
+The **reflected rotor inertia** (`armature`) comes from the URDF: the converter reads the
+`<armature value="..."/>` of each joint, the same value `robotarm_rbd` uses in the controllers, so sim and
+controller model never disagree. It used to be set in `sim_params.yaml`, which now fails with an error if it
+still contains `armature`, `rotor_inertia` or `gear_ratio`. The URDF values are placeholders (0) until
+measured; the former estimates and how they were derived are in
+[docs/dynamics/README.md](../../docs/dynamics/README.md#armature-used).
 
-Current values are **estimates**: the LA8308 rotor inertia (about 180 kg·mm², no datasheet value
-found) and the wrist motor rotor inertia behind the axis5/axis6 armature. They are marked `ESTIMATE`
-in the file. Without armature, axis6's inertia is only 2.6e-5 kg·m², which is why its controller gains in
-`robotarm_bringup` are so small; revisit them once the wrist motors are known.
+**With armature 0, the torque controllers chatter on axis6.** Its link alone has 2.6e-5 kg·m², and the
+`joint_damping` of `gc_controller`/`cartesian_impedance_controller` (0.055 Nm·s/rad, sized for the estimated
+7.2e-4 kg·m²) is a discrete damper at 500 Hz that is only stable for `D·T/M < 2`; here it is about 4. The
+wrist then oscillates at up to ~20 rad/s. This goes away with a realistic armature in the URDF. The sim PIDs
+are not affected, they are tuned to stay stable down to armature 0.
+
+## Position and velocity PIDs
+
+[`config/sim_pids.yaml`](config/sim_pids.yaml) has one position and one velocity PID per joint
+(`control_toolbox` gains, read by `mujoco_ros2_control` as `pid_gains.<position|velocity>.<joint>`). They act
+on the joint's `<motor>` actuator, computed in `write()` at 500 Hz on the 1 kHz physics.
+
+- **Position + velocity claimed** (joint stream, Cartesian jog): the position PID runs. `mujoco_ros2_control`
+  on its own would run the velocity PID, see [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware).
+- **Velocity only:** the velocity PID; its `i` equals the position `kp`, so it behaves like the position loop.
+- **Nothing claimed:** the position PID holds the position the joint had when its last claim was released.
+
+The gains are ζ = 1 at ω = 80 rad/s for a reference inertia per joint, checked offline against the same loop at
+random poses, with armature 0 and with the old estimates (stable up to ω = 120). If the URDF armature makes a
+joint much heavier than the estimates, retune; the file header has the formulas.
 
 ## Joint list duplication
 
 The sim has its own ros2_control block
-([`urdf/robotarm_sim.ros2_control.xacro`](urdf/robotarm_sim.ros2_control.xacro)): effort only,
-no `torque_ff`, no transmissions. The joint list therefore exists both here and in
+([`urdf/robotarm_sim.ros2_control.xacro`](urdf/robotarm_sim.ros2_control.xacro)): `position`, `velocity`
+and `effort`, no `torque_ff`, no transmissions. The joint list therefore exists both here and in
 `robotarm_description`. `test_sim_ros2_control_joints_match_the_hardware` fails if they differ.
 
 ## What the sim does and does not model
 
 It models rigid body dynamics from the CAD inertials, reflected rotor inertia, viscous and dry joint
-friction, joint limits, effort limits and self-collision. It does not model the moteus current loop
-or torque bandwidth, cogging, belt elasticity or backlash, encoder quantisation or CAN latency. The
+friction, joint limits, effort limits and self-collision. It does not model the moteus position loop
+(position/velocity go through a generic sim PID, see above), the current loop or torque bandwidth,
+cogging, belt elasticity or backlash, encoder quantisation or CAN latency. The
 controller loop runs at the configured 500 Hz against a 1 kHz physics step.
 
 ## Tests
@@ -180,10 +216,13 @@ colcon test --packages-select robotarm_mujoco && colcon test-result --verbose
 the same URDF:
 
 - joints and limits
+- the armature from the URDF `<armature>` (also with non-zero test values, since the URDF has 0 today)
 - gravity torques and the mass matrix, net of armature
 - the TCP pose
 - that pure gravity feed-forward holds a pose for 2 s
 - that the vendored MuJoCo (the version the hardware plugin runs) compiles the scene
+- the ros2_control block: same joints as the hardware, position/velocity/effort, the
+  `robotarm_mujoco_hardware` plugin, and a position and velocity PID for every joint within its effort limit
 
 `robotarm_rbd` is checked against Pinocchio in its own tests. If both pass, the simulated dynamics
 are the ones the controllers compute with.

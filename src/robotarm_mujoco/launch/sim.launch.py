@@ -2,8 +2,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, Shutdown)
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -22,6 +24,7 @@ def launch_setup(context):
     tool = LaunchConfiguration('tool').perform(context)
     headless = LaunchConfiguration('headless').perform(context)
     params_file = LaunchConfiguration('sim_params').perform(context) or None
+    pids_file = LaunchConfiguration('sim_pids').perform(context)
     # optional yaml on top of bringup's controllers.yaml, e.g. gains to try in the sim only
     controller_params = LaunchConfiguration('controller_params').perform(context)
 
@@ -41,7 +44,9 @@ def launch_setup(context):
 
     robot_description = {
         'robot_description': ParameterValue(
-            mjcf.xacro_urdf(tool, mujoco_model=scene, headless=headless), value_type=str)
+            mjcf.xacro_urdf(tool, mujoco_model=scene, headless=headless,
+                            pids_config_file=pids_file),
+            value_type=str)
     }
     sim_time = {'use_sim_time': True}
     # Mesa software OpenGL (llvmpipe) for the MuJoCo viewer and RViz: in the dev container,
@@ -68,42 +73,10 @@ def launch_setup(context):
         parameters=[robot_description, sim_time],
     )
 
-    joint_state_broadcaster_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_state_broadcaster'],
-    )
-
-    # effort only: joint stream and cartesian jog driving the hardware directly (position/velocity)
-    # cannot run in the sim, their instances chained to the impedance controller can
-    gc_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['gc_controller', '--inactive'],
-        output='screen',
-    )
-
-    cartesian_impedance_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_impedance_controller', '--inactive'],
-        output='screen',
-    )
-
-    # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
-    joint_stream_controller_impedance_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_stream_controller_impedance', '--inactive'],
-        output='screen',
-    )
-
-    cartesian_jog_controller_impedance_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_jog_controller_impedance', '--inactive'],
-        output='screen',
-    )
+    # the same controllers as on the real robot and the mock
+    controller_spawners = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_bringup, 'launch', 'controllers.launch.py')))
 
     rviz_node = Node(
         package='rviz2',
@@ -118,11 +91,7 @@ def launch_setup(context):
     return [
         control_node,
         robot_state_pub_node,
-        joint_state_broadcaster_spawner,
-        gc_controller_spawner,
-        cartesian_impedance_controller_spawner,
-        joint_stream_controller_impedance_spawner,
-        cartesian_jog_controller_impedance_spawner,
+        controller_spawners,
         rviz_node,
     ]
 
@@ -153,6 +122,11 @@ def generate_launch_description():
             'sim_params',
             default_value='',
             description='sim parameter yaml, empty: the installed config/sim_params.yaml',
+        ),
+        DeclareLaunchArgument(
+            'sim_pids',
+            default_value='',
+            description='position/velocity PID gains yaml, empty: installed config/sim_pids.yaml',
         ),
         DeclareLaunchArgument(
             'controller_params',

@@ -1061,6 +1061,27 @@ TEST_F(CartesianImpedanceTest, TorqueRateIsLimited)
     EXPECT_TRUE(limited) << "the rate limit never acted, adjust the scenario";
 }
 
+TEST_F(CartesianImpedanceTest, ZeroPeriodHoldsTheTorque)
+{
+    // in the sim, sim time can stand still for a cycle while the controller manager runs on (period 0):
+    // no time passed, so the torque must not change, and the update must not fail
+    const Eigen::VectorXd q = regular_pose();
+    start(q, make_params("impedance", {rclcpp::Parameter("torque_rise_time", 0.05)}));
+    settle();
+
+    Eigen::VectorXd q_d = q;
+    q_d[0] += 0.3;
+    set_reference(q_d);
+    const Eigen::VectorXd before = tau();
+    ASSERT_EQ(controller_->update(time_, rclcpp::Duration::from_seconds(0.0)),
+              controller_interface::return_type::OK);
+    EXPECT_EQ(tau(), before);
+
+    // the next real cycle moves again
+    ASSERT_TRUE(step(1).ok);
+    EXPECT_GT((tau() - before).cwiseAbs().maxCoeff(), 0.0);
+}
+
 TEST_F(CartesianImpedanceTest, TorqueIsClampedToScaledEffort)
 {
     const double scale = 0.25;

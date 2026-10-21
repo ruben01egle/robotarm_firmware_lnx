@@ -227,6 +227,10 @@ python3 docs/dynamics/task_space_inertia_sampling.py --tool none
 python3 docs/dynamics/task_space_inertia_sampling.py --zeta 1.1 --armature-error 0.5 2
 ```
 
+The armature comes from the URDF `<armature>` (placeholders 0 until measured). The results above were made
+with the estimates of [README.md](README.md#armature-used), pass them with
+`--armature axis1=6.48e-3 axis2=0.162 axis3=2.36e-2 axis4=2.88e-3 axis5=7.2e-4 axis6=7.2e-4`.
+
 `--zeta` defaults to `cartesian_damping_ratio` from the yaml, `--constant-damping` (6 values) sets the constant `D`
 of the comparison. Other options: `--samples`, `--sigma-regular` (threshold for the regular poses), `--site`,
 `--seed`, `--params`, `--controllers` (e.g. a copy with other stiffnesses). About 4 s for 2000 poses.

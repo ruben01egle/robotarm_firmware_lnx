@@ -19,11 +19,12 @@ D   = 2·ζ·sqrt(K·M_ii)             damping for a target ζ
 T   = M_ii / D                     decay time constant with damping only (hold slid, arm released)
 ```
 
-`M(q)` comes from `mujoco.mj_fullM`, so it already contains the reflected rotor inertia (`armature`) that
-`sim_params.yaml` adds to each joint. The same matrix can be built from `RobotarmRbd::recursive_newton_euler`
-with `q̇ = 0`, gravity off and `q̈ = e_i` (column `i`). The rbd adds the URDF `<armature>` of each joint as
+`M(q)` comes from `mujoco.mj_fullM`, so it already contains the reflected rotor inertia (`armature`) of each
+joint. The sim takes it from the URDF `<armature>`, the same value the rbd uses: the same matrix can be built
+from `RobotarmRbd::recursive_newton_euler` with `q̇ = 0`, gravity off and `q̈ = e_i` (column `i`), the rbd adds
 `armature_i·q̈_i`, so the columns already contain it on the diagonal. Note: the URDF values are placeholders (0)
-until measured, the numbers below use the `sim_params.yaml` estimates.
+until measured. The numbers below use the estimates of the table below, which the sim used to set in
+`sim_params.yaml`; to reproduce them, pass them as overrides (see [Rerun the sampling](#rerun-the-sampling)).
 
 Poses are sampled uniformly within the joint limits (2000 poses, seed 0). Some of them would self collide, so
 the min/max spread is a bit wider than in real use.
@@ -32,12 +33,12 @@ the min/max spread is a bit wider than in real use.
 
 | joint | rotor inertia | ratio | armature | source |
 |---|---|---|---|---|
-| axis1 | 1.8e-4 kg·m² | 6 | 6.5e-3 kg·m² | `sim_params.yaml`, LA8308 rotor **estimate** |
-| axis2 | 1.8e-4 kg·m² | 30 | 0.162 kg·m² | `sim_params.yaml`, LA8308 rotor **estimate** |
-| axis3 | 1.8e-4 kg·m² | 11.45 | 2.4e-2 kg·m² | `sim_params.yaml`, LA8308 rotor **estimate** |
-| axis4 | 1.8e-4 kg·m² | 4 | 2.9e-3 kg·m² | `sim_params.yaml`, LA8308 rotor **estimate** |
-| axis5 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | `sim_params.yaml`, wrist motor **estimate**, see below |
-| axis6 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | `sim_params.yaml`, wrist motor **estimate**, see below |
+| axis1 | 1.8e-4 kg·m² | 6 | 6.5e-3 kg·m² | LA8308 rotor **estimate** |
+| axis2 | 1.8e-4 kg·m² | 30 | 0.162 kg·m² | LA8308 rotor **estimate** |
+| axis3 | 1.8e-4 kg·m² | 11.45 | 2.4e-2 kg·m² | LA8308 rotor **estimate** |
+| axis4 | 1.8e-4 kg·m² | 4 | 2.9e-3 kg·m² | LA8308 rotor **estimate** |
+| axis5 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | wrist motor **estimate**, see below |
+| axis6 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | wrist motor **estimate**, see below |
 
 **Wrist differential:** both wrist motors drive both joints
 ([DifferentialTransmission.cpp](../../src/moteus_interface/src/DifferentialTransmission.cpp)):
@@ -50,8 +51,8 @@ the min/max spread is a bit wider than in real use.
 so each wrist joint sees **2·J·N²**, with no cross term. It is twice what a single motor per joint would
 give. With `J = 2.25e-5 kg·m²` (middle of 20–25 kg·mm²) and `N = 4`, that is `7.2e-4 kg·m²`. This assumes the
 1:4 sits between each motor and the differential, and the differential itself is 1:1 (`ratio` 1.0 in the
-`wrist_transmission`). `sim_params.yaml` sets it as `armature` directly, since `rotor_inertia` + `gear_ratio`
-would only give half of it.
+`wrist_transmission`). In the URDF `<armature>` it has to be this full value, `rotor_inertia · ratio²` would
+only give half of it.
 
 ## Results, no tool
 
@@ -148,5 +149,6 @@ python3 docs/dynamics/mass_matrix_sampling.py --tool none
 python3 docs/dynamics/mass_matrix_sampling.py --tool axis_triad
 ```
 
-`--armature axis5=8e-4 ...` overrides a joint's armature for what-if runs. Other options: `--samples`,
+`--armature axis5=8e-4 ...` overrides a joint's URDF armature for what-if runs. The tables above were made
+with the estimates: `--armature axis1=6.48e-3 axis2=0.162 axis3=2.36e-2 axis4=2.88e-3 axis5=7.2e-4 axis6=7.2e-4`. Other options: `--samples`,
 `--zeta 0.5 0.7 1.0`, `--rate`, `--seed`, `--params`, `--controllers`.

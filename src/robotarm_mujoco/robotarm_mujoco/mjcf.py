@@ -7,7 +7,8 @@ module only prepares the URDF for it and adds what a URDF cannot express:
 - visual and collision geoms in separate classes (visual: group 2, no contacts; collision: group 3)
 - URDF material colours on the visual geoms (the URDF compiler drops them)
 - sites for the links MuJoCo fuses into their parent (fixed joints: Base_1, flange, tcp, tool)
-- per joint armature, damping and frictionloss, and solver options, from config/sim_params.yaml
+- per joint armature, from the URDF <armature value="..."/> (MuJoCo's URDF compiler ignores it)
+- per joint damping and frictionloss, and solver options, from config/sim_params.yaml
 - one <motor> actuator per joint, named like the joint, limited to the URDF effort limit
 - a scene.xml with floor and light that includes the robot
 
@@ -41,13 +42,18 @@ def default_params_file():
     return os.path.join(share_dir(), 'config', 'sim_params.yaml')
 
 
-def xacro_urdf(tool='none', mujoco_model='', headless='false'):
-    """Return the URDF of the simulated robot, also the robot_description of the sim."""
+def xacro_urdf(tool='none', mujoco_model='', headless='false', pids_config_file=''):
+    """
+    Return the URDF of the simulated robot, also the robot_description of the sim.
+
+    pids_config_file: position/velocity PID gains, empty: the installed config/sim_pids.yaml.
+    """
     path = os.path.join(share_dir(), 'urdf', 'robotarm_sim.urdf.xacro')
     doc = xacro.process_file(path, mappings={
         'tool': tool,
         'mujoco_model': mujoco_model,
         'headless': headless,
+        'pids_config_file': pids_config_file,
     })
     return doc.toxml()
 
@@ -57,17 +63,29 @@ def load_params(path=None):
         return yaml.safe_load(f) or {}
 
 
-def joint_armature(joint_params):
-    """Return the armature of a sim_params.yaml joint: as given, or rotor_inertia * gear_ratio²."""
-    if 'armature' in joint_params:
-        if 'rotor_inertia' in joint_params or 'gear_ratio' in joint_params:
-            raise ValueError('give either armature or rotor_inertia + gear_ratio, not both')
-        return float(joint_params['armature'])
-    if 'rotor_inertia' in joint_params or 'gear_ratio' in joint_params:
-        if 'rotor_inertia' not in joint_params or 'gear_ratio' not in joint_params:
-            raise ValueError('rotor_inertia and gear_ratio must be given together')
-        return float(joint_params['rotor_inertia']) * float(joint_params['gear_ratio']) ** 2
-    return 0.0
+def urdf_armatures(urdf_root):
+    """
+    Return {joint: armature} of every revolute/prismatic URDF joint, from <armature value="..."/>.
+
+    The element is a custom one (also read by robotarm_rbd), a joint without it has no armature.
+    """
+    armatures = {}
+    for joint in urdf_root.findall('joint'):
+        if joint.get('type') not in ('revolute', 'continuous', 'prismatic'):
+            continue
+        name = joint.get('name')
+        element = joint.find('armature')
+        if element is None:
+            armatures[name] = 0.0
+            continue
+        try:
+            value = float(element.get('value'))
+        except (TypeError, ValueError):
+            value = float('nan')
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f'joint {name} has an invalid armature: {element.get("value")}')
+        armatures[name] = value
+    return armatures
 
 
 def _resolve_uri(uri):
@@ -199,19 +217,25 @@ def _add_fused_link_sites(mjcf, urdf_root):
             'name': name, 'pos': _fmt(T[:3, 3]), 'quat': _fmt(quat)})
 
 
-def _apply_joint_params(mjcf, joint_params):
+# moved to the URDF, rejected so an old sim_params.yaml does not silently lose its values
+_URDF_JOINT_PARAMS = ('armature', 'rotor_inertia', 'gear_ratio')
+
+
+def _apply_joint_params(mjcf, joint_params, armatures):
     joints = {j.get('name'): j for j in mjcf.iter('joint')}
     unknown = sorted(set(joint_params) - set(joints))
     if unknown:
         raise ValueError(f'sim_params.yaml names joints that are not in the URDF: {unknown}')
+    for name, joint in joints.items():
+        joint.set('armature', f'{armatures.get(name, 0.0):.9g}')
     for name, params in joint_params.items():
         params = params or {}
-        try:
-            armature = joint_armature(params)
-        except ValueError as e:
-            raise ValueError(f'sim_params.yaml, joint {name}: {e}') from e
+        moved = sorted(set(params) & set(_URDF_JOINT_PARAMS))
+        if moved:
+            raise ValueError(
+                f'sim_params.yaml, joint {name}: {moved} is set in the URDF now, '
+                '<armature value="..."/>')
         joint = joints[name]
-        joint.set('armature', f'{armature:.9g}')
         for key in ('damping', 'frictionloss'):
             if key in params:
                 joint.set(key, f'{float(params[key]):.9g}')
@@ -276,11 +300,12 @@ def scene_xml(mouse_stiffness=10.0):
 def urdf_to_mjcf(urdf, params):
     """Convert a URDF string to (robot MJCF, scene MJCF), the scene includes ROBOT_FILE."""
     urdf_root = _prepare_urdf(urdf)
+    armatures = urdf_armatures(urdf_root)
     mjcf = _compile_urdf(urdf_root)
 
     _add_geom_classes(mjcf, _visual_colours(urdf_root))
     _add_fused_link_sites(mjcf, urdf_root)
-    _apply_joint_params(mjcf, params.get('joints') or {})
+    _apply_joint_params(mjcf, params.get('joints') or {}, armatures)
     _add_actuators(mjcf)
     _add_options(
         mjcf, params.get('simulation') or {}, params.get('contact_exclude') or [])

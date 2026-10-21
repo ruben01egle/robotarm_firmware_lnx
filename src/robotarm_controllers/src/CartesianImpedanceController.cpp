@@ -37,6 +37,12 @@ namespace
         if (static_cast<size_t>(t.size()) != limits.size()) return false;
 
         if (rise_time <= 0) return true;
+        // no time passed (in the sim, sim time can stand still for a cycle while the controller manager runs on):
+        // the torque must not change, but that is not a rate violation
+        if (dt <= 0) {
+            t_new = t;
+            return true;
+        }
         for (Eigen::Index i = 0; i < t.size(); ++i) {
             const double max_step = limits[i].effort / rise_time * dt;
             const double t_new_i_clamped = std::clamp(t_new(i), t(i) - max_step, t(i) + max_step);

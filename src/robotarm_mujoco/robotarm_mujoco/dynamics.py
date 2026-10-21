@@ -26,23 +26,26 @@ def load_model(tool='none', params_file=None, armature=None):
     """
     Build the sim's MuJoCo model.
 
-    armature: optional {joint: kg·m²}, replaces the armature from the sim parameters.
+    armature: optional {joint: kg·m²}, replaces the armature from the URDF.
     """
-    params = mjcf.load_params(params_file)
-    joints = params.setdefault('joints', {})
-    for name, value in (armature or {}).items():
-        joints[name] = {k: v for k, v in (joints.get(name) or {}).items()
-                        if k not in ('armature', 'rotor_inertia', 'gear_ratio')}
-        joints[name]['armature'] = float(value)
-
-    robot, scene = mjcf.urdf_to_mjcf(mjcf.xacro_urdf(tool), params)
+    robot, scene = mjcf.urdf_to_mjcf(mjcf.xacro_urdf(tool), mjcf.load_params(params_file))
     out_dir = tempfile.mkdtemp()
     with open(os.path.join(out_dir, mjcf.ROBOT_FILE), 'w') as f:
         f.write(robot)
     scene_path = os.path.join(out_dir, mjcf.SCENE_FILE)
     with open(scene_path, 'w') as f:
         f.write(scene)
-    return mujoco.MjModel.from_xml_path(scene_path)
+    m = mujoco.MjModel.from_xml_path(scene_path)
+
+    for name, value in (armature or {}).items():
+        joint = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint < 0:
+            raise ValueError(f'armature override for unknown joint {name}')
+        m.dof_armature[m.jnt_dofadr[joint]] = float(value)
+    if armature:
+        # recompute what the compiler derived from the armature
+        mujoco.mj_setConst(m, mujoco.MjData(m))
+    return m
 
 
 def joint_names(m):

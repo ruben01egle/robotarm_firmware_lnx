@@ -1,0 +1,9 @@
+<library path="robotarm_mujoco_hardware">
+  <class name="robotarm_mujoco_hardware/RobotarmMujocoSystem"
+         type="robotarm_mujoco_hardware::RobotarmMujocoSystem"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      mujoco_ros2_control's MuJoCo hardware interface, position wins over velocity when both are claimed.
+    </description>
+  </class>
+</library>

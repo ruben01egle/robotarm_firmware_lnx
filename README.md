@@ -43,12 +43,13 @@ More joints and more controller options are expected as the arm grows — see
 | [`moteus_interface`](src/moteus_interface) | Native | `ros2_control` `SystemInterface` hardware plugin that drives mjbots moteus brushless controllers over CAN-FD via the official fdcanusb USB adapter, using a from-scratch transport layer built for deterministic RT cycles. **[See its own README for the full deep dive](src/moteus_interface/README.md).** |
 | [`robotarm_controllers`](src/robotarm_controllers) | Native | Custom `ros2_control` controllers. Currently ships `JointStreamController`: a reactive controller that runs incoming joint position targets through [Ruckig](https://ruckig.com/) for jerk-limited online trajectory smoothing, with a runtime speed-scale service, and `CartesianJogController`: jerk-limited Cartesian jogging of the TCP from a twist command. |
 | [`robotarm_bringup`](src/robotarm_bringup) | Native | ROS 2 launch files and `controller_manager` YAML configuration that bring the arm up, either against real hardware (`moteus_interface`) or a mocked system (`mock_components/GenericSystem`) for development without hardware attached. |
-| [`robotarm_mujoco`](src/robotarm_mujoco) | Native | MuJoCo simulation for the torque (effort) controllers: converts the URDF to a MuJoCo model on every launch and runs the controllers against `mujoco_ros2_control`. Kept separate so `robotarm_description` has no MuJoCo dependency. **[See its README](src/robotarm_mujoco/README.md).** |
+| [`robotarm_mujoco`](src/robotarm_mujoco) | Native | MuJoCo simulation, a stand-in for the real arm with the same controllers and command interfaces (effort directly, position/velocity through a generic sim PID, not a moteus model): converts the URDF to a MuJoCo model on every launch and runs the controllers against `mujoco_ros2_control`. Kept separate so `robotarm_description` has no MuJoCo dependency. **[See its README](src/robotarm_mujoco/README.md).** |
+| [`robotarm_mujoco_hardware`](src/robotarm_mujoco_hardware) | Native | The sim's `ros2_control` hardware plugin: `mujoco_ros2_control` with position winning over velocity, an idle hold like the moteus and claims kept over a world reset. **[See its README](src/robotarm_mujoco_hardware/README.md).** |
 | [`robotarm_description`](src/robotarm_description) | **Git submodule** | URDF/Xacro, the `<ros2_control>` tag definitions, and STL meshes describing the arm's kinematics and geometry — currently 6 joints (`axis1`…`axis6`, with a differential wrist on `axis5`/`axis6`) plus a selectable tool (`tool` xacro arg) that defines the TCP. The single source of truth for the robot's shape, shared with the high-level repo. |
 | [`robotarm_interface`](src/robotarm_interface) | **Git submodule** | Custom ROS 2 message/service/action definitions — interface contracts with no application logic of their own, shared between this repo and the high-level repo. Some (e.g. `SetFloat64`) are consumed here; others (`CANFDTunnel.srv`, `Mission`/`ConfigMotor`/`PlanCSV`/`PlanJointSpace`/`ReadMotorConfigs` actions) are consumed by the high-level repo rather than by anything in this one. |
 
 `robotarm_description` and `robotarm_interface` are the only two submodules; `moteus_interface`,
-`robotarm_controllers`, `robotarm_bringup`, and `robotarm_mujoco` are native to this repository.
+`robotarm_controllers`, `robotarm_bringup`, `robotarm_mujoco`, and `robotarm_mujoco_hardware` are native to this repository.
 
 ## Architecture
 
@@ -203,18 +204,25 @@ Against real hardware:
 ros2 launch robotarm_bringup robotarm_hardware.launch.py
 ```
 
-Both are thin wrappers around `robotarm.launch.py` (only `use_hardware`
-differs) and start `ros2_control_node`, `robot_state_publisher`, and spawn
-`joint_state_broadcaster`, `joint_stream_controller` and `cartesian_jog_controller`
-(the latter two inactive — activate one of them explicitly once you're ready to
+In the MuJoCo simulation (physics instead of mock joints, needed for the effort controllers; position and
+velocity follow a generic sim PID, see [`robotarm_mujoco`](src/robotarm_mujoco/README.md)):
+
+```bash
+ros2 launch robotarm_mujoco sim.launch.py
+```
+
+The first two are thin wrappers around `robotarm.launch.py` (only `use_hardware`
+differs) and start `ros2_control_node`, `robot_state_publisher`, and spawn the controllers of
+[`controllers.launch.py`](src/robotarm_bringup/launch/controllers.launch.py), which the sim spawns too:
+`joint_state_broadcaster` active, all others inactive — activate one explicitly once you're ready to
 send motion commands, e.g.
-`ros2 control switch_controllers --activate cartesian_jog_controller`). The hardware
-component (real or mock) boots disarmed and has to be activated
+`ros2 control switch_controllers --activate cartesian_jog_controller`. The hardware
+component (real, mock or sim) boots disarmed and has to be activated
 (`ros2 control set_hardware_component_state moteus_hardware_system active`). Pass `tool:=<name>` to select
 the mounted tool from `robotarm_description/urdf/tools/` (default `none`, TCP on
 the flange). VS Code users can also
 use the provided [tasks](.vscode/tasks.json): **Colcon build**, **Run Robot**,
-**Run Mock**.
+**Run Mock**, **Run Sim**.
 
 For the host-level real-time setup this needs before running reliably against
 real hardware — PREEMPT_RT kernel, BIOS power-state tuning, udev/device

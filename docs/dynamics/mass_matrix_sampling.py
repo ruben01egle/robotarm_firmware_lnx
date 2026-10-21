@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument('--params', default=SIM_PARAMS, help='sim parameter yaml (default: source tree)')
     parser.add_argument('--controllers', default=CONTROLLERS, help='controllers.yaml with the gains')
     parser.add_argument('--armature', nargs='*', default=[], metavar='JOINT=VALUE',
-                        help='kg·m², overrides the armature from the sim parameters for a joint')
+                        help='kg·m², overrides the URDF armature of a joint')
     parser.add_argument('--samples', type=int, default=2000, help='number of random poses')
     parser.add_argument('--zeta', type=float, nargs='+', default=[0.7, 1.0],
                         help='damping ratios to compute the needed damping for')

@@ -8,45 +8,29 @@ simulation:
                                   # the motors, and flings the light wrist joints between their limits
 
 # Per joint, all optional:
-#   armature      kg·m², reflected rotor inertia at the joint, used as is
-#   rotor_inertia kg·m², together with gear_ratio: armature = rotor_inertia * gear_ratio²
-#   gear_ratio    rotor turns per output turn (1 / moteus rotor_to_output_ratio)
 #   damping       Nm·s/rad, viscous joint friction (belts, bearings)
 #   frictionloss  Nm, dry joint friction. 0 is the strict setting for checking gravity compensation:
 #                 any model error shows as drift instead of being held by friction.
 #
-# LA8308 rotor inertia: about 180 kg·mm² (1.8e-4 kg·m²), ESTIMATE, consistent with a ~120 g rotor bell at
-# ~40 mm radius. No datasheet value found. Pulleys and belts are not included. Replace once measured.
+# The reflected rotor inertia (armature) is not set here: it comes from the <armature value="..."/> of each
+# joint in robotarm_description's URDF, the same value the controllers' model (robotarm_rbd) uses.
 joints:
   axis1:
-    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
-    gear_ratio: 6.0               # docs/motor_cfg: rotor_to_output_ratio 0.166667
     damping: 0.02
     frictionloss: 0.0
   axis2:
-    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
-    gear_ratio: 30.0              # docs/motor_cfg: rotor_to_output_ratio 0.033333
     damping: 0.02
     frictionloss: 0.0
   axis3:
-    rotor_inertia: 1.8e-4         # LA8308, ESTIMATE
-    gear_ratio: 11.4545           # docs/motor_cfg: rotor_to_output_ratio 0.087302
     damping: 0.02
     frictionloss: 0.0
   axis4:
-    rotor_inertia: 1.8e-4         # LA8308 (same motor as axis3), ESTIMATE
-    gear_ratio: 4.0
     damping: 0.02
     frictionloss: 0.0
-  # Wrist differential: each motor turns for both joints (rotor_a = N·(q5 + q6), rotor_b = N·(q5 − q6)),
-  # so each joint sees both rotors: armature = 2 · J_rotor · N² = 2 · 2.25e-5 · 4² = 7.2e-4.
-  # rotor_inertia + gear_ratio would only give half of that. J_rotor 20–25 kg·mm², ESTIMATE.
   axis5:
-    armature: 7.2e-4              # wrist motor, differential, see above
     damping: 0.005
     frictionloss: 0.0
   axis6:
-    armature: 7.2e-4              # wrist motor, differential, see above
     damping: 0.005
     frictionloss: 0.0
 

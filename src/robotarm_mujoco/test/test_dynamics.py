@@ -34,6 +34,11 @@ def test_armature_override_adds_to_the_diagonal(model):
     assert m_heavy[-1, -1] - m_light[-1, -1] == pytest.approx(0.5)
 
 
+def test_armature_override_of_unknown_joint_is_an_error():
+    with pytest.raises(ValueError, match='axis9'):
+        dynamics.load_model(armature={'axis9': 0.1})
+
+
 def test_gains_have_one_entry_per_joint(model):
     damping, stiffness = dynamics.load_gains()
     assert damping.shape == (model.nv,) and stiffness.shape == (model.nv,)

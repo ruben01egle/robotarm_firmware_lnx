@@ -42,6 +42,8 @@ def parse_args():
                         default=[28.0, 28.0, 28.0, 0.22, 0.22, 0.22],
                         help='constant diagonal D to compare against, N·s/m and Nm·s/rad (default: the former '
                              'cartesian_damping placeholder)')
+    parser.add_argument('--armature', nargs='*', default=[], metavar='JOINT=VALUE',
+                        help='kg·m², overrides the URDF armature of a joint (the plant and the nominal model)')
     parser.add_argument('--armature-error', type=float, nargs='*', default=[0.5, 2.0],
                         help='factors on the armature in the controller model (the plant keeps the nominal one)')
     parser.add_argument('--sigma-regular', type=float, default=0.05,
@@ -104,7 +106,8 @@ def pct(x, p):
 
 def main():
     args = parse_args()
-    m = load_model(args.tool, args.params)
+    armature = dict((name, float(value)) for name, _, value in (a.partition('=') for a in args.armature))
+    m = load_model(args.tool, args.params, armature)
     d = mujoco.MjData(m)
     site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, args.site)
     lo, hi = m.jnt_range[:, 0], m.jnt_range[:, 1]

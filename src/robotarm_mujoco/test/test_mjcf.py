@@ -18,6 +18,7 @@ import pinocchio as pin
 import pytest
 from robotarm_mujoco import mjcf
 import xacro
+import yaml
 
 N_SAMPLES = 20
 # mj_saveLastXML writes 6 significant digits, so the MJCF matches the URDF to about 1e-6 relative
@@ -82,13 +83,53 @@ def test_one_motor_per_joint_at_the_effort_limit(sim):
     np.testing.assert_allclose(sim.m.actuator_gear[:, 0], 1.0)
 
 
-def test_armature_from_params(sim):
-    joints = sim.params['joints']
-    expected = [mjcf.joint_armature(joints.get(n) or {}) for n in sim.joint_names()]
-    np.testing.assert_allclose(sim.m.dof_armature, expected)
-    axis2 = joints['axis2']
-    expected_axis2 = axis2['rotor_inertia'] * axis2['gear_ratio'] ** 2
-    assert sim.m.dof_armature[1] == pytest.approx(expected_axis2)
+def test_armature_from_urdf(sim):
+    armatures = mjcf.urdf_armatures(ET.fromstring(sim.urdf))
+    np.testing.assert_allclose(sim.m.dof_armature, [armatures[n] for n in sim.joint_names()])
+
+
+def with_armatures(urdf, armatures):
+    """Return the URDF with <armature> set to the given {joint: value}, others unchanged."""
+    root = ET.fromstring(urdf)
+    for joint in root.findall('joint'):
+        if joint.get('name') in armatures:
+            for element in joint.findall('armature'):
+                joint.remove(element)
+            ET.SubElement(joint, 'armature', {'value': str(armatures[joint.get('name')])})
+    return ET.tostring(root, encoding='unicode')
+
+
+def compile_robot(robot):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, mjcf.ROBOT_FILE)
+        with open(path, 'w') as f:
+            f.write(robot)
+        return mujoco.MjModel.from_xml_path(path)
+
+
+def test_nonzero_urdf_armature_reaches_the_model():
+    # the real URDF still has 0 everywhere, so set distinct values to see each one arrive
+    values = {f'axis{i}': 0.01 * i for i in range(1, 7)}
+    robot, _ = mjcf.urdf_to_mjcf(with_armatures(mjcf.xacro_urdf(), values), mjcf.load_params())
+    m = compile_robot(robot)
+    names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(m.njnt)]
+    np.testing.assert_allclose(m.dof_armature, [values[n] for n in names])
+
+
+def test_joint_without_armature_element_has_none():
+    root = ET.fromstring(mjcf.xacro_urdf())
+    for joint in root.findall('joint'):
+        for element in joint.findall('armature'):
+            joint.remove(element)
+    robot, _ = mjcf.urdf_to_mjcf(ET.tostring(root, encoding='unicode'), mjcf.load_params())
+    np.testing.assert_allclose(compile_robot(robot).dof_armature, 0.0)
+
+
+@pytest.mark.parametrize('value', ['-0.1', 'nan', 'abc'])
+def test_invalid_urdf_armature_is_an_error(value):
+    urdf = with_armatures(mjcf.xacro_urdf(), {'axis2': value})
+    with pytest.raises(ValueError, match='axis2'):
+        mjcf.urdf_to_mjcf(urdf, mjcf.load_params())
 
 
 def test_gravity_torques_match_pinocchio(sim):
@@ -192,14 +233,49 @@ def test_sim_ros2_control_joints_match_the_hardware():
     assert simulated == hardware
     sim_root = ET.fromstring(mjcf.xacro_urdf())
     for joint in sim_root.find('ros2_control').findall('joint'):
-        assert [c.get('name') for c in joint.findall('command_interface')] == ['effort']
+        commands = [c.get('name') for c in joint.findall('command_interface')]
+        assert commands == ['position', 'velocity', 'effort']
+
+
+def test_sim_runs_the_position_wins_plugin():
+    plugin = ET.fromstring(mjcf.xacro_urdf()).find('ros2_control/hardware/plugin').text
+    assert plugin == 'robotarm_mujoco_hardware/RobotarmMujocoSystem'
+
+
+def test_sim_pids_cover_every_joint_within_the_effort_limit():
+    # a joint without a PID cannot take position/velocity commands, and without a velocity PID
+    # the hardware writes the raw velocity command as a torque
+    path = os.path.join(mjcf.share_dir(), 'config', 'sim_pids.yaml')
+    with open(path) as f:
+        pids = yaml.safe_load(f)['/**']['ros__parameters']['pid_gains']
+    root = ET.fromstring(mjcf.xacro_urdf())
+    effort = {j.get('name'): float(j.find('limit').get('effort'))
+              for j in root.findall('joint') if j.find('limit') is not None}
+    for kind in ('position', 'velocity'):
+        assert sorted(pids[kind]) == sorted(ros2_control_joints(mjcf.xacro_urdf())), kind
+        for joint, gains in pids[kind].items():
+            assert gains['p'] > 0, (kind, joint)
+            for key in ('i_clamp_max', 'u_clamp_max'):
+                assert 0 < gains[key] <= effort[joint], (kind, joint, key)
+                assert gains[key.replace('max', 'min')] == -gains[key], (kind, joint, key)
 
 
 def test_robot_description_carries_the_model_path():
     urdf = mjcf.xacro_urdf(mujoco_model='/some/scene.xml', headless='true')
     hardware = ET.fromstring(urdf).find('ros2_control/hardware')
     params = {p.get('name'): p.text for p in hardware.findall('param')}
-    assert params == {'mujoco_model': '/some/scene.xml', 'headless': 'true'}
+    assert params == {
+        'mujoco_model': '/some/scene.xml',
+        'headless': 'true',
+        'pids_config_file': os.path.join(mjcf.share_dir(), 'config', 'sim_pids.yaml'),
+    }
+
+
+def test_pids_config_file_can_be_replaced():
+    urdf = mjcf.xacro_urdf(pids_config_file='/my/pids.yaml')
+    hardware = ET.fromstring(urdf).find('ros2_control/hardware')
+    params = {p.get('name'): p.text for p in hardware.findall('param')}
+    assert params['pids_config_file'] == '/my/pids.yaml'
 
 
 def test_unknown_joint_in_params_is_an_error():
@@ -207,17 +283,8 @@ def test_unknown_joint_in_params_is_an_error():
         mjcf.urdf_to_mjcf(mjcf.xacro_urdf(), {'joints': {'axis9': {'damping': 1.0}}})
 
 
-@pytest.mark.parametrize('joint_params', [
-    {'armature': 0.1, 'rotor_inertia': 1e-4, 'gear_ratio': 10.0},
-    {'rotor_inertia': 1e-4},
-    {'gear_ratio': 10.0},
-])
-def test_inconsistent_armature_params_are_an_error(joint_params):
-    with pytest.raises(ValueError):
-        mjcf.joint_armature(joint_params)
-
-
-def test_armature_from_rotor_inertia_and_ratio():
-    assert mjcf.joint_armature({'rotor_inertia': 2e-4, 'gear_ratio': 10.0}) == pytest.approx(0.02)
-    assert mjcf.joint_armature({'armature': 0.3}) == 0.3
-    assert mjcf.joint_armature({}) == 0.0
+@pytest.mark.parametrize('key', ['armature', 'rotor_inertia', 'gear_ratio'])
+def test_armature_in_params_is_an_error(key):
+    # moved to the URDF, an old sim_params.yaml must not silently lose its values
+    with pytest.raises(ValueError, match='URDF'):
+        mjcf.urdf_to_mjcf(mjcf.xacro_urdf(), {'joints': {'axis2': {key: 1e-3}}})

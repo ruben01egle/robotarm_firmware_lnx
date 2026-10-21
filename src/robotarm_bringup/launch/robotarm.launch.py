@@ -2,7 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -57,63 +58,12 @@ def generate_launch_description():
         parameters=[robot_description],
     )
 
-    joint_state_broadcaster_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_state_broadcaster'],
-    )
-
-    joint_stream_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_stream_controller', '--inactive'],
-        output='screen'
-    )
-
-    cartesian_jog_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_jog_controller', '--inactive'],
-        output='screen'
-    )
-
-    gc_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['gc_controller', '--inactive'],
-        output='screen'
-    )
-
-    cartesian_impedance_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_impedance_controller', '--inactive'],
-        output='screen'
-    )
-
-    # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
-    joint_stream_controller_impedance_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_stream_controller_impedance', '--inactive'],
-        output='screen'
-    )
-
-    cartesian_jog_controller_impedance_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_jog_controller_impedance', '--inactive'],
-        output='screen'
-    )
+    controller_spawners = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_bringup, 'launch', 'controllers.launch.py')))
 
     return LaunchDescription(declared_arguments + [
         control_node,
         robot_state_pub_node,
-        joint_state_broadcaster_spawner,
-        joint_stream_controller_spawner,
-        cartesian_jog_controller_spawner,
-        gc_controller_spawner,
-        cartesian_impedance_controller_spawner,
-        joint_stream_controller_impedance_spawner,
-        cartesian_jog_controller_impedance_spawner,
+        controller_spawners,
     ])

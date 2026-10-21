@@ -3,7 +3,7 @@
 <package format="3">
   <name>robotarm_mujoco</name>
   <version>0.0.0</version>
-  <description>MuJoCo simulation of the robotarm: URDF to MJCF conversion and a ros2_control bringup with effort interfaces</description>
+  <description>MuJoCo simulation of the robotarm: URDF to MJCF conversion and a ros2_control bringup with position, velocity and effort interfaces</description>
   <maintainer email="ruben01egle@gmail.com">root</maintainer>
   <license>TODO: License declaration</license>
 
@@ -19,6 +19,7 @@
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>mujoco_ros2_control</exec_depend>
+  <exec_depend>robotarm_mujoco_hardware</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>robotarm_bringup</exec_depend>
   <exec_depend>robotarm_controllers</exec_depend>
