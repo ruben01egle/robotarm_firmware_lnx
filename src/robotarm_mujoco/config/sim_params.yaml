@@ -1,0 +1,39 @@
+# Hand-tuned simulation parameters, merged by robotarm_mjcf into the MJCF converted from the URDF.
+# Everything the URDF cannot express lives here, so regenerating from a new URDF keeps the tuning.
+
+simulation:
+  timestep: 0.001                 # s, physics step (controller_manager runs at 500 Hz)
+  integrator: implicitfast        # implicit in joint damping, stable with stiff impedance gains
+  mouse_stiffness: 10.0           # viewer drag spring. MuJoCo's default 100 pulls with hundreds of N, far beyond
+                                  # the motors, and flings the light wrist joints between their limits
+
+# Per joint, all optional:
+#   damping       Nm·s/rad, viscous joint friction (belts, bearings)
+#   frictionloss  Nm, dry joint friction. 0 is the strict setting for checking gravity compensation:
+#                 any model error shows as drift instead of being held by friction.
+#
+# The reflected rotor inertia (armature) is not set here: it comes from the <armature value="..."/> of each
+# joint in robotarm_description's URDF, the same value the controllers' model (robotarm_rbd) uses.
+joints:
+  axis1:
+    damping: 0.02
+    frictionloss: 0.0
+  axis2:
+    damping: 0.02
+    frictionloss: 0.0
+  axis3:
+    damping: 0.02
+    frictionloss: 0.0
+  axis4:
+    damping: 0.02
+    frictionloss: 0.0
+  axis5:
+    damping: 0.005
+    frictionloss: 0.0
+  axis6:
+    damping: 0.005
+    frictionloss: 0.0
+
+# Body pairs (MuJoCo body = URDF link with a moving joint) whose collision meshes must not collide.
+# Parent/child pairs, and the base against the first link, are excluded automatically.
+contact_exclude: []

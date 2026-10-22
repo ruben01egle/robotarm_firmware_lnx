@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!-- The robotarm for the MuJoCo simulation: geometry and tool from robotarm_description, ros2_control from
+     robotarm_sim.ros2_control.xacro. robotarm_mjcf converts this same file, so the robot_description and the
+     simulated model always come from one URDF. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robotarm">
+
+  <!-- file name in robotarm_description/urdf/tools/ without .xacro; "none" puts the tcp on the flange -->
+  <xacro:arg name="tool" default="none" />
+  <!-- MJCF scene loaded by the hardware interface, written by robotarm_mjcf (sim.launch.py sets it) -->
+  <xacro:arg name="mujoco_model" default="" />
+  <xacro:arg name="headless" default="false" />
+  <!-- position/velocity PID gains of the sim, empty: the installed config/sim_pids.yaml -->
+  <xacro:arg name="pids_config_file" default="" />
+
+  <xacro:include filename="$(find robotarm_description)/urdf/robotarm_geometry.xacro" />
+  <xacro:include filename="$(find robotarm_description)/urdf/tools/$(arg tool).xacro" />
+  <xacro:include filename="$(find robotarm_mujoco)/urdf/robotarm_sim.ros2_control.xacro" />
+
+  <xacro:property name="default_pids" value="$(find robotarm_mujoco)/config/sim_pids.yaml" />
+
+  <xacro:robotarm_geometry />
+  <xacro:tool parent="flange" />
+
+  <!-- same component name as the real hardware, so robotarm_bringup's controllers.yaml applies unchanged -->
+  <xacro:robotarm_sim_ros2_control name="moteus_hardware_system"
+      mujoco_model="$(arg mujoco_model)" headless="$(arg headless)"
+      pids_config_file="${default_pids if '$(arg pids_config_file)' == '' else '$(arg pids_config_file)'}" />
+
+</robot>

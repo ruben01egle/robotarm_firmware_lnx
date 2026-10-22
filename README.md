@@ -11,7 +11,7 @@ controllers over CAN-FD, and is responsible for:
 
 - Driving the moteus controllers as ROS 2 `ros2_control` joints at a fixed,
   configurable update rate.
-- Running the reactive, joint-space teleop controller that turns raw position
+- Running the reactive, joint-space stream controller that turns raw position
   targets into jerk-limited motion.
 - Booting and operating **independently of any higher-level system** — it loads
   its own copy of the robot's URDF and does not require a network connection or a
@@ -27,7 +27,8 @@ This repo is for anyone building or maintaining the actual hardware-interfacing
 firmware: the `ros2_control` hardware plugin, the motion controllers, and the
 launch/config that brings them up on the real-time PC.
 
-**Current state:** the arm has 6 configured joints (`axis1` … `axis6`), but nothing here is hardcoded to that number — `moteus_interface`,
+**Current state:** the arm currently has 3 configured joints (`axis1`/`axis2`/
+`axis3`), but nothing here is hardcoded to that number — `moteus_interface`,
 `robotarm_controllers`, and `robotarm_bringup` are all written generically
 against whatever joints are declared in the URDF and config. Adding an axis is
 meant to be a matter of adding a joint to `robotarm_description`'s URDF/Xacro and
@@ -40,13 +41,15 @@ More joints and more controller options are expected as the arm grows — see
 | Package | Type | Role |
 |---|---|---|
 | [`moteus_interface`](src/moteus_interface) | Native | `ros2_control` `SystemInterface` hardware plugin that drives mjbots moteus brushless controllers over CAN-FD via the official fdcanusb USB adapter, using a from-scratch transport layer built for deterministic RT cycles. **[See its own README for the full deep dive](src/moteus_interface/README.md).** |
-| [`robotarm_controllers`](src/robotarm_controllers) | Native | Custom `ros2_control` controllers. Currently ships `TeleopController`: a reactive controller that runs incoming joint position targets through [Ruckig](https://ruckig.com/) for jerk-limited online trajectory smoothing, with a runtime speed-scale service, and `CartesianJogController`: jerk-limited Cartesian jogging of the TCP from a twist command. |
+| [`robotarm_controllers`](src/robotarm_controllers) | Native | Custom `ros2_control` controllers. Currently ships `JointStreamController`: a reactive controller that runs incoming joint position targets through [Ruckig](https://ruckig.com/) for jerk-limited online trajectory smoothing, with a runtime speed-scale service, and `CartesianJogController`: jerk-limited Cartesian jogging of the TCP from a twist command. |
 | [`robotarm_bringup`](src/robotarm_bringup) | Native | ROS 2 launch files and `controller_manager` YAML configuration that bring the arm up, either against real hardware (`moteus_interface`) or a mocked system (`mock_components/GenericSystem`) for development without hardware attached. |
+| [`robotarm_mujoco`](src/robotarm_mujoco) | Native | MuJoCo simulation, a stand-in for the real arm with the same controllers and command interfaces (effort directly, position/velocity through a generic sim PID, not a moteus model): converts the URDF to a MuJoCo model on every launch and runs the controllers against `mujoco_ros2_control`. Kept separate so `robotarm_description` has no MuJoCo dependency. **[See its README](src/robotarm_mujoco/README.md).** |
+| [`robotarm_mujoco_hardware`](src/robotarm_mujoco_hardware) | Native | The sim's `ros2_control` hardware plugin: `mujoco_ros2_control` with position winning over velocity, an idle hold like the moteus and claims kept over a world reset. **[See its README](src/robotarm_mujoco_hardware/README.md).** |
 | [`robotarm_description`](src/robotarm_description) | **Git submodule** | URDF/Xacro, the `<ros2_control>` tag definitions, and STL meshes describing the arm's kinematics and geometry — currently 6 joints (`axis1`…`axis6`, with a differential wrist on `axis5`/`axis6`) plus a selectable tool (`tool` xacro arg) that defines the TCP. The single source of truth for the robot's shape, shared with the high-level repo. |
 | [`robotarm_interface`](src/robotarm_interface) | **Git submodule** | Custom ROS 2 message/service/action definitions — interface contracts with no application logic of their own, shared between this repo and the high-level repo. Some (e.g. `SetFloat64`) are consumed here; others (`CANFDTunnel.srv`, `Mission`/`ConfigMotor`/`PlanCSV`/`PlanJointSpace`/`ReadMotorConfigs` actions) are consumed by the high-level repo rather than by anything in this one. |
 
 `robotarm_description` and `robotarm_interface` are the only two submodules; `moteus_interface`,
-`robotarm_controllers`, and `robotarm_bringup` are native to this repository.
+`robotarm_controllers`, `robotarm_bringup`, `robotarm_mujoco`, and `robotarm_mujoco_hardware` are native to this repository.
 
 ## Architecture
 
@@ -59,7 +62,7 @@ graph TD
     subgraph repo["This repository — runs on the real-time Linux PC"]
         bringup["robotarm_bringup<br/>(launch files + controller_manager YAML)"]
         cm[["ros2_control controller_manager<br/>fixed-rate RT loop"]]
-        teleop["robotarm_controllers<br/>TeleopController"]
+        jointstream["robotarm_controllers<br/>JointStreamController"]
         cjog["robotarm_controllers<br/>CartesianJogController"]
         jsb["joint_state_broadcaster<br/>(stock ros2_controllers package)"]
         hwi["moteus_interface<br/>MoteusInterface SystemInterface"]
@@ -75,11 +78,11 @@ graph TD
     core -. "ROS 2 topics/services over DDS<br/>(/joint_states, ~/commands, ...)" .-> cm
     bringup -->|spawns & configures| cm
     bringup -->|parses locally| desc
-    cm --> teleop
+    cm --> jointstream
     cm --> cjog
     cm --> jsb
     cm --> hwi
-    teleop -. "robotarm_interface/srv/SetFloat64" .-> iface
+    jointstream -. "robotarm_interface/srv/SetFloat64" .-> iface
     hwi -- "CAN-FD via fdcanusb" --> moteus
 ```
 
@@ -103,13 +106,13 @@ graph TD
   specific rate — both are driven entirely by this configuration.
 - **The `controller_manager` runs at a fixed, configurable rate** with three
   phases each cycle: `read()` on `moteus_interface` fetches the latest encoder/
-  telemetry state, active controllers (`TeleopController`,
+  telemetry state, active controllers (`JointStreamController`,
   `joint_state_broadcaster`) compute new setpoints from it, then `write()` sends
   those setpoints back out over CAN-FD.
 - **Hardware starts disarmed.** `moteus_hardware_system` boots `INACTIVE`
   (`hardware_components_initial_state` in `controllers.yaml`); `read()` still runs
   every cycle so telemetry/`joint_states` are available immediately, but
-  `TeleopController` only drives real setpoints once the hardware and controller
+  `JointStreamController` only drives real setpoints once the hardware and controller
   are explicitly activated. See `moteus_interface`'s own README for the full
   `on_configure`/`on_activate`/`on_deactivate` lifecycle and its fault/watchdog
   behavior — that detail isn't duplicated here.
@@ -130,7 +133,7 @@ graph TD
 
 **Controllers (`ros2_control::ControllerInterface`):**
 
-- `robotarm_controllers/TeleopController` — subscribes to `~/commands`
+- `robotarm_controllers/JointStreamController` — subscribes to `~/commands`
   (`std_msgs/Float64MultiArray`, raw per-joint position targets), runs them
   through Ruckig for jerk-limited smoothing, and outputs `position`+`velocity`
   commands. Exposes a `~/scale_speed` service
@@ -143,20 +146,17 @@ graph TD
   drift correction, slows down in front of joint position/velocity limits and
   stops on excessive tracking error. Outputs `position`+`velocity` commands for
   **all** joints (taken from the URDF), so it is mutually exclusive with
-  `teleop_controller`.
+  `joint_stream_controller`.
 - `joint_state_broadcaster` (stock `ros2_controllers` package) — publishes
   `/joint_states` at a configurable rate.
 
 - `joint_trajectory_controller` (stock `ros2_controllers` package) — executes
   joint trajectories received on the `~/follow_joint_trajectory` action
   (`control_msgs/action/FollowJointTrajectory`), e.g. planned by MoveIt on the
-  high-level PC. Claims `position`+`velocity` like `TeleopController` and
-  `CartesianJogController`, so only one of the three can be active. Aborts a
-  goal if the tracking error exceeds the `constraints` in `controllers.yaml`.
-
-`TeleopController`, `CartesianJogController` and `joint_trajectory_controller`
-are spawned inactive and are activated by the high-level PC (control_center)
-when a mission starts.
+  high-level PC. Outputs `position`+`velocity` like `joint_stream_controller`
+  and `cartesian_jog_controller`, so only one of the three can be active. Aborts
+  a goal if the tracking error exceeds the `constraints` in `controllers.yaml`.
+  Activated by the high-level PC (control_center) for a mission, like the others.
 
 ## Usage / Getting Started
 
@@ -207,18 +207,25 @@ Against real hardware:
 ros2 launch robotarm_bringup robotarm_hardware.launch.py
 ```
 
-Both are thin wrappers around `robotarm.launch.py` (only `use_hardware`
-differs) and start `ros2_control_node`, `robot_state_publisher`, and spawn
-`joint_state_broadcaster`, `teleop_controller`, `cartesian_jog_controller` and
-`joint_trajectory_controller` (the latter three inactive — activate one of them explicitly once you're ready to
+In the MuJoCo simulation (physics instead of mock joints, needed for the effort controllers; position and
+velocity follow a generic sim PID, see [`robotarm_mujoco`](src/robotarm_mujoco/README.md)):
+
+```bash
+ros2 launch robotarm_mujoco sim.launch.py
+```
+
+The first two are thin wrappers around `robotarm.launch.py` (only `use_hardware`
+differs) and start `ros2_control_node`, `robot_state_publisher`, and spawn the controllers of
+[`controllers.launch.py`](src/robotarm_bringup/launch/controllers.launch.py), which the sim spawns too:
+`joint_state_broadcaster` active, all others inactive — activate one explicitly once you're ready to
 send motion commands, e.g.
-`ros2 control switch_controllers --activate cartesian_jog_controller`). The hardware
-component (real or mock) boots disarmed and has to be activated
+`ros2 control switch_controllers --activate cartesian_jog_controller`. The hardware
+component (real, mock or sim) boots disarmed and has to be activated
 (`ros2 control set_hardware_component_state moteus_hardware_system active`). Pass `tool:=<name>` to select
 the mounted tool from `robotarm_description/urdf/tools/` (default `none`, TCP on
 the flange). VS Code users can also
 use the provided [tasks](.vscode/tasks.json): **Colcon build**, **Run Robot**,
-**Run Mock**.
+**Run Mock**, **Run Sim**.
 
 For the host-level real-time setup this needs before running reliably against
 real hardware — PREEMPT_RT kernel, BIOS power-state tuning, udev/device
@@ -238,7 +245,9 @@ permissions for the fdcanusb adapter, Docker RT runtime flags — see
   latency (produced by its `time_transport` option).
 - **[docs/motor_cfg/](docs/motor_cfg/)** — per-axis moteus controller register
   configuration dumps (`axis1`/`axis2`/`axis3`), kept as a backup/reference of
-  each controller's calibrated configuration.
+  each controller's calibrated configuration. Its
+  **[README](docs/motor_cfg/README.md)** is the setup guide: which values are set
+  for this robot, their units, and why.
 
 ## Status / Roadmap
 
@@ -254,10 +263,10 @@ carries several honest rough edges:
   (official mjbots fdcanusb only, no SocketCAN), no retry/checksum logic, and a
   project-specific secondary-encoder homing workaround. Details and caveats are
   in its own README.
-- **Three motion controllers exist today**: `TeleopController` and
-  `CartesianJogController` (reactive) and the stock `joint_trajectory_controller`
-  (MoveIt trajectories); more controller options are planned as the project
-  develops.
+- **Motion controllers today**: the reactive `JointStreamController` and
+  `CartesianJogController`, the Cartesian impedance / gravity compensation
+  controllers, and the stock `joint_trajectory_controller` for MoveIt
+  trajectories; more controller options are planned as the project develops.
 - **Joint count is a current-state fact, not a design limit.** The arm has 6
   configured joints today; `moteus_interface`, `robotarm_controllers`, and
   `robotarm_bringup` are all written to be driven by whatever's declared in the

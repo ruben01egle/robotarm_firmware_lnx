@@ -2,7 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -57,39 +58,12 @@ def generate_launch_description():
         parameters=[robot_description],
     )
 
-    joint_state_broadcaster_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_state_broadcaster'],
-    )
-
-    teleop_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['teleop_controller', '--inactive'],
-        output='screen'
-    )
-
-    cartesian_jog_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['cartesian_jog_controller', '--inactive'],
-        output='screen'
-    )
-
-    # MoveIt trajectory execution; inactive until control_center activates it for a mission
-    joint_trajectory_controller_spawner = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['joint_trajectory_controller', '--inactive'],
-        output='screen'
-    )
+    controller_spawners = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_bringup, 'launch', 'controllers.launch.py')))
 
     return LaunchDescription(declared_arguments + [
         control_node,
         robot_state_pub_node,
-        joint_state_broadcaster_spawner,
-        teleop_controller_spawner,
-        cartesian_jog_controller_spawner,
-        joint_trajectory_controller_spawner,
+        controller_spawners,
     ])

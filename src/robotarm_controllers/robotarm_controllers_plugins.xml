@@ -1,9 +1,9 @@
 <library path="robotarm_controllers">
-  <class name="robotarm_controllers/TeleopController" 
-         type="teleop_controller::TeleopController" 
+  <class name="robotarm_controllers/JointStreamController" 
+         type="joint_stream_controller::JointStreamController" 
          base_class_type="controller_interface::ControllerInterface">
     <description>
-      Reactive controller for smooth teleop.
+      Reactive controller that smoothly follows a stream of joint position targets.
     </description>
   </class>
 
@@ -12,6 +12,14 @@
          base_class_type="controller_interface::ControllerInterface">
     <description>
       Cartesian joint jogging and position increments.
+    </description>
+  </class>
+
+  <class name="robotarm_controllers/CartesianImpedanceController" 
+         type="cartesian_impedance_controller::CartesianImpedanceController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      Cartesian Impedance Control and Gravity Compensation.
     </description>
   </class>
 </library>

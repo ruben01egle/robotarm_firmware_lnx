@@ -47,6 +47,7 @@
 #include "robotarm_controllers/CartesianJogController.hpp"
 
 #include "malloc_counter.hpp"
+#include "test_helpers.hpp"
 
 namespace
 {
@@ -60,30 +61,9 @@ using hardware_interface::StateInterface;
 constexpr unsigned int update_rate = 1000;
 constexpr char controller_name[] = "cartesian_jog_controller";
 
-// URDF of the real robot, processed by xacro (same as robotarm_rbd/test/real_urdf.hpp, whose test
-// directory is not installed)
-std::string real_urdf()
-{
-    static const std::string cached = [] {
-        const std::string share = ament_index_cpp::get_package_share_directory("robotarm_description");
-        const std::string cmd = "xacro '" + share + "/urdf/robotarm.urdf.xacro' 2>/dev/null";
-        FILE * pipe = popen(cmd.c_str(), "r");
-        if (!pipe) {
-            throw std::runtime_error("cannot run xacro");
-        }
-        std::string out;
-        char buf[4096];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), pipe)) > 0) {
-            out.append(buf, n);
-        }
-        if (pclose(pipe) != 0 || out.empty()) {
-            throw std::runtime_error("xacro failed on " + share + "/urdf/robotarm.urdf.xacro");
-        }
-        return out;
-    }();
-    return cached;
-}
+using test_helpers::LogAllocationExclusion;
+using test_helpers::LogMarkerCounter;
+using test_helpers::real_urdf;
 
 // empty frame_id is the base frame
 TwistStamped make_twist(double vx, double vy, double vz, double wx, double wy, double wz,
@@ -119,65 +99,6 @@ CartesianIncrement make_increment(double dx, double dy, double dz, double rx, do
     inc.angular.z = rz;
     return inc;
 }
-
-// Wraps the installed log output handler and pauses the allocation counter while it runs, see the
-// file comment. Installed once in main(), after rclcpp::init() has set up the logging backend.
-class LogAllocationExclusion
-{
-public:
-    static void install()
-    {
-        previous_ = rcutils_logging_get_output_handler();
-        rcutils_logging_set_output_handler(&LogAllocationExclusion::handler);
-    }
-
-private:
-    static void handler(
-        const rcutils_log_location_t * location, int severity, const char * name,
-        rcutils_time_point_value_t timestamp, const char * format, va_list * args)
-    {
-        malloc_counter::ScopedPause pause;
-        if (previous_) {
-            previous_(location, severity, name, timestamp, format, args);
-        }
-    }
-
-    static inline rcutils_logging_output_handler_t previous_ = nullptr;
-};
-
-// Counts log messages whose format string contains a marker and forwards everything to the handler
-// that was installed before. Forwarding keeps the real logging backend inside the measured window.
-class LogMarkerCounter
-{
-public:
-    explicit LogMarkerCounter(const char * marker)
-    {
-        marker_ = marker;
-        hits_ = 0;
-        previous_ = rcutils_logging_get_output_handler();
-        rcutils_logging_set_output_handler(&LogMarkerCounter::handler);
-    }
-    ~LogMarkerCounter() {rcutils_logging_set_output_handler(previous_);}
-
-    int hits() const {return hits_.load();}
-
-private:
-    static void handler(
-        const rcutils_log_location_t * location, int severity, const char * name,
-        rcutils_time_point_value_t timestamp, const char * format, va_list * args)
-    {
-        if (format && std::strstr(format, marker_)) {
-            ++hits_;
-        }
-        if (previous_) {
-            previous_(location, severity, name, timestamp, format, args);
-        }
-    }
-
-    static inline const char * marker_ = nullptr;
-    static inline std::atomic<int> hits_{0};
-    static inline rcutils_logging_output_handler_t previous_ = nullptr;
-};
 
 struct StepResult
 {
@@ -351,8 +272,7 @@ protected:
 
     static std::pair<std::string, std::string> split(const std::string & full)
     {
-        const size_t slash = full.rfind('/');
-        return {full.substr(0, slash), full.substr(slash + 1)};
+        return test_helpers::split_interface_name(full);
     }
 
     // a regular pose away from singularities and joint limits
@@ -583,6 +503,9 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
     // Close to the wrist singularity (axis5 = 0) the joint velocities from the damped inverse grow
     // quickly. With high cartesian limits ruckig cannot follow the pre-scaled target fast enough,
     // the joint space scaling in update() kicks in and logs "Joint space clipping" (throttled).
+    // the throttle state is per call site and process wide: an earlier test that clipped (e.g. the
+    // frame switch) suppresses the log for 1 s, wait it out so the marker below can be seen
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     std::vector<double> q0 = regular_pose();
     q0[4] = 0.15;
     start(q0, {
@@ -615,8 +538,9 @@ TEST_F(CartesianJogRtAllocTest, JointVelocityClippingDoesNotAllocate)
 }
 
 // Distances of increment runs are checked to 1 %: x_ref advances by the twist the damped inverse
-// realizes (J·J⁺·dx_ff), which falls short of the step by ~0.5 % in regular_pose() with lambda = 0.01
-// (with lambda = 0.001 it is below 1e-5 relative).
+// realizes (J·J⁺·dx_ff). With jinv_method = svd all singular values in regular_pose() are above
+// √2·λ, so nothing is damped and J·J⁺ = I. With ldlt and lambda = 0.01 it falls short of the step
+// by ~0.5 % (with lambda = 0.001 below 1e-5 relative), the tolerance covers both.
 constexpr double inc_tol = 0.01;
 
 TEST_F(CartesianJogRtAllocTest, IncrementRunDoesNotAllocate)
