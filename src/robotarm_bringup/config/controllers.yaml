@@ -101,8 +101,8 @@ joint_stream_controller:
       - axis5
       - axis6
     max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
-    max_acceleration: 4.0
-    max_jerk: 10.0
+    max_acceleration: 8.0
+    max_jerk: 50.0
     sync_joints: false
 
 joint_stream_controller_impedance:

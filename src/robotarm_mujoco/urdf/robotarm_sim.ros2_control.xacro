@@ -1,8 +1,7 @@
 <?xml version="1.0"?>
 <!-- ros2_control block of the MuJoCo simulation. Each joint is driven by the MJCF <motor> actuator of the same name:
-     effort goes to it directly, position and velocity through the sim PIDs of config/sim_pids.yaml (a generic PID,
-     not a model of the moteus position loop). Position wins when a controller claims position and velocity, see
-     robotarm_mujoco_hardware. The joint list duplicates robotarm_description/urdf/robotarm.ros2_control.xacro,
+     effort goes to it directly, position and velocity through the servo of robotarm_mujoco_hardware with the gains
+     of config/sim_pids.yaml (a generic servo, not a model of the moteus position loop). The joint list duplicates robotarm_description/urdf/robotarm.ros2_control.xacro,
      test_mjcf.py checks that both stay equal. No torque_ff (moteus only, it only improves tracking) and no
      transmissions: MuJoCo drives axis5/axis6 directly. -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">

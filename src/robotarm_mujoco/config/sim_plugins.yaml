@@ -8,3 +8,7 @@ mujoco_ros2_control_node:
       # description says world frame.
       external_wrench:
         type: "mujoco_ros2_control_plugins/ExternalWrenchPlugin"
+      # position/velocity servo of the robotarm_mujoco_hardware plugin, runs before every physics step.
+      # Required: the hardware plugin refuses to start without it.
+      robotarm_servo:
+        type: "robotarm_mujoco_hardware/ServoPlugin"

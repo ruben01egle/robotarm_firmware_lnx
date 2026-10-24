@@ -11,12 +11,15 @@
 
   <depend>hardware_interface</depend>
   <depend>mujoco_ros2_control</depend>
+  <depend>mujoco_ros2_control_plugins</depend>
   <depend>pluginlib</depend>
+  <depend>yaml_cpp_vendor</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
     <hardware_interface plugin="${prefix}/robotarm_mujoco_hardware_plugins.xml"/>
+    <mujoco_ros2_control_plugins plugin="${prefix}/servo_plugin.xml"/>
   </export>
 </package>

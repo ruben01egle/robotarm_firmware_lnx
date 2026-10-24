@@ -1,35 +1,25 @@
-# PID gains of the sim's position and velocity command interfaces, loaded by the hardware plugin
-# (pids_config_file in urdf/robotarm_sim.ros2_control.xacro). Each joint's <motor> actuator gets
-# τ = PID(command - state), computed in write() at the controller_manager rate (500 Hz) on 1 kHz physics.
+# Servo gains of the sim's position and velocity command interfaces, read by robotarm_mujoco_hardware
+# (hardware parameter pids_config_file in urdf/robotarm_sim.ros2_control.xacro). Per joint, on the measured
+# joint velocity, computed by its ServoPlugin before every physics step (1 kHz), with the controller's target
+# moved to the physics time:
 #
-# A generic PID that makes the sim follow position/velocity commands, NOT a model of the moteus position loop:
-# the gains are tuned for stable, stiff tracking in the sim only and say nothing about the real arm.
+#   tau = kp·(p* − p) + kd·(v* − v) + ki·∫(p* − p) dt
 #
-# Position: ω = 80 rad/s, ζ = 1 at a reference inertia per joint (kp = M·ω², kd = 2·ω·M, ki = kp·ω/10), M the
-# median M_ii over random poses with armature 0, axis6 at 2e-4 kg·m² (its own 2.6e-5 plus a guessed armature).
-# Checked offline at random poses with armature 0 and with the old rotor inertia estimates (axis2 ~0.16 kg·m²):
-# stable up to ω = 120, 0.1 rad steps settled, tracking a 2 rad/s sine within 0.07 rad. Retune if the URDF
-# armature makes a joint much heavier than that.
+# clamped to the URDF effort limit, the integral too, and the integral pauses while the output saturates.
 #
-# Velocity: only used when a controller claims velocity without position (none does today). With i = position
-# kp, the integral of the velocity error acts like the position spring, p like its damper.
+# A generic servo that makes the sim follow position/velocity commands, NOT a model of the moteus position
+# loop: the gains are tuned for stable, stiff tracking in the sim only and say nothing about the real arm.
 #
-# Integral and output clamped to the URDF effort limit, no integration while the output saturates.
+# ω = 80 rad/s, ζ = 1 at a reference inertia per joint (kp = M·ω², kd = 2·ω·M, ki = kp·ω/10), M the median M_ii
+# over random poses without armature, axis6 at 2e-4 kg·m². Checked offline with the URDF armature at 500 Hz,
+# also with cycle times jittering between 2 and 3 ms: stable, tracking a 2 rad/s sine within 0.05 rad, no
+# torque chatter. On the physics thread (1 kHz, no timing mismatch) the margin is larger. The damping on the
+# measured velocity needs a realistic armature on the light wrist joints: with armature 0 it chatters on axis6.
+# Retune if the URDF armature changes a joint's inertia a lot.
 
-/**:
-  ros__parameters:
-    pid_gains:
-      position:
-        axis1: {p: 2200.0, i: 18000.0, d: 56.0, i_clamp_max: 8.0, i_clamp_min: -8.0, u_clamp_max: 8.0, u_clamp_min: -8.0, antiwindup_strategy: conditional_integration}
-        axis2: {p: 4100.0, i: 33000.0, d: 100.0, i_clamp_max: 35.0, i_clamp_min: -35.0, u_clamp_max: 35.0, u_clamp_min: -35.0, antiwindup_strategy: conditional_integration}
-        axis3: {p: 770.0, i: 6000.0, d: 19.0, i_clamp_max: 15.0, i_clamp_min: -15.0, u_clamp_max: 15.0, u_clamp_min: -15.0, antiwindup_strategy: conditional_integration}
-        axis4: {p: 54.0, i: 430.0, d: 1.4, i_clamp_max: 5.0, i_clamp_min: -5.0, u_clamp_max: 5.0, u_clamp_min: -5.0, antiwindup_strategy: conditional_integration}
-        axis5: {p: 36.0, i: 290.0, d: 0.9, i_clamp_max: 4.0, i_clamp_min: -4.0, u_clamp_max: 4.0, u_clamp_min: -4.0, antiwindup_strategy: conditional_integration}
-        axis6: {p: 1.3, i: 10.0, d: 0.032, i_clamp_max: 4.0, i_clamp_min: -4.0, u_clamp_max: 4.0, u_clamp_min: -4.0, antiwindup_strategy: conditional_integration}
-      velocity:
-        axis1: {p: 56.0, i: 2200.0, d: 0.0, i_clamp_max: 8.0, i_clamp_min: -8.0, u_clamp_max: 8.0, u_clamp_min: -8.0, antiwindup_strategy: conditional_integration}
-        axis2: {p: 100.0, i: 4100.0, d: 0.0, i_clamp_max: 35.0, i_clamp_min: -35.0, u_clamp_max: 35.0, u_clamp_min: -35.0, antiwindup_strategy: conditional_integration}
-        axis3: {p: 19.0, i: 770.0, d: 0.0, i_clamp_max: 15.0, i_clamp_min: -15.0, u_clamp_max: 15.0, u_clamp_min: -15.0, antiwindup_strategy: conditional_integration}
-        axis4: {p: 1.4, i: 54.0, d: 0.0, i_clamp_max: 5.0, i_clamp_min: -5.0, u_clamp_max: 5.0, u_clamp_min: -5.0, antiwindup_strategy: conditional_integration}
-        axis5: {p: 0.9, i: 36.0, d: 0.0, i_clamp_max: 4.0, i_clamp_min: -4.0, u_clamp_max: 4.0, u_clamp_min: -4.0, antiwindup_strategy: conditional_integration}
-        axis6: {p: 0.032, i: 1.3, d: 0.0, i_clamp_max: 4.0, i_clamp_min: -4.0, u_clamp_max: 4.0, u_clamp_min: -4.0, antiwindup_strategy: conditional_integration}
+axis1: {kp: 2200.0, ki: 18000.0, kd: 56.0}
+axis2: {kp: 4100.0, ki: 33000.0, kd: 100.0}
+axis3: {kp: 770.0, ki: 6000.0, kd: 19.0}
+axis4: {kp: 54.0, ki: 430.0, kd: 1.4}
+axis5: {kp: 36.0, ki: 290.0, kd: 0.9}
+axis6: {kp: 1.3, ki: 10.0, kd: 0.032}
