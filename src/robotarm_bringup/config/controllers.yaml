@@ -216,11 +216,10 @@ cartesian_impedance_controller:
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
 
-    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). STILL THE GC VALUES: in impedance mode joint damping
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). in impedance mode joint damping
     # acts in parallel to the cartesian damper and only has to brake what the cartesian terms can't see (null space at
-    # singularities, axes with zero cartesian stiffness). At these values it dominates, every mode is overdamped and an
-    # elbow motion creeps back over seconds (docs/dynamics/task_space_inertia.md). Reduce when tuning.
-    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
+    # singularities, axes with zero cartesian stiffness).
+    joint_damping: [0.2, 0.5, 0.2, 0.02, 0.01, 0.003]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
     # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
