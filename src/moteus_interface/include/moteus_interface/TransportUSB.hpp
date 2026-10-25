@@ -12,6 +12,7 @@
 #include "rclcpp/logger.hpp"
 
 #include "Transport.hpp"
+#include "TransportDiagnostics.hpp"
 
 namespace moteus_interface::transport
 {
@@ -36,9 +37,13 @@ public:
 
 private:
     void flush();
+    bool drain_pending();
+    TransportDiagnostics::LineKind classify_line(
+        std::string_view line,
+        mjbots::moteus::CanFdFrame& frame);
     bool parse_line(
         std::string_view line, 
-        std::vector<mjbots::moteus::CanFdFrame>& replies);
+        mjbots::moteus::CanFdFrame& frame);
     size_t round_up_dlc(size_t size);
     int parse_hex_nybble(char c);
     int parse_hex_byte(const char* value);
@@ -50,9 +55,14 @@ private:
 
     char rx_buffer_[4096] = {};
     size_t rx_buffer_pos_ = 0;
+    // bytes of a partial line left over from the previous cycle; the line
+    // they start is attributed to that cycle once it completes
+    size_t carried_over_bytes_ = 0;
 
     char tx_buffer_[4096] = {};
     size_t tx_buffer_pos_ = 0;
+
+    TransportDiagnostics diag_;
 };
 
 }

@@ -36,6 +36,14 @@ add_library(${PROJECT_NAME} SHARED
   src/DifferentialTransmission.cpp
 )
 
+# verbose per-cycle transport diagnostics (raw fdcanusb lines on every failed cycle)
+# colcon build --packages-select moteus_interface --cmake-args -DMOTEUS_TRANSPORT_DEBUG=ON
+option(MOTEUS_TRANSPORT_DEBUG "Per-cycle transport diagnostics" OFF)
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+  MOTEUS_TRANSPORT_DEBUG=$<BOOL:${MOTEUS_TRANSPORT_DEBUG}>
+)
+message(STATUS "moteus_interface: MOTEUS_TRANSPORT_DEBUG=${MOTEUS_TRANSPORT_DEBUG}")
+
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -90,6 +98,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_mode_switch test/test_mode_switch.cpp)
   target_link_libraries(test_mode_switch ${PROJECT_NAME})
+
+  ament_add_gtest(test_transport_diagnostics test/test_transport_diagnostics.cpp)
+  target_link_libraries(test_transport_diagnostics ${PROJECT_NAME})
 endif()
 
 ament_package()

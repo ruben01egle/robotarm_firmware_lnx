@@ -8,6 +8,11 @@
 #include <ctime>
 #include <numeric>
 
+// set via CMake option MOTEUS_TRANSPORT_DEBUG
+#ifndef MOTEUS_TRANSPORT_DEBUG
+#define MOTEUS_TRANSPORT_DEBUG 0
+#endif
+
 PLUGINLIB_EXPORT_CLASS(
   moteus_interface::MoteusInterface, 
   hardware_interface::SystemInterface
@@ -20,6 +25,8 @@ namespace moteus_interface
 // buffered by the time read() runs. This only absorbs scheduling jitter
 // between arrival and this call
 constexpr uint32_t pipelined_read_timeout_us = 200;
+
+constexpr bool kTransportDebug = MOTEUS_TRANSPORT_DEBUG;
 
 
 // Parse static parameters from the URDF here.
@@ -977,7 +984,8 @@ bool MoteusInterface::watchdog(bool strict)
                          "Actuator %s (CAN-ID: %d) did not respond when requested!", actuators_[i].name_.c_str(), actuators_[i].can_id_);
                 ret = false;
             }
-            else {
+            else if (kTransportDebug) {
+                // normal builds: the transport's throttled summary already lists missing IDs
                 RCLCPP_WARN(rclcpp::get_logger("MoteusInterface"),
                          "Actuator %s (CAN-ID: %d) did not respond", actuators_[i].name_.c_str(), actuators_[i].can_id_);
             }
