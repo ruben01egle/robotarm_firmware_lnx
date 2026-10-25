@@ -680,7 +680,9 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         for (size_t i = 0; i < actuators_.size(); ++i)
         {
             moteus::OutputExact::Command cmd;
-            cmd.position = std::remainder(actuators_[i].home_position_, 1.0);
+            // No wrap here: home() already wraps in joint space. Wrapping a differential's
+            // actuators independently would shift both joints by half a revolution.
+            cmd.position = actuators_[i].home_position_;
             command_frames_[i] = actuators_[i].controller_->MakeOutputExact(cmd);
         }
 
