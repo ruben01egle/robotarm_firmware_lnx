@@ -21,16 +21,6 @@ constexpr bool kTransportDebug = MOTEUS_TRANSPORT_DEBUG;
 
 using LineKind = moteus_interface::transport::TransportDiagnostics::LineKind;
 
-// TEST nudge: when the adapter's output ends on an exactly full 64 byte USB
-// packet, the host holds that packet back until the adapter sends anything
-// else. If replies are missing, all commands were accepted and the line has
-// been quiet for a while, send a command that makes the adapter answer with a
-// short line, which releases the stuck packet.
-constexpr char kNudgeCommand[] = "nudge\n";
-constexpr uint32_t kNudgeQuietUs = 400;
-// extra time granted after a nudge, also when the caller's budget was shorter
-constexpr uint32_t kNudgeExtraUs = 600;
-
 inline uint64_t dt_us(const struct timespec& start, const struct timespec& end) {
     const int64_t sec_diff  = static_cast<int64_t>(end.tv_sec)  - static_cast<int64_t>(start.tv_sec);
     const int64_t nsec_diff = static_cast<int64_t>(end.tv_nsec) - static_cast<int64_t>(start.tv_nsec);
@@ -263,10 +253,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
     bool have_first_byte = false;
     bool timed_out = false;
 
-    struct timespec last_rx_time = start_time;
-    bool nudged = false;
-    uint32_t deadline_us = timeout_us;
-
     do {
         const size_t to_read = sizeof(rx_buffer_) - rx_buffer_pos_;
         if (to_read == 0) {
@@ -279,7 +265,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
 
             if (read_ret > 0) {
                 timing_.mark_first_byte_if_needed(have_first_byte);
-                ::clock_gettime(CLOCK_MONOTONIC_RAW, &last_rx_time);
 
                 rx_buffer_pos_ += read_ret;
 
@@ -333,25 +318,13 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         struct timespec current_time;
         ::clock_gettime(CLOCK_MONOTONIC_RAW, &current_time);
         uint32_t elapsed_us = static_cast<uint32_t>(dt_us(start_time, current_time));
-        const uint32_t quiet_us = static_cast<uint32_t>(dt_us(last_rx_time, current_time));
 
-        const bool can_nudge = !nudged &&
-            diag_.cycle_ok() + diag_.cycle_err() >= diag_.cycle_frames_sent();
-        if (can_nudge && (quiet_us >= kNudgeQuietUs || elapsed_us >= deadline_us)) {
-            if (!send_nudge()) { return false; }
-            nudged = true;
-            deadline_us = std::max(deadline_us, elapsed_us + kNudgeExtraUs);
-        }
-
-        if (elapsed_us >= deadline_us) {
+        if (elapsed_us >= timeout_us) {
             timed_out = true;
             break;
         }
 
-        uint32_t remaining_us = deadline_us - elapsed_us;
-        if (can_nudge && !nudged) {
-            remaining_us = std::min(remaining_us, kNudgeQuietUs - quiet_us);
-        }
+        uint32_t remaining_us = timeout_us - elapsed_us;
         struct timespec timeout_ts = {};
         timeout_ts.tv_sec = remaining_us / 1000000;
         timeout_ts.tv_nsec = (remaining_us % 1000000) * 1000;
@@ -362,30 +335,16 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
             RCLCPP_ERROR(logger_, "Read fatal system error during ppoll: %s", ::strerror(errno));
             return false; 
         }
-        // poll_result == 0: deadline or nudge point reached, re-evaluated above
+        else if (poll_result == 0) {
+            timed_out = true;
+            break;
+        }
 
     } while (true);
 
     timing_.record_cycle_end(have_first_byte, expected_replies, receieved_replies, timed_out);
-    diag_.end_cycle(timed_out, std::string_view(rx_buffer_, rx_buffer_pos_));
+    diag_.end_cycle(timed_out);
 
-    return true;
-}
-
-bool moteus_interface::transport::TransportUSB::send_nudge()
-{
-    size_t written = 0;
-    const size_t len = sizeof(kNudgeCommand) - 1;
-    while (written < len) {
-        const int ret = ::write(fd_, kNudgeCommand + written, len - written);
-        if (ret < 0) {
-            if (errno == EINTR || errno == EAGAIN) { continue; }
-            RCLCPP_ERROR(logger_, "Transport: Fatal error writing nudge: %s", std::strerror(errno));
-            return false;
-        }
-        written += ret;
-    }
-    diag_.on_nudge_sent();
     return true;
 }
 
