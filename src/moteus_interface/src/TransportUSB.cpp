@@ -12,6 +12,8 @@
 #include <linux/serial.h>
 #include <time.h>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 // set via CMake option MOTEUS_TRANSPORT_DEBUG
 #ifndef MOTEUS_TRANSPORT_DEBUG
@@ -156,6 +158,60 @@ bool moteus_interface::transport::TransportUSB::initialize()
     RCLCPP_INFO(logger_, "Transport: Successfully opened and configured '%s'", device_.c_str());
     initialized_ = true;
     flush();
+    return sync_adapter();
+}
+
+bool moteus_interface::transport::TransportUSB::sync_adapter()
+{
+    // The adapter may still hold an unterminated command from an earlier
+    // session; the first "can send" would then be glued onto it. A bare
+    // newline terminates it. Whatever comes back is logged: any answer means
+    // there was leftover input, no answer points at startup timing instead.
+    // Startup only, never called from the RT loop.
+    const char newline = '\n';
+    while (::write(fd_, &newline, 1) < 0) {
+        if (errno == EINTR || errno == EAGAIN) { continue; }
+        RCLCPP_ERROR(logger_, "Transport: Failed to write sync newline: %s", std::strerror(errno));
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    size_t answered = 0;
+    while (true) {
+        const int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], sizeof(rx_buffer_) - rx_buffer_pos_);
+        if (read_ret < 0) {
+            if (errno == EINTR) { continue; }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) { break; }
+            RCLCPP_ERROR(logger_, "Transport: Fatal read error during sync: %s", std::strerror(errno));
+            return false;
+        }
+        if (read_ret == 0) {
+            RCLCPP_ERROR(logger_, "Transport: Device unplugged / connection closed.");
+            initialized_ = false;
+            return false;
+        }
+        rx_buffer_pos_ += read_ret;
+        if (rx_buffer_pos_ == sizeof(rx_buffer_)) { break; }
+    }
+
+    size_t start = 0;
+    for (size_t i = 0; i <= rx_buffer_pos_; ++i) {
+        const bool end = (i == rx_buffer_pos_);
+        if (!end && rx_buffer_[i] != '\r' && rx_buffer_[i] != '\n') { continue; }
+        if (i > start) {
+            RCLCPP_WARN(logger_, "Transport: adapter answered startup sync%s: '%.*s'",
+                        end ? " (unterminated)" : "", static_cast<int>(i - start), &rx_buffer_[start]);
+            answered++;
+        }
+        start = i + 1;
+    }
+    if (answered == 0) {
+        RCLCPP_INFO(logger_, "Transport: adapter sent nothing in reply to the startup sync (no leftover input)");
+    }
+
+    rx_buffer_pos_ = 0;
+    carried_over_bytes_ = 0;
     return true;
 }
 
