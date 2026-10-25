@@ -72,6 +72,14 @@ public:
         ::clock_gettime(CLOCK_MONOTONIC_RAW, &write_done_);
     }
 
+    // TEST: the transport wrote a nudge command to flush a stalled USB packet.
+    // The next non-rcv line is its answer and is not counted as an error.
+    void on_nudge_sent() {
+        cycle_.nudged = true;
+        nudge_reply_pending_ = true;
+        if (verbose_) record_raw(since_write_us(), ">> nudge sent");
+    }
+
     // A complete line read during this cycle. For Rcv pass the parsed source.
     // Returns true if the line is a reply that should be handed to the caller
     // (first reply from an expected ID). Duplicates, unexpected sources and
@@ -84,6 +92,10 @@ public:
     bool on_line(LineKind kind, std::string_view line, int source = -1) {
         const uint32_t t_us = verbose_ ? since_write_us() : 0;
         if (verbose_) record_raw(t_us, line);
+
+        if (kind != LineKind::Rcv && consume_nudge_reply(line)) {
+            return false;
+        }
 
         switch (kind) {
             case LineKind::Ok:
@@ -118,6 +130,10 @@ public:
     // A complete line that belongs to the previous cycle: drained before the
     // next write, or a partial line carried over and completed afterwards.
     void on_late_line(LineKind kind, std::string_view line, int source = -1) {
+        if (kind != LineKind::Rcv && consume_nudge_reply(line)) {
+            return;
+        }
+
         switch (kind) {
             case LineKind::Ok:
                 // trailing OKs after an early read() exit are normal
@@ -188,8 +204,13 @@ public:
             }
             if (!pending_tail.empty()) window_.partial_at_timeout++;
         }
+        if (cycle_.nudged) {
+            window_.nudged++;
+            if (!timed_out) window_.nudge_rescued++;
+        }
 
-        const bool cycle_problem = timed_out || cycle_.err > 0 || cycle_.stray > 0 || cycle_.stale_dup > 0;
+        const bool cycle_problem = timed_out || cycle_.err > 0 || cycle_.stray > 0 || cycle_.stale_dup > 0 ||
+                                   cycle_.nudged;
         if (cycle_problem) {
             window_.has_problem = true;
             if (verbose_) report_cycle(timed_out, missing_count, ok_short, pending_tail);
@@ -199,6 +220,7 @@ public:
     }
 
     // ---- accessors (tests / introspection) ----
+    uint32_t cycle_frames_sent() const { return cycle_.frames_sent; }
     uint32_t cycle_ok() const { return cycle_.ok; }
     uint32_t cycle_err() const { return cycle_.err; }
     uint32_t cycle_stray() const { return cycle_.stray; }
@@ -209,11 +231,14 @@ public:
     uint32_t window_err() const { return window_.err; }
     uint32_t window_short_cycles() const { return window_.short_cycles; }
     uint32_t window_partial_at_timeout() const { return window_.partial_at_timeout; }
+    uint32_t window_nudged() const { return window_.nudged; }
+    uint32_t window_nudge_rescued() const { return window_.nudge_rescued; }
     uint32_t summaries_emitted() const { return summaries_emitted_; }
 
 private:
     struct CycleStats {
         bool active = false;
+        bool nudged = false;
         uint32_t frames_sent = 0;
         uint32_t ok = 0;
         uint32_t err = 0;
@@ -238,6 +263,9 @@ private:
         uint32_t stale_dup = 0;
         uint32_t late_total = 0;
         uint32_t partial_at_timeout = 0;
+        uint32_t nudged = 0;
+        uint32_t nudge_rescued = 0;
+        char last_nudge_reply[kTextLen] = {};
         std::array<uint32_t, kMaxIds> missing{};
         std::array<uint32_t, kMaxIds> late{};
         char last_err[kTextLen] = {};
@@ -248,6 +276,13 @@ private:
         uint32_t t_us;
         char text[kRawLineLen];
     };
+
+    bool consume_nudge_reply(std::string_view line) {
+        if (!nudge_reply_pending_) return false;
+        nudge_reply_pending_ = false;
+        copy_text(window_.last_nudge_reply, line);
+        return true;
+    }
 
     static void set_bit(uint64_t (&mask)[2], size_t id) { mask[id >> 6] |= (1ULL << (id & 63)); }
     static bool test_bit(const uint64_t (&mask)[2], size_t id) { return (mask[id >> 6] >> (id & 63)) & 1ULL; }
@@ -286,7 +321,8 @@ private:
     void report_cycle(bool timed_out, uint32_t missing_count, uint32_t ok_short, std::string_view pending_tail) {
         size_t pos = 0;
         append(pos, "Transport cycle %lu %s: sent %u, OK %u, ERR %u, stray %u, stale/dup %u",
-               static_cast<unsigned long>(cycle_count_), timed_out ? "TIMED OUT" : "anomaly",
+               static_cast<unsigned long>(cycle_count_),
+               timed_out ? "TIMED OUT" : (cycle_.nudged ? "rescued by nudge" : "anomaly"),
                cycle_.frames_sent, cycle_.ok, cycle_.err, cycle_.stray, cycle_.stale_dup);
         if (ok_short > 0) append(pos, ", OK short %u", ok_short);
 
@@ -346,6 +382,10 @@ private:
         if (window_.stray > 0) append(pos, " (last: '%s')", window_.last_stray);
         append(pos, " | stale/dup=%u", window_.stale_dup);
         if (window_.partial_at_timeout > 0) append(pos, " | partial line at timeout=%u", window_.partial_at_timeout);
+        if (window_.nudged > 0) {
+            append(pos, " | nudged=%u rescued=%u (reply: '%s')", window_.nudged, window_.nudge_rescued,
+                   window_.last_nudge_reply);
+        }
         if (window_.late_total > 0) {
             append(pos, "%s", " | late:");
             for (size_t id = 0; id < kMaxIds; ++id) {
@@ -374,6 +414,7 @@ private:
     uint64_t window_start_us_ = 0;
     uint64_t last_report_us_ = 0;
     uint32_t summaries_emitted_ = 0;
+    bool nudge_reply_pending_ = false;
 
     struct timespec write_done_{};
     std::array<RawLine, kRawLines> raw_{};

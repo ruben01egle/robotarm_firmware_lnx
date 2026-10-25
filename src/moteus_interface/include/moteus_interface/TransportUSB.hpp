@@ -38,6 +38,7 @@ public:
 private:
     void flush();
     bool drain_pending();
+    bool send_nudge();
     TransportDiagnostics::LineKind classify_line(
         std::string_view line,
         mjbots::moteus::CanFdFrame& frame);
