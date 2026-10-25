@@ -74,8 +74,13 @@ public:
 
     // A complete line read during this cycle. For Rcv pass the parsed source.
     // Returns true if the line is a reply that should be handed to the caller
-    // (first reply from an expected ID). Duplicates and unexpected sources
-    // are counted as stale/dup and must be dropped.
+    // (first reply from an expected ID). Duplicates, unexpected sources and
+    // stale replies are counted as stale/dup and must be dropped.
+    //
+    // The adapter answers every "can send" with OK/ERR as soon as it queues
+    // it, and a frame's reply needs a bus round trip after that. So the reply
+    // to the frame at batch position p can only follow at least p+1 OK/ERR
+    // lines; anything earlier is a late reply to the previous batch.
     bool on_line(LineKind kind, std::string_view line, int source = -1) {
         const uint32_t t_us = verbose_ ? since_write_us() : 0;
         if (verbose_) record_raw(t_us, line);
@@ -98,7 +103,9 @@ public:
 
         const size_t id = static_cast<size_t>(source) & 0x7f;
         const bool any_expected = cycle_.expected[0] != 0 || cycle_.expected[1] != 0;
-        if (test_bit(cycle_.replied, id) || (any_expected && !test_bit(cycle_.expected, id))) {
+        const bool stale = cycle_.batch_pos[id] >= 0 &&
+                           cycle_.ok + cycle_.err <= static_cast<uint32_t>(cycle_.batch_pos[id]);
+        if (stale || test_bit(cycle_.replied, id) || (any_expected && !test_bit(cycle_.expected, id))) {
             cycle_.stale_dup++;
             if (cycle_.stale_dup_id < 0) cycle_.stale_dup_id = static_cast<int16_t>(id);
             return false;
@@ -139,16 +146,17 @@ public:
 
     // Call once at the end of read(). Missing replies and an OK shortfall are
     // only judged on timeout: after an early exit trailing OKs may still be
-    // in flight.
-    void end_cycle(bool timed_out) {
+    // in flight. pending_tail is the incomplete line still sitting in the rx
+    // buffer; non-empty on timeout means the adapter's output stopped mid-line.
+    void end_cycle(bool timed_out, std::string_view pending_tail = {}) {
         struct timespec now;
         ::clock_gettime(CLOCK_MONOTONIC_RAW, &now);
         end_cycle_at(timed_out, static_cast<uint64_t>(now.tv_sec) * 1000000ULL +
-                                static_cast<uint64_t>(now.tv_nsec) / 1000ULL);
+                                static_cast<uint64_t>(now.tv_nsec) / 1000ULL, pending_tail);
     }
 
     // Same as end_cycle() with an explicit monotonic timestamp (for tests).
-    void end_cycle_at(bool timed_out, uint64_t now_us) {
+    void end_cycle_at(bool timed_out, uint64_t now_us, std::string_view pending_tail = {}) {
         if (!cycle_.active) return;
         cycle_.active = false;
         cycle_count_++;
@@ -178,12 +186,13 @@ public:
                 ok_short = cycle_.frames_sent - cycle_.ok - cycle_.err;
                 window_.ok_short += ok_short;
             }
+            if (!pending_tail.empty()) window_.partial_at_timeout++;
         }
 
         const bool cycle_problem = timed_out || cycle_.err > 0 || cycle_.stray > 0 || cycle_.stale_dup > 0;
         if (cycle_problem) {
             window_.has_problem = true;
-            if (verbose_) report_cycle(timed_out, missing_count, ok_short);
+            if (verbose_) report_cycle(timed_out, missing_count, ok_short, pending_tail);
         }
 
         maybe_report(now_us);
@@ -199,6 +208,7 @@ public:
     uint32_t window_ok_short() const { return window_.ok_short; }
     uint32_t window_err() const { return window_.err; }
     uint32_t window_short_cycles() const { return window_.short_cycles; }
+    uint32_t window_partial_at_timeout() const { return window_.partial_at_timeout; }
     uint32_t summaries_emitted() const { return summaries_emitted_; }
 
 private:
@@ -227,6 +237,7 @@ private:
         uint32_t stray = 0;
         uint32_t stale_dup = 0;
         uint32_t late_total = 0;
+        uint32_t partial_at_timeout = 0;
         std::array<uint32_t, kMaxIds> missing{};
         std::array<uint32_t, kMaxIds> late{};
         char last_err[kTextLen] = {};
@@ -272,7 +283,7 @@ private:
         if (n > 0) pos = std::min(pos + static_cast<size_t>(n), sizeof(report_buf_) - 1);
     }
 
-    void report_cycle(bool timed_out, uint32_t missing_count, uint32_t ok_short) {
+    void report_cycle(bool timed_out, uint32_t missing_count, uint32_t ok_short, std::string_view pending_tail) {
         size_t pos = 0;
         append(pos, "Transport cycle %lu %s: sent %u, OK %u, ERR %u, stray %u, stale/dup %u",
                static_cast<unsigned long>(cycle_count_), timed_out ? "TIMED OUT" : "anomaly",
@@ -295,6 +306,11 @@ private:
         }
         if (cycle_.stale_dup > 0) append(pos, "\n  first stale/dup source: id%d", cycle_.stale_dup_id);
         if (cycle_.err > 0) append(pos, "\n  last ERR: '%s'", cycle_.last_err);
+        if (!pending_tail.empty()) {
+            char tail[kRawLineLen];
+            copy_text(tail, pending_tail);
+            append(pos, "\n  incomplete line in buffer (%zu bytes): '%s'", pending_tail.size(), tail);
+        }
 
         append(pos, "\n  raw (%zu lines%s):", raw_count_, raw_dropped_ > 0 ? ", truncated" : "");
         for (size_t i = 0; i < raw_count_; ++i) {
@@ -329,6 +345,7 @@ private:
         append(pos, " | OK short=%u | stray=%u", window_.ok_short, window_.stray);
         if (window_.stray > 0) append(pos, " (last: '%s')", window_.last_stray);
         append(pos, " | stale/dup=%u", window_.stale_dup);
+        if (window_.partial_at_timeout > 0) append(pos, " | partial line at timeout=%u", window_.partial_at_timeout);
         if (window_.late_total > 0) {
             append(pos, "%s", " | late:");
             for (size_t id = 0; id < kMaxIds; ++id) {

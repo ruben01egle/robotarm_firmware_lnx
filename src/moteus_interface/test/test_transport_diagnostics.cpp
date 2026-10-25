@@ -52,6 +52,7 @@ TEST(TransportDiagnostics, DuplicateAndUnexpectedRepliesAreNotCounted)
     auto frames = make_batch({1, 2});
     diag.begin_cycle(frames.data(), frames.size());
 
+    diag.on_line(Kind::Ok, "OK");
     EXPECT_TRUE(diag.on_line(Kind::Rcv, "rcv 0100 00", 1));
     EXPECT_FALSE(diag.on_line(Kind::Rcv, "rcv 0100 00", 1));  // duplicate
     EXPECT_FALSE(diag.on_line(Kind::Rcv, "rcv 0700 00", 7));  // not addressed
@@ -150,4 +151,49 @@ TEST(TransportDiagnostics, LateRepliesAreCounted)
     EXPECT_EQ(diag.window_late(1), 0u);
     diag.on_late_line(Kind::Rcv, "rcv 0300 00", 3);
     EXPECT_EQ(diag.window_late(3), 1u);
+}
+
+// Sequence observed on hardware after a timeout: the previous batch's reply
+// from id6 shows up right after the next write, before any OK of this batch.
+TEST(TransportDiagnostics, ReplyBeforeItsOkIsStale)
+{
+    auto diag = make_diag();
+    auto frames = make_batch({6, 1, 2, 3, 4, 5});
+    diag.begin_cycle(frames.data(), frames.size());
+
+    EXPECT_FALSE(diag.on_line(Kind::Rcv, "rcv 0600 00", 6));  // stale, 0 OKs so far
+    for (int i = 0; i < 4; ++i) diag.on_line(Kind::Ok, "OK");
+    EXPECT_TRUE(diag.on_line(Kind::Rcv, "rcv 0600 00", 6));   // fresh
+    diag.on_line(Kind::Ok, "OK");
+    EXPECT_TRUE(diag.on_line(Kind::Rcv, "rcv 0100 00", 1));
+    EXPECT_EQ(diag.cycle_stale_dup(), 1u);
+}
+
+TEST(TransportDiagnostics, ReplyNeedsOkForItsBatchPosition)
+{
+    auto diag = make_diag();
+    auto frames = make_batch({1, 2, 3});
+    diag.begin_cycle(frames.data(), frames.size());
+
+    diag.on_line(Kind::Ok, "OK");
+    EXPECT_FALSE(diag.on_line(Kind::Rcv, "rcv 0300 00", 3));  // position 2 needs 3 OK/ERR
+    diag.on_line(Kind::Ok, "OK");
+    diag.on_line(Kind::Err, "ERR x");
+    EXPECT_TRUE(diag.on_line(Kind::Rcv, "rcv 0300 00", 3));
+}
+
+TEST(TransportDiagnostics, CountsPartialLineAtTimeout)
+{
+    auto diag = make_diag();
+    auto frames = make_batch({1});
+
+    diag.begin_cycle(frames.data(), frames.size());
+    diag.end_cycle_at(true, 1000, "rcv 0100 2701");
+    EXPECT_EQ(diag.summaries_emitted(), 1u);  // reported and reset
+
+    diag.begin_cycle(frames.data(), frames.size());
+    diag.end_cycle_at(true, 2000, "rcv 01");
+    diag.begin_cycle(frames.data(), frames.size());
+    diag.end_cycle_at(true, 3000);
+    EXPECT_EQ(diag.window_partial_at_timeout(), 1u);
 }

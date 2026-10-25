@@ -343,7 +343,7 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
     } while (true);
 
     timing_.record_cycle_end(have_first_byte, expected_replies, receieved_replies, timed_out);
-    diag_.end_cycle(timed_out);
+    diag_.end_cycle(timed_out, std::string_view(rx_buffer_, rx_buffer_pos_));
 
     return true;
 }
