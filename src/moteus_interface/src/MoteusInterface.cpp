@@ -496,9 +496,10 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     // In active this is done by read() or write() depending on mode
     if (!is_active_)
     {
+        std::rotate(send_order_.begin(), send_order_.begin() + 1, send_order_.end());
         for (size_t i = 0; i < num_joints; ++i)
         {
-            command_frames_[i] = actuators_[i].controller_->MakeStop();
+            command_frames_[send_order_[i]] = actuators_[i].controller_->MakeStop();
         }
 
         if (execution_mode_ == ExecutionMode::PIPELINED) {
