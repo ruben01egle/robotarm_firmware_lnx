@@ -630,10 +630,23 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             actuators_[i].controller_ = std::make_shared<moteus::Controller>(options);
             command_frames_[i] = actuators_[i].controller_->MakeStop(&read_override);
         }
+        // Startup cycles go out one frame at a time: with all frames batched,
+        // the first cycle after opening the port regularly loses replies
+        // (suspected fdcanusb overload). The final stop cycle below stays
+        // batched as a comparison.
+        auto cycle_one_by_one = [this](uint32_t timeout_us) {
+            for (size_t i = 0; i < command_frames_.size(); ++i) {
+                if (!transport_->cycle(&command_frames_[i], 1, replies_frames_, 1, timeout_us)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
         // reset controller to ensure defined state on startup
         // for our case this is always true, for more flexibility this could be computed based on the last sent commands
         uint32_t expected_replies = num_joints;
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+        if (!cycle_one_by_one(10000)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                             "Cycle commands failed");
             return hardware_interface::CallbackReturn::ERROR;
@@ -672,7 +685,7 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         }
 
         // Set internal encoder to absolute position
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+        if (!cycle_one_by_one(10000)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                             "Cycle commands failed");
             return hardware_interface::CallbackReturn::ERROR;
