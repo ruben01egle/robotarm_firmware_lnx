@@ -31,9 +31,11 @@ bool moteus_interface::transmission::IdentityTransmission::validate_mode_switch(
     return joint_.interfaces->valid();
 }
 
-void moteus_interface::transmission::IdentityTransmission::perform_mode_switch()
+bool moteus_interface::transmission::IdentityTransmission::perform_mode_switch()
 {
+    if (*actuator_.mode == *joint_.mode) return false;
     *actuator_.mode = *joint_.mode;
+    return true;
 }
 
 void moteus_interface::transmission::IdentityTransmission::home()

@@ -432,10 +432,14 @@ hardware_interface::return_type MoteusInterface::perform_command_mode_switch(con
         }
     }
 
-    // apply changes to actuator space
+    // apply changes to actuator space and flag out of date setpoint
     for (auto& t : transmissions_) {
-        t->perform_mode_switch();
+        if (t->perform_mode_switch()) {
+            for (auto& a : actuators_)
+                if (a.transmission_ == t.get()) a.setpoint_sync_ = Actuator::SetpointSync::PENDING;
+        }
     }
+
 
     for (const auto& joint : joints_) {
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"),
@@ -472,7 +476,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     parse_result_frames();
     if (!watchdog()) return hardware_interface::return_type::ERROR;
 
-    for (size_t i = 0; i < actuator_results_.size(); ++i) 
+    for (size_t i = 0; i < actuators_.size(); ++i) 
     {
         const auto& result = actuator_results_[i];
         if (result.fault != 0)
@@ -481,6 +485,10 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             "HARDWARE FAULT on Actuator %s (CAN-ID: %d)! Error Code: %d", 
                             actuators_[i].name_.c_str(), actuators_[i].can_id_, result.fault);
             return hardware_interface::return_type::ERROR;
+        }
+
+        if (actuators_[i].setpoint_sync_ == Actuator::SetpointSync::SENT && actuators_updated_[i]) {
+            actuators_[i].setpoint_sync_ = Actuator::SetpointSync::VALID;
         }
         
         actuator_states_position_[i] = result.position * 2.0 * M_PI;
@@ -895,8 +903,9 @@ bool MoteusInterface::make_cyclic_commands()
             // replaced them with their defaults (position NaN, velocity 0, torque 0) in the joint
             // physical layer, and the transmission propagates those onto the actuator values.
             moteus::PositionMode::Command cmd;
-            if (std::isnan(actuator_commands_position_[i])) {
-                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            if (actuator.setpoint_sync_ == Actuator::SetpointSync::PENDING) {
+                cmd.position = actuator_states_position_[i] / (2.0 * M_PI);
+                actuator.setpoint_sync_ = Actuator::SetpointSync::SENT;
             } else {
                 cmd.position = actuator_commands_position_[i] / (2.0 * M_PI);
             }
@@ -947,7 +956,13 @@ bool MoteusInterface::make_cyclic_commands()
         else if (actuator.cmd_mode_ == CommandMode::IDLE) {
             // in idle hold current position
             moteus::PositionMode::Command cmd;
-            cmd.position = std::numeric_limits<double>::quiet_NaN();
+            if (actuator.setpoint_sync_ == Actuator::SetpointSync::PENDING) {
+                cmd.position = actuator_states_position_[i] / (2.0 * M_PI);
+                actuator.setpoint_sync_ = Actuator::SetpointSync::SENT;
+            }
+            else {
+                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            }
             cmd.velocity = 0;
             cmd.feedforward_torque = 0;
 
@@ -976,11 +991,11 @@ void MoteusInterface::parse_result_frames()
         );
         if (it != actuators_.end()) 
         {
-            size_t joint_index = std::distance(actuators_.begin(), it);
+            size_t actuator_index = std::distance(actuators_.begin(), it);
             
-            actuator_results_[joint_index] = moteus::Query::Parse(frame.data, frame.size);
+            actuator_results_[actuator_index] = moteus::Query::Parse(frame.data, frame.size);
 
-            actuators_updated_[joint_index] = true;
+            actuators_updated_[actuator_index] = true;
         }
     }
     replies_frames_.clear();

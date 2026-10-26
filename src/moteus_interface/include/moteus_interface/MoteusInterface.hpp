@@ -48,6 +48,14 @@ private:
     class Actuator 
     {
     public:
+        enum class SetpointSync : uint8_t
+        {
+            VALID = 0,
+            PENDING = 1,
+            SENT = 2
+        };
+
+    public:
         std::string name_;
         int can_id_;
         // Dual-use homing scratch: on_configure() first writes the raw kEncoder1Position
@@ -59,6 +67,7 @@ private:
 
         CommandMode cmd_mode_ = CommandMode::IDLE;
 
+        SetpointSync setpoint_sync_ = SetpointSync::VALID;
         bool is_updated_ = false;
         size_t consecutive_failures_ = 0;
         double failure_rate_ = 0.0;
