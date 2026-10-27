@@ -16,6 +16,8 @@ INACTIVE_CONTROLLERS = [
     # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
     'joint_stream_controller_impedance',
     'cartesian_jog_controller_impedance',
+    # executes trajectories planned by MoveIt on the high-level PC, activated by control_center
+    'joint_trajectory_controller',
 ]
 
 

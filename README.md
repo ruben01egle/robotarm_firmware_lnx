@@ -150,10 +150,13 @@ graph TD
 - `joint_state_broadcaster` (stock `ros2_controllers` package) — publishes
   `/joint_states` at a configurable rate.
 
-There is currently no trajectory-following controller (e.g. a standard
-`joint_trajectory_controller`) wired up in this repo — motion today is driven
-through the reactive `JointStreamController` and `CartesianJogController` only. More controller options are
-expected as the project develops.
+- `joint_trajectory_controller` (stock `ros2_controllers` package) — executes
+  joint trajectories received on the `~/follow_joint_trajectory` action
+  (`control_msgs/action/FollowJointTrajectory`), e.g. planned by MoveIt on the
+  high-level PC. Outputs `position`+`velocity` like `joint_stream_controller`
+  and `cartesian_jog_controller`, so only one of the three can be active. Aborts
+  a goal if the tracking error exceeds the `constraints` in `controllers.yaml`.
+  Activated by the high-level PC (control_center) for a mission, like the others.
 
 ## Usage / Getting Started
 
@@ -260,10 +263,10 @@ carries several honest rough edges:
   (official mjbots fdcanusb only, no SocketCAN), no retry/checksum logic, and a
   project-specific secondary-encoder homing workaround. Details and caveats are
   in its own README.
-- **Only reactive controllers exist today** (`JointStreamController`,
-  `CartesianJogController`); there's no trajectory-following controller in this
-  repo yet, and more controller options
-  are planned as the project develops.
+- **Motion controllers today**: the reactive `JointStreamController` and
+  `CartesianJogController`, the Cartesian impedance / gravity compensation
+  controllers, and the stock `joint_trajectory_controller` for MoveIt
+  trajectories; more controller options are planned as the project develops.
 - **Joint count is a current-state fact, not a design limit.** The arm has 6
   configured joints today; `moteus_interface`, `robotarm_controllers`, and
   `robotarm_bringup` are all written to be driven by whatever's declared in the

@@ -78,6 +78,11 @@ controller_manager:
     cartesian_impedance_controller:
       type: robotarm_controllers/CartesianImpedanceController
 
+    # Executes trajectories planned by MoveIt on the high-level PC (FollowJointTrajectory action
+    # ~/follow_joint_trajectory). Spawned inactive; activated by control_center for a mission.
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
@@ -240,3 +245,40 @@ cartesian_impedance_controller:
     cartesian_damping_ratio: 0.7    # unitless
     max_spring_force: 20.0          # N, norm of the translational spring force
     max_spring_moment: 2.0          # Nm, norm of the rotational spring moment, below the 4 Nm of the wrist motors
+
+# Joint names, controller name and action namespace must match moveit_controllers.yaml in
+# robotarm_core/src/robotarm_moveit_config.
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - axis1
+      - axis2
+      - axis3
+      - axis4
+      - axis5
+      - axis6
+    # position + velocity: interpolated position plus velocity feedforward, the PVC mode of
+    # moteus_interface. Same interfaces as joint_stream_controller and cartesian_jog_controller,
+    # so only one of them can be active.
+    command_interfaces:
+      - position
+      - velocity
+    state_interfaces:
+      - position
+      - velocity
+    allow_partial_joints_goal: false
+    allow_nonzero_velocity_at_trajectory_end: false
+    interpolation_method: splines
+    # Safety net against a robot that does not follow the trajectory (blocked joint, collision,
+    # too aggressive limits): the goal is aborted and the controller holds the current position
+    # if the tracking error of any joint exceeds "trajectory" [rad] while moving, or "goal" [rad]
+    # after goal_time [s] at the end. PRELIMINARY values, tune on hardware.
+    constraints:
+      stopped_velocity_tolerance: 0.05  # [rad/s] robot counts as stopped below this
+      goal_time: 0.5
+      axis1: {trajectory: 0.1, goal: 0.01}
+      axis2: {trajectory: 0.1, goal: 0.01}
+      axis3: {trajectory: 0.1, goal: 0.01}
+      axis4: {trajectory: 0.1, goal: 0.01}
+      axis5: {trajectory: 0.1, goal: 0.01}
+      axis6: {trajectory: 0.1, goal: 0.01}
