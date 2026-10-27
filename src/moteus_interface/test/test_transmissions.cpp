@@ -325,6 +325,27 @@ TEST_F(DifferentialTransmissionTest, HomeWrapsEachJointToHalfRevolution)
     EXPECT_NEAR(b.home, -0.3, EPS);   // -0.1 - 0.2
 }
 
+TEST_F(DifferentialTransmissionTest, HomeKeepsActuatorsBeyondHalfRevolution)
+{
+    // Actuator homes may legitimately exceed +-0.5 rev; wrapping them individually
+    // would shift both joints by half a revolution.
+    auto t = make();
+    a.home = 0.3;
+    b.home = 0.3;
+
+    t.home();
+
+    EXPECT_NEAR(a.home, 0.6, EPS);    // not wrapped to -0.4
+    EXPECT_NEAR(b.home, 0.0, EPS);
+
+    // Feeding the homes back as actuator state must recover the joints.
+    a.st_pos = a.home;
+    b.st_pos = b.home;
+    t.actuator_to_joint();
+    EXPECT_NEAR(j1.st_pos, 0.3, EPS);
+    EXPECT_NEAR(j2.st_pos, 0.3, EPS);
+}
+
 
 // ---------------------------------------------------------------------------------------------
 // IdentityTransmission

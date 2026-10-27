@@ -8,6 +8,11 @@
 #include <ctime>
 #include <numeric>
 
+// set via CMake option MOTEUS_TRANSPORT_DEBUG
+#ifndef MOTEUS_TRANSPORT_DEBUG
+#define MOTEUS_TRANSPORT_DEBUG 0
+#endif
+
 PLUGINLIB_EXPORT_CLASS(
   moteus_interface::MoteusInterface, 
   hardware_interface::SystemInterface
@@ -20,6 +25,8 @@ namespace moteus_interface
 // buffered by the time read() runs. This only absorbs scheduling jitter
 // between arrival and this call
 constexpr uint32_t pipelined_read_timeout_us = 200;
+
+constexpr bool kTransportDebug = MOTEUS_TRANSPORT_DEBUG;
 
 
 // Parse static parameters from the URDF here.
@@ -425,10 +432,14 @@ hardware_interface::return_type MoteusInterface::perform_command_mode_switch(con
         }
     }
 
-    // apply changes to actuator space
+    // apply changes to actuator space and flag out of date setpoint
     for (auto& t : transmissions_) {
-        t->perform_mode_switch();
+        if (t->perform_mode_switch()) {
+            for (auto& a : actuators_)
+                if (a.transmission_ == t.get()) a.setpoint_sync_ = Actuator::SetpointSync::PENDING;
+        }
     }
+
 
     for (const auto& joint : joints_) {
         RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"),
@@ -465,7 +476,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     parse_result_frames();
     if (!watchdog()) return hardware_interface::return_type::ERROR;
 
-    for (size_t i = 0; i < actuator_results_.size(); ++i) 
+    for (size_t i = 0; i < actuators_.size(); ++i) 
     {
         const auto& result = actuator_results_[i];
         if (result.fault != 0)
@@ -474,6 +485,10 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
                             "HARDWARE FAULT on Actuator %s (CAN-ID: %d)! Error Code: %d", 
                             actuators_[i].name_.c_str(), actuators_[i].can_id_, result.fault);
             return hardware_interface::return_type::ERROR;
+        }
+
+        if (actuators_[i].setpoint_sync_ == Actuator::SetpointSync::SENT && actuators_updated_[i]) {
+            actuators_[i].setpoint_sync_ = Actuator::SetpointSync::VALID;
         }
         
         actuator_states_position_[i] = result.position * 2.0 * M_PI;
@@ -489,9 +504,10 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     // In active this is done by read() or write() depending on mode
     if (!is_active_)
     {
+        std::rotate(send_order_.begin(), send_order_.begin() + 1, send_order_.end());
         for (size_t i = 0; i < num_joints; ++i)
         {
-            command_frames_[i] = actuators_[i].controller_->MakeStop();
+            command_frames_[send_order_[i]] = actuators_[i].controller_->MakeStop();
         }
 
         if (execution_mode_ == ExecutionMode::PIPELINED) {
@@ -622,10 +638,23 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
             actuators_[i].controller_ = std::make_shared<moteus::Controller>(options);
             command_frames_[i] = actuators_[i].controller_->MakeStop(&read_override);
         }
+        // Startup cycles go out one frame at a time: with all frames batched,
+        // the first cycle after opening the port regularly loses replies
+        // (suspected fdcanusb overload). The final stop cycle below stays
+        // batched as a comparison.
+        auto cycle_one_by_one = [this](uint32_t timeout_us) {
+            for (size_t i = 0; i < command_frames_.size(); ++i) {
+                if (!transport_->cycle(&command_frames_[i], 1, replies_frames_, 1, timeout_us)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
         // reset controller to ensure defined state on startup
         // for our case this is always true, for more flexibility this could be computed based on the last sent commands
         uint32_t expected_replies = num_joints;
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+        if (!cycle_one_by_one(10000)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                             "Cycle commands failed");
             return hardware_interface::CallbackReturn::ERROR;
@@ -659,12 +688,14 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         for (size_t i = 0; i < actuators_.size(); ++i)
         {
             moteus::OutputExact::Command cmd;
-            cmd.position = std::remainder(actuators_[i].home_position_, 1.0);
+            // No wrap here: home() already wraps in joint space. Wrapping a differential's
+            // actuators independently would shift both joints by half a revolution.
+            cmd.position = actuators_[i].home_position_;
             command_frames_[i] = actuators_[i].controller_->MakeOutputExact(cmd);
         }
 
         // Set internal encoder to absolute position
-        if (!transport_->cycle(&command_frames_[0], command_frames_.size(), replies_frames_, expected_replies, 10000)) {
+        if (!cycle_one_by_one(10000)) {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), 
                             "Cycle commands failed");
             return hardware_interface::CallbackReturn::ERROR;
@@ -872,8 +903,9 @@ bool MoteusInterface::make_cyclic_commands()
             // replaced them with their defaults (position NaN, velocity 0, torque 0) in the joint
             // physical layer, and the transmission propagates those onto the actuator values.
             moteus::PositionMode::Command cmd;
-            if (std::isnan(actuator_commands_position_[i])) {
-                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            if (actuator.setpoint_sync_ == Actuator::SetpointSync::PENDING) {
+                cmd.position = actuator_states_position_[i] / (2.0 * M_PI);
+                actuator.setpoint_sync_ = Actuator::SetpointSync::SENT;
             } else {
                 cmd.position = actuator_commands_position_[i] / (2.0 * M_PI);
             }
@@ -924,7 +956,13 @@ bool MoteusInterface::make_cyclic_commands()
         else if (actuator.cmd_mode_ == CommandMode::IDLE) {
             // in idle hold current position
             moteus::PositionMode::Command cmd;
-            cmd.position = std::numeric_limits<double>::quiet_NaN();
+            if (actuator.setpoint_sync_ == Actuator::SetpointSync::PENDING) {
+                cmd.position = actuator_states_position_[i] / (2.0 * M_PI);
+                actuator.setpoint_sync_ = Actuator::SetpointSync::SENT;
+            }
+            else {
+                cmd.position = std::numeric_limits<double>::quiet_NaN();
+            }
             cmd.velocity = 0;
             cmd.feedforward_torque = 0;
 
@@ -953,11 +991,11 @@ void MoteusInterface::parse_result_frames()
         );
         if (it != actuators_.end()) 
         {
-            size_t joint_index = std::distance(actuators_.begin(), it);
+            size_t actuator_index = std::distance(actuators_.begin(), it);
             
-            actuator_results_[joint_index] = moteus::Query::Parse(frame.data, frame.size);
+            actuator_results_[actuator_index] = moteus::Query::Parse(frame.data, frame.size);
 
-            actuators_updated_[joint_index] = true;
+            actuators_updated_[actuator_index] = true;
         }
     }
     replies_frames_.clear();
@@ -977,7 +1015,8 @@ bool MoteusInterface::watchdog(bool strict)
                          "Actuator %s (CAN-ID: %d) did not respond when requested!", actuators_[i].name_.c_str(), actuators_[i].can_id_);
                 ret = false;
             }
-            else {
+            else if (kTransportDebug) {
+                // normal builds: the transport's throttled summary already lists missing IDs
                 RCLCPP_WARN(rclcpp::get_logger("MoteusInterface"),
                          "Actuator %s (CAN-ID: %d) did not respond", actuators_[i].name_.c_str(), actuators_[i].can_id_);
             }

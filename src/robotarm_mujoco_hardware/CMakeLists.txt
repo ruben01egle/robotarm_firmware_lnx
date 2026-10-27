@@ -12,10 +12,14 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(mujoco_ros2_control REQUIRED)
+find_package(mujoco_ros2_control_plugins REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/RobotarmMujocoSystem.cpp
+  src/ServoBridge.cpp
+  src/ServoPlugin.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -25,11 +29,15 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 target_link_libraries(${PROJECT_NAME}
   mujoco_ros2_control::mujoco_ros2_control
+  mujoco_ros2_control_plugins::mujoco_ros2_control_plugins
   hardware_interface::hardware_interface
   pluginlib::pluginlib
+  yaml-cpp::yaml-cpp
 )
 
 pluginlib_export_plugin_description_file(hardware_interface robotarm_mujoco_hardware_plugins.xml)
+# the servo, run by mujoco_ros2_control on the physics thread (mujoco_plugins parameter)
+pluginlib_export_plugin_description_file(mujoco_ros2_control_plugins servo_plugin.xml)
 
 install(
   TARGETS ${PROJECT_NAME}
@@ -47,8 +55,8 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
-  ament_add_gtest(test_position_last test/test_position_last.cpp)
-  target_link_libraries(test_position_last ${PROJECT_NAME})
+  ament_add_gtest(test_joint_servo test/test_joint_servo.cpp)
+  target_link_libraries(test_joint_servo ${PROJECT_NAME})
 endif()
 
 ament_package()

@@ -126,7 +126,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sim_pids',
             default_value='',
-            description='position/velocity PID gains yaml, empty: installed config/sim_pids.yaml',
+            description='servo gains yaml, empty: installed config/sim_pids.yaml',
         ),
         DeclareLaunchArgument(
             'controller_params',

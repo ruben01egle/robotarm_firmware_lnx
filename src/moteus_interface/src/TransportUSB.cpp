@@ -13,6 +13,14 @@
 #include <time.h>
 #include <algorithm>
 
+// set via CMake option MOTEUS_TRANSPORT_DEBUG
+#ifndef MOTEUS_TRANSPORT_DEBUG
+#define MOTEUS_TRANSPORT_DEBUG 0
+#endif
+constexpr bool kTransportDebug = MOTEUS_TRANSPORT_DEBUG;
+
+using LineKind = moteus_interface::transport::TransportDiagnostics::LineKind;
+
 inline uint64_t dt_us(const struct timespec& start, const struct timespec& end) {
     const int64_t sec_diff  = static_cast<int64_t>(end.tv_sec)  - static_cast<int64_t>(start.tv_sec);
     const int64_t nsec_diff = static_cast<int64_t>(end.tv_nsec) - static_cast<int64_t>(start.tv_nsec);
@@ -50,7 +58,8 @@ moteus_interface::transport::TransportUSB::TransportUSB(const std::string device
     Transport(rclcpp::get_logger("MoteusTransport")),
     initialized_(false),
     fd_(-1),
-    device_(device)
+    device_(device),
+    diag_(logger_, kTransportDebug)
 {
 }
 
@@ -146,6 +155,7 @@ bool moteus_interface::transport::TransportUSB::initialize()
 
     RCLCPP_INFO(logger_, "Transport: Successfully opened and configured '%s'", device_.c_str());
     initialized_ = true;
+    flush();
     return true;
 }
 
@@ -157,12 +167,13 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
     }
     if (size == 0) { return true; }
 
+    // consume leftovers of the previous cycle (late replies, trailing OK/ERR)
+    // instead of tcflush()ing them away unseen
+    if (!drain_pending()) { return false; }
+
     timing_.mark_write_start();
+    diag_.begin_cycle(frames, size);
 
-    flush();
-    tx_buffer_pos_ = 0;
-
-    flush();
     tx_buffer_pos_ = 0;
 
     for (size_t i = 0; i < size; ++i) {
@@ -220,6 +231,7 @@ bool moteus_interface::transport::TransportUSB::write(const mjbots::moteus::CanF
     }
 
     timing_.mark_write_done();
+    diag_.mark_write_done();
 
     return true;
 }
@@ -246,6 +258,7 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         if (to_read == 0) {
             RCLCPP_WARN(logger_, "Transport: Line buffer overflow, resetting buffer.");
             rx_buffer_pos_ = 0;
+            carried_over_bytes_ = 0;
         }
         else {
             int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], to_read);
@@ -260,10 +273,18 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
                     if (rx_buffer_[scan_pos] == '\r' || rx_buffer_[scan_pos] == '\n') {
                         if (scan_pos > 0) {
                             std::string_view line(&rx_buffer_[0], scan_pos);
-                            if (parse_line(line, replies)) {
+                            mjbots::moteus::CanFdFrame frame;
+                            const LineKind kind = classify_line(line, frame);
+                            if (carried_over_bytes_ > 0) {
+                                diag_.on_late_line(kind, line, frame.source);
+                            }
+                            else if (diag_.on_line(kind, line, frame.source)) {
+                                // only the first reply of an expected ID counts
+                                replies.push_back(frame);
                                 receieved_replies++;
                             }
                         }
+                        carried_over_bytes_ = 0;
                         std::memmove(&rx_buffer_[0], &rx_buffer_[scan_pos + 1], rx_buffer_pos_ - (scan_pos + 1));
                         rx_buffer_pos_ -= (scan_pos + 1);
                         scan_pos = 0;
@@ -290,10 +311,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         }
 
         if (timeout_us == 0) {
-            if (receieved_replies < expected_replies) {
-                RCLCPP_WARN(logger_,
-                    "Transport: Read incomplete. Got %u of %u replies.", receieved_replies, expected_replies);
-            }
             timed_out = (receieved_replies < expected_replies);
             break;
         }
@@ -303,8 +320,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
         uint32_t elapsed_us = static_cast<uint32_t>(dt_us(start_time, current_time));
 
         if (elapsed_us >= timeout_us) {
-            RCLCPP_WARN(logger_,
-                "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
             timed_out = true;
             break;
         }
@@ -321,8 +336,6 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
             return false; 
         }
         else if (poll_result == 0) {
-            RCLCPP_WARN(logger_,
-                "Transport: Read timeout. Got %u of %u replies.", receieved_replies, expected_replies);
             timed_out = true;
             break;
         }
@@ -330,6 +343,7 @@ bool moteus_interface::transport::TransportUSB::read(std::vector<mjbots::moteus:
     } while (true);
 
     timing_.record_cycle_end(have_first_byte, expected_replies, receieved_replies, timed_out);
+    diag_.end_cycle(timed_out);
 
     return true;
 }
@@ -366,11 +380,70 @@ void moteus_interface::transport::TransportUSB::flush()
     ::tcflush(fd_, TCIFLUSH);
 
     rx_buffer_pos_ = 0;
+    carried_over_bytes_ = 0;
+}
+
+bool moteus_interface::transport::TransportUSB::drain_pending()
+{
+    if (!initialized_ || fd_ < 0) { return false; }
+
+    // Every complete line still pending belongs to the previous cycle. A
+    // trailing partial line is kept and attributed once it completes.
+    auto consume_complete_lines = [this]() {
+        size_t start = 0;
+        for (size_t i = 0; i < rx_buffer_pos_; ++i) {
+            if (rx_buffer_[i] != '\r' && rx_buffer_[i] != '\n') { continue; }
+            if (i > start) {
+                std::string_view line(&rx_buffer_[start], i - start);
+                mjbots::moteus::CanFdFrame frame;
+                diag_.on_late_line(classify_line(line, frame), line, frame.source);
+            }
+            start = i + 1;
+        }
+        std::memmove(&rx_buffer_[0], &rx_buffer_[start], rx_buffer_pos_ - start);
+        rx_buffer_pos_ -= start;
+    };
+
+    // bounded so a device spewing data can never stall the RT loop
+    for (int i = 0; i < 8; ++i) {
+        if (rx_buffer_pos_ == sizeof(rx_buffer_)) {
+            RCLCPP_WARN(logger_, "Transport: Line buffer overflow, resetting buffer.");
+            rx_buffer_pos_ = 0;
+        }
+        const int read_ret = ::read(fd_, &rx_buffer_[rx_buffer_pos_], sizeof(rx_buffer_) - rx_buffer_pos_);
+        if (read_ret < 0) {
+            if (errno == EINTR) { continue; }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) { break; }
+            RCLCPP_ERROR(logger_, "Transport: Fatal read error: %s", std::strerror(errno));
+            return false;
+        }
+        if (read_ret == 0) {
+            RCLCPP_ERROR(logger_, "Transport: Device unplugged / connection closed.");
+            initialized_ = false;
+            return false;
+        }
+        rx_buffer_pos_ += read_ret;
+        consume_complete_lines();
+    }
+
+    carried_over_bytes_ = rx_buffer_pos_;
+    return true;
+}
+
+moteus_interface::transport::TransportDiagnostics::LineKind
+moteus_interface::transport::TransportUSB::classify_line(
+    std::string_view line,
+    mjbots::moteus::CanFdFrame& frame)
+{
+    if (line == "OK") { return LineKind::Ok; }
+    if (line.substr(0, 3) == "ERR") { return LineKind::Err; }
+    if (parse_line(line, frame)) { return LineKind::Rcv; }
+    return LineKind::Stray;
 }
 
 bool moteus_interface::transport::TransportUSB::parse_line(
     std::string_view line, 
-    std::vector<mjbots::moteus::CanFdFrame>& replies)
+    mjbots::moteus::CanFdFrame& frame)
 {
     if (line.size() < 10 || line.substr(0, 4) != "rcv ") {
         return false; 
@@ -405,7 +478,6 @@ bool moteus_interface::transport::TransportUSB::parse_line(
         arbitration_id = (arbitration_id << 4) | static_cast<uint32_t>(n);
     }
 
-    mjbots::moteus::CanFdFrame frame;
     frame.arbitration_id = arbitration_id;
     frame.destination = arbitration_id & 0x7f;
     frame.source = (arbitration_id >> 8) & 0x7f;
@@ -413,7 +485,9 @@ bool moteus_interface::transport::TransportUSB::parse_line(
 
     size_t to_read = std::min<size_t>(64 * 2, data_str.size());
     for (size_t i = 0; i < to_read; i += 2) {
-        frame.data[i / 2] = parse_hex_byte(&data_str[i]);
+        const int byte = parse_hex_byte(&data_str[i]);
+        if (byte < 0) return false;
+        frame.data[i / 2] = static_cast<uint8_t>(byte);
     }
     frame.size = to_read / 2;
 
@@ -427,7 +501,6 @@ bool moteus_interface::transport::TransportUSB::parse_line(
         }
     }
 
-    replies.push_back(frame);
     return true;
 }
 

@@ -52,10 +52,12 @@ bool moteus_interface::transmission::DifferentialTransmission::validate_mode_swi
            *joint1_.interfaces == *joint2_.interfaces;
 }
 
-void moteus_interface::transmission::DifferentialTransmission::perform_mode_switch()
+bool moteus_interface::transmission::DifferentialTransmission::perform_mode_switch()
 {
+    if (*actuator_a_.mode == *joint1_.mode && *actuator_b_.mode == *joint2_.mode) return false;
     *actuator_a_.mode = *joint1_.mode;
     *actuator_b_.mode = *joint2_.mode;
+    return true;
 }
 
 void moteus_interface::transmission::DifferentialTransmission::home()

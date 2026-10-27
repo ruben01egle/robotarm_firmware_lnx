@@ -9,7 +9,7 @@
   <!-- MJCF scene loaded by the hardware interface, written by robotarm_mjcf (sim.launch.py sets it) -->
   <xacro:arg name="mujoco_model" default="" />
   <xacro:arg name="headless" default="false" />
-  <!-- position/velocity PID gains of the sim, empty: the installed config/sim_pids.yaml -->
+  <!-- position/velocity servo gains of the sim, empty: the installed config/sim_pids.yaml -->
   <xacro:arg name="pids_config_file" default="" />
 
   <xacro:include filename="$(find robotarm_description)/urdf/robotarm_geometry.xacro" />

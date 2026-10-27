@@ -1,0 +1,9 @@
+<library path="robotarm_mujoco_hardware">
+  <class name="robotarm_mujoco_hardware/ServoPlugin"
+         type="robotarm_mujoco_hardware::ServoPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Position/velocity servo of RobotarmMujocoSystem, run before every physics step on the physics thread.
+    </description>
+  </class>
+</library>

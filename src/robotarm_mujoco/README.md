@@ -7,7 +7,7 @@ Cartesian impedance), `position` + `velocity` for joint stream and Cartesian jog
 The hardware plugin is [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware), a thin layer over
 [`mujoco_ros2_control`](https://github.com/ros-controls/mujoco_ros2_control).
 
-> **Position and velocity are followed by a generic sim PID, not by a model of the moteus position loop.**
+> **Position and velocity are followed by a generic sim servo, not by a model of the moteus position loop.**
 > The gains ([config/sim_pids.yaml](config/sim_pids.yaml)) are tuned for stable, stiff tracking in the sim
 > only, and `torque_ff` does not exist here. Use the sim to check wiring, interface claims, controller
 > switching and what a controller does with the arm, not tracking performance or gains for the real arm. The
@@ -27,7 +27,7 @@ ros2 launch robotarm_mujoco sim.launch.py headless:=true rviz:=true
 | `rviz` | `false` | also start RViz |
 | `software_rendering` | `true` | Mesa software OpenGL for the viewer and RViz. In the dev container, hardware rendering hangs on VS Code's forwarded X display; set `false` once the container has working GPU access |
 | `sim_params` | installed `config/sim_params.yaml` | simulation parameters (friction, timestep) |
-| `sim_pids` | installed `config/sim_pids.yaml` | PID gains of the position/velocity interfaces |
+| `sim_pids` | installed `config/sim_pids.yaml` | servo gains of the position/velocity interfaces |
 | `controller_params` | none | yaml applied after `robotarm_bringup/config/controllers.yaml`, for gains you only want in the sim |
 | `joint_state_rate` | `50` | Hz, `/joint_states` rate. `500` for the push test, 50 Hz is too coarse to fit a response |
 
@@ -39,7 +39,7 @@ mock. Activate them like there:
 
 ```bash
 ros2 control set_hardware_component_state moteus_hardware_system active
-ros2 control switch_controllers --activate joint_stream_controller          # position/velocity, sim PID
+ros2 control switch_controllers --activate joint_stream_controller          # position/velocity, sim servo
 ros2 control switch_controllers --deactivate joint_stream_controller \
   --activate gc_controller                                                   # gravity compensation and hold
 ros2 control switch_controllers --deactivate gc_controller \
@@ -166,30 +166,44 @@ spring.
 The **reflected rotor inertia** (`armature`) comes from the URDF: the converter reads the
 `<armature value="..."/>` of each joint, the same value `robotarm_rbd` uses in the controllers, so sim and
 controller model never disagree. It used to be set in `sim_params.yaml`, which now fails with an error if it
-still contains `armature`, `rotor_inertia` or `gear_ratio`. The URDF values are placeholders (0) until
-measured; the former estimates and how they were derived are in
+still contains `armature`, `rotor_inertia` or `gear_ratio`. How the values were estimated is in
 [docs/dynamics/README.md](../../docs/dynamics/README.md#armature-used).
 
-**With armature 0, the torque controllers chatter on axis6.** Its link alone has 2.6e-5 kg·m², and the
-`joint_damping` of `gc_controller`/`cartesian_impedance_controller` (0.055 Nm·s/rad, sized for the estimated
-7.2e-4 kg·m²) is a discrete damper at 500 Hz that is only stable for `D·T/M < 2`; here it is about 4. The
-wrist then oscillates at up to ~20 rad/s. This goes away with a realistic armature in the URDF. The sim PIDs
-are not affected, they are tuned to stay stable down to armature 0.
+**The light wrist joints need a realistic armature.** axis6's link alone has 2.6e-5 kg·m². With armature 0,
+every damper running at 500 Hz on it is too stiff (stable only for `D·T/M < 2`): the `joint_damping` of
+`gc_controller`/`cartesian_impedance_controller` and the `kd` of the sim servo both make the wrist chatter.
 
-## Position and velocity PIDs
+## Position and velocity servo
 
-[`config/sim_pids.yaml`](config/sim_pids.yaml) has one position and one velocity PID per joint
-(`control_toolbox` gains, read by `mujoco_ros2_control` as `pid_gains.<position|velocity>.<joint>`). They act
-on the joint's `<motor>` actuator, computed in `write()` at 500 Hz on the 1 kHz physics.
+Position and velocity commands go through a servo per joint in
+[`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware), with the structure of the moteus position loop:
 
-- **Position + velocity claimed** (joint stream, Cartesian jog): the position PID runs. `mujoco_ros2_control`
-  on its own would run the velocity PID, see [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware).
-- **Velocity only:** the velocity PID; its `i` equals the position `kp`, so it behaves like the position loop.
-- **Nothing claimed:** the position PID holds the position the joint had when its last claim was released.
+```
+tau = kp·(p* − p) + kd·(v* − v) + ki·∫(p* − p) dt
+```
 
-The gains are ζ = 1 at ω = 80 rad/s for a reference inertia per joint, checked offline against the same loop at
-random poses, with armature 0 and with the old estimates (stable up to ω = 120). If the URDF armature makes a
-joint much heavier than the estimates, retune; the file header has the formulas.
+`v` is the joint velocity MuJoCo measures, nothing is differentiated. Output and integral are clamped to the
+URDF effort limit, the integral pauses while the output saturates.
+
+It runs on the physics thread, before every physics step (1 kHz), as a `mujoco_ros2_control` plugin
+(`robotarm_servo` in [config/sim_plugins.yaml](config/sim_plugins.yaml), required). The controller's target
+belongs to the controller manager's time, which under load lags the physics by a few ms and jitters; the servo
+moves it to the physics time (`p* + v*·(t − t_c)`, at most 50 ms ahead), so target and measured state always
+belong to the same moment. Measured with the viewer and the CPU fully loaded, joint stream moves: torque jumps
+of more than half the effort limit went from about 4 % of the cycles (servo in the control loop) to under 1 %,
+and to 0 with the controller manager's command limiter (`enforce_command_limits`) off: under load it clips
+targets because of the jittering sim timing, and the stiff servo turns each clipped step into a torque spike.
+
+- **Position + velocity claimed** (joint stream, Cartesian jog): `p*` and `v*` from the controller.
+- **Velocity only, or a NaN position:** `p*` integrates `v*` from the position at the claim, like the moteus.
+- **Nothing claimed:** holds the position the joint had when its last claim was released.
+- **Effort claimed:** the torque goes to the joint as it is. Effort together with position/velocity on one
+  joint is rejected, like by `moteus_interface`.
+
+The gains ([config/sim_pids.yaml](config/sim_pids.yaml), `kp`, `ki`, `kd` per joint) are ζ = 1 at ω = 80 rad/s
+for a reference inertia per joint, checked offline against the same loop with the URDF armature, also with
+jittering cycle times. If the armature changes a joint's inertia a lot, retune; the file header has the
+formulas.
 
 ## Joint list duplication
 
@@ -202,7 +216,7 @@ and `effort`, no `torque_ff`, no transmissions. The joint list therefore exists 
 
 It models rigid body dynamics from the CAD inertials, reflected rotor inertia, viscous and dry joint
 friction, joint limits, effort limits and self-collision. It does not model the moteus position loop
-(position/velocity go through a generic sim PID, see above), the current loop or torque bandwidth,
+(position/velocity go through a generic sim servo, see above), the current loop or torque bandwidth,
 cogging, belt elasticity or backlash, encoder quantisation or CAN latency. The
 controller loop runs at the configured 500 Hz against a 1 kHz physics step.
 
@@ -222,7 +236,7 @@ the same URDF:
 - that pure gravity feed-forward holds a pose for 2 s
 - that the vendored MuJoCo (the version the hardware plugin runs) compiles the scene
 - the ros2_control block: same joints as the hardware, position/velocity/effort, the
-  `robotarm_mujoco_hardware` plugin, and a position and velocity PID for every joint within its effort limit
+  `robotarm_mujoco_hardware` plugin, and servo gains for every joint
 
 `robotarm_rbd` is checked against Pinocchio in its own tests. If both pass, the simulated dynamics
 are the ones the controllers compute with.

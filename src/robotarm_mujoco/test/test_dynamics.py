@@ -50,3 +50,11 @@ def test_wrench_plugin_is_configured():
         params = yaml.safe_load(f)['mujoco_ros2_control_node']['ros__parameters']
     types = [plugin['type'] for plugin in params['mujoco_plugins'].values()]
     assert 'mujoco_ros2_control_plugins/ExternalWrenchPlugin' in types
+
+
+def test_servo_plugin_is_configured():
+    # the hardware plugin refuses to start without it
+    with open(os.path.join(mjcf.share_dir(), 'config', 'sim_plugins.yaml')) as f:
+        params = yaml.safe_load(f)['mujoco_ros2_control_node']['ros__parameters']
+    types = [plugin['type'] for plugin in params['mujoco_plugins'].values()]
+    assert 'robotarm_mujoco_hardware/ServoPlugin' in types

@@ -86,7 +86,7 @@ controller_manager:
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
-    timeout_transport_us: 1000
+    timeout_transport_us: 2000
     time_transport: false
     
     transport:
@@ -106,8 +106,8 @@ joint_stream_controller:
       - axis5
       - axis6
     max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
-    max_acceleration: 4.0
-    max_jerk: 10.0
+    max_acceleration: 6.0
+    max_jerk: 35.0
     sync_joints: false
 
 joint_stream_controller_impedance:
@@ -193,9 +193,8 @@ gc_controller:
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
 
-    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6), not validated on hardware, kept soft. zeta ≈ 1 against
-    # hold_stiffness at the median pose inertia, see docs/dynamics/README.md (axis1 varies 0.6..2.2 with the pose)
-    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6)
+    joint_damping: [0.25, 0.7, 0.7, 0.2, 0.1, 0.02]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
     # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
@@ -207,9 +206,8 @@ gc_controller:
 
     # gc mode only. Breakaway hold per joint: spring to an anchor that slides once the spring torque exceeds the
     # breakaway torque, i.e. a virtual static friction. Band width = breakaway / stiffness, 0 disables a joint.
-    # Stiffness from the band: 0.05 rad for axis1..3, 0.1 rad for the wrist (model error relatively larger)
     hold_stiffness: [20.0, 50.0, 30.0, 4.0, 1.0, 1.0]               # Nm/rad
-    hold_breakaway_torque: [1.0, 2.5, 1.5, 0.4, 0.1, 0.1]          # Nm, must exceed the gravity model error
+    hold_breakaway_torque: [0.5, 1.0, 0.5, 0.3, 0.1, 0.05]          # Nm, must exceed the gravity model error
 
 cartesian_impedance_controller:
   ros__parameters:
@@ -221,11 +219,10 @@ cartesian_impedance_controller:
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
 
-    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). STILL THE GC VALUES: in impedance mode joint damping
+    # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). in impedance mode joint damping
     # acts in parallel to the cartesian damper and only has to brake what the cartesian terms can't see (null space at
-    # singularities, axes with zero cartesian stiffness). At these values it dominates, every mode is overdamped and an
-    # elbow motion creeps back over seconds (docs/dynamics/task_space_inertia.md). Reduce when tuning.
-    joint_damping: [5.5, 12.5, 4.0, 0.42, 0.16, 0.055]
+    # singularities, axes with zero cartesian stiffness).
+    joint_damping: [0.1, 0.2, 0.2, 0.1, 0.05, 0.003]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
     # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to

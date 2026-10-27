@@ -16,7 +16,7 @@ public:
     virtual void joint_to_actuator() override;
 
     virtual bool validate_mode_switch() const override;
-    virtual void perform_mode_switch() override;
+    virtual bool perform_mode_switch() override;
     virtual void home() override;
 
 private:

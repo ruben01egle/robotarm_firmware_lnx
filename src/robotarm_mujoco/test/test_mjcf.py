@@ -237,27 +237,20 @@ def test_sim_ros2_control_joints_match_the_hardware():
         assert commands == ['position', 'velocity', 'effort']
 
 
-def test_sim_runs_the_position_wins_plugin():
+def test_sim_runs_the_robotarm_plugin():
     plugin = ET.fromstring(mjcf.xacro_urdf()).find('ros2_control/hardware/plugin').text
     assert plugin == 'robotarm_mujoco_hardware/RobotarmMujocoSystem'
 
 
-def test_sim_pids_cover_every_joint_within_the_effort_limit():
-    # a joint without a PID cannot take position/velocity commands, and without a velocity PID
-    # the hardware writes the raw velocity command as a torque
+def test_sim_servo_gains_cover_every_joint():
+    # the hardware plugin refuses to start without gains for every joint
     path = os.path.join(mjcf.share_dir(), 'config', 'sim_pids.yaml')
     with open(path) as f:
-        pids = yaml.safe_load(f)['/**']['ros__parameters']['pid_gains']
-    root = ET.fromstring(mjcf.xacro_urdf())
-    effort = {j.get('name'): float(j.find('limit').get('effort'))
-              for j in root.findall('joint') if j.find('limit') is not None}
-    for kind in ('position', 'velocity'):
-        assert sorted(pids[kind]) == sorted(ros2_control_joints(mjcf.xacro_urdf())), kind
-        for joint, gains in pids[kind].items():
-            assert gains['p'] > 0, (kind, joint)
-            for key in ('i_clamp_max', 'u_clamp_max'):
-                assert 0 < gains[key] <= effort[joint], (kind, joint, key)
-                assert gains[key.replace('max', 'min')] == -gains[key], (kind, joint, key)
+        gains = yaml.safe_load(f)
+    assert sorted(gains) == sorted(ros2_control_joints(mjcf.xacro_urdf()))
+    for joint, g in gains.items():
+        assert sorted(g) == ['kd', 'ki', 'kp'], joint
+        assert g['kp'] > 0 and g['kd'] > 0 and g['ki'] >= 0, joint
 
 
 def test_robot_description_carries_the_model_path():

@@ -5,8 +5,10 @@ AS5048B output encoders:
 
 - **Axis 1–3**: Eaglepower LA8308, one- or two-stage GT3 belt gearboxes.
 - **Axis 4**: Eaglepower LA8308, 1:4 gearbox.
-- **Axis 5/6 (wrist)**: two BE4108 380KV motors, each with a 1:4 gearbox in front of a
-  differential. The two controllers drive the two differential inputs, not the joints.
+- **Axis 5/6 (wrist)**: two T-Motor MN5008 KV170 motors, each with a 1:6 belt in front of
+  a differential. The two controllers drive the two differential inputs, not the joints.
+  They replaced the original BE4108 (X4108) 380KV motors, which overheated; see
+  [wrist_motor_selection.md](wrist_motor_selection.md).
 
 The `actuator<id>_moteus_r411_<motor>.cfg` files in this folder are full register dumps
 of each controller (`conf enumerate` / `--dump-config` output). They are the **source of
@@ -38,7 +40,7 @@ velocity, acceleration and gain below is at the joint output, after the gearbox*
 `moteus_interface` only converts rev ↔ rad (`× 2π`, see `MoteusInterface.cpp`), it does
 not apply any sign or ratio. Direction and ratio live on the controller.
 
-**Axis 5/6 exception:** their "output" is the differential input after the 1:4 gearbox,
+**Axis 5/6 exception:** their "output" is the differential input after the 1:6 belt,
 not a joint. `DifferentialTransmission` maps between the two (all in rev):
 
 ```
@@ -119,7 +121,7 @@ after `conf write`.
    ```
    python3 -m moteus.moteus_tool --target <id> --dump-config > actuator<id>_moteus_r411_<motor>.cfg
    ```
-   with `<motor>` = `eaglepower_8308` (actuator 1–4) or `BE4108` (actuator 5/6).
+   with `<motor>` = `eaglepower_8308` (actuator 1–4) or `mn5008` (actuator 5/6).
    A dump can be put back on a controller with `--restore-config <file>`. The
    calibration values in it belong to that specific motor/controller pair.
 
@@ -128,7 +130,7 @@ after `conf write`.
 ### Shared by all axes
 
 Shared by all six controllers unless a row says otherwise; for axis 5/6 differences, see
-[Axis 5/6](#axis-56-wrist-be4108-380kv).
+[Axis 5/6](#axis-56-wrist-mn5008-kv170).
 
 | Parameter | Value | What it does |
 |---|---|---|
@@ -139,7 +141,7 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `servo.fault_temperature` | 75 °C | Board temperature fault (default) |
 | `servo.pwm_rate_hz` | 20000 | PWM / current loop rate (default 30000) |
 | `servo.max_current_desired_rate` | 50000 A/s | Max slew of the desired current (default 10000) |
-| `servo.max_velocity_derate` | 0.5 rev/s (target, see below) | Motoring current falls to 0 at `max_velocity + derate` |
+| `servo.max_velocity_derate` | 0.5 rev/s | Motoring current falls to 0 at `max_velocity + derate` |
 | `servo.default_timeout_s` / `timeout_mode` | 0.1 s / 12 | Command watchdog: hold zero velocity after 100 ms without commands (defaults) |
 | `motor_position.commutation_source` | 0 | Onboard SPI encoder (source 0) commutates the motor |
 | `motor_position.output.source` | 0 | Output position/velocity = onboard encoder × gear ratio |
@@ -157,82 +159,83 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `id.id` | 1 | 2 | 3 | 4 |
 | gearbox | 1:6, one belt stage | 1:30 (5 × 6), two stages | 126:11 ≈ 1:11.45, two stages | 1:4 |
 | `motor_position.rotor_to_output_ratio` | 0.166667 | 0.033333 | 0.087302 | 0.25 |
-| `motor_position.output.sign` | −1 | 1 | 1 | −1 (verify on test) |
+| `motor_position.output.sign` | −1 | 1 | 1 | 1 |
 | `motor_position.sources.1.i2c_device` | 1 | 0 | 0 | 0 |
-| `servopos.position_min` [rev] | −0.486111 | −0.444444 | −0.333333 | −0.486111 |
-| `servopos.position_max` [rev] | 0.486111 | 0.055556 | 0.375 | 0.486111 |
-| `servo.default_velocity_limit` [rev/s] | 0.5997 | 0.4775 | 0.4775 | 0.4775 |
-| `servo.max_velocity` [rev/s] | 0.5997 | 0.4775 | 0.4775 | 0.4775 |
-| `servo.default_accel_limit` [rev/s²] | 12 | 4 | 6 | 12 (start) |
-| `servo.pid_position.kp` [Nm/rev] | 5000 | 12000 | 6000 | 5000 (start) |
-| `servo.pid_position.ki` [Nm/(rev·s)] | 5000 | 5000 | 5000 | 5000 (start) |
-| `servo.pid_position.kd` [Nm/(rev/s)] | 10 | 40 | 10 | 10 (start) |
+| `servopos.position_min` [rev] | −0.486111 | −0.444444 | −0.333333 | −0.472222 |
+| `servopos.position_max` [rev] | 0.486111 | 0.055556 | 0.369444 | 0.472222 |
+| `servo.default_velocity_limit` [rev/s] | 0.6 | 0.4775 | 0.4775 | 0.4775 |
+| `servo.max_velocity` [rev/s] | 0.6 | 0.4775 | 0.4775 | 0.4775 |
+| `servo.default_accel_limit` [rev/s²] | 12 | 4 | 20 | 12 |
+| `servo.pid_position.kp` [Nm/rev] | 5000 | 12000 | 6000 | 1000 |
+| `servo.pid_position.ki` [Nm/(rev·s)] | 5000 | 5000 | 5000 | 500 |
+| `servo.pid_position.kd` [Nm/(rev/s)] | 10 | 40 | 10 | 5 |
 | `servo.pid_position.ilimit` [Nm] | 7.2 | 36 | 14.5 | 6 |
 
-Position and velocity limits in this table are the **target values derived from the
-current URDF**; the axis 1–3 dumps do not match them yet, see the next section. Axis 4
-uses the same motor and shared settings as axis 1–3, and its dump matches this table
-except for the PID gains (still firmware defaults). Its `kp`/`ki`/`kd` are starting
-points copied from axis 1, which has a similar low ratio and no gravity load, and
-still need tuning. Its `ilimit` is 1.2 × the URDF effort of 5 Nm. Its calibrated
+All values in this table match the axis 1–4 dumps. The axis 1 velocity limits are
+1.2 × URDF = 0.5997 rev/s, rounded to 0.6. Axis 4 uses the same motor and shared
+settings as axis 1–3. Its `ilimit` is 1.2 × the URDF effort of 5 Nm. Its calibrated
 `motor.Kv` is 131, about 9 % below axis 1–3 (142–144). That is within normal motor
 spread, as long as the motor was free during calibration.
 
-### Axis 5/6 (wrist, BE4108 380KV)
+### Axis 5/6 (wrist, MN5008 KV170)
 
-Both controllers use the same values. The BE4108 is a much smaller, high-KV motor than
-the LA8308, so several shared values differ. **⚠️ = differs from axis 1–4.** The values
-are as flashed in the actuator 5/6 dumps, except for the PID gains, which are still
-firmware defaults (proposed starting values below).
+Both controllers use the same values. The MN5008 is a much smaller motor than the
+LA8308, so several shared values differ. **⚠️ = differs from axis 1–4.** The values
+are as flashed in the `actuator5/6_moteus_r411_mn5008.cfg` dumps.
+
+Motor choice and thermal tests: [wrist_motor_selection.md](wrist_motor_selection.md),
+[mn5008_testing.md](mn5008_testing.md). Results for the old BE4108 motors are in
+[x4108_testing.md](x4108_testing.md); their dumps are in the git history.
 
 Calibration results:
 
 | | Actuator 5 | Actuator 6 |
 |---|---|---|
-| `motor.poles` | 22 | 22 |
-| `motor.phase_invert` | 1 | 0 |
-| `motor.resistance_ohm` | 0.105 | 0.099 |
-| `motor.Kv` | 319 | 358 |
-| Kt after 1:4 (≈ 4 · 8.27 / Kv) | ≈ 0.104 Nm/A | ≈ 0.092 Nm/A |
+| `motor.poles` | 28 | 28 |
+| `motor.phase_invert` | 1 | 1 |
+| `motor.resistance_ohm` | 0.1506 | 0.1442 |
+| `motor.Kv` | 156.4 | 155.5 |
+| Kt at the motor (≈ 8.27 / Kv) | ≈ 0.053 Nm/A | ≈ 0.053 Nm/A |
+| Kt after 1:6 | ≈ 0.317 Nm/A | ≈ 0.319 Nm/A |
 
-`phase_invert` only reflects the phase wiring order. The two Kv values are 6–16 %
-below the nominal 380 and about 11 % apart. moteus converts torque with each board's own
-Kv, so torque commands stay consistent, but if a motor wasn't completely free during
-calibration, recalibrate it.
+`phase_invert` only reflects the phase wiring order. Both Kv values are ~8 % below the
+nominal 170 and within 0.5 % of each other. The 4 % difference in resistance comes from
+calibration temperature: measured cold, both are 0.146 Ω.
 
 | Parameter | Axis 1–4 | Actuator 5 (`wrist_a`) / 6 (`wrist_b`) | Why |
 |---|---|---|---|
 | `id.id` | 1–4 | 5 / 6 | `can_id` in the xacro |
-| gearbox | – | 1:4, then differential | |
-| ⚠️ `motor_position.rotor_to_output_ratio` | – | **0.25** | Output = differential input after 1:4 (1:1 bevel gears assumed) |
-| ⚠️ `motor_position.output.sign` | – | **1 / 1 (verify on test)** | Both controllers +: j5 moves +, j6 stays. 5 + / 6 −: j6 moves + |
+| gearbox | – | 1:6 belt, then differential | |
+| ⚠️ `motor_position.rotor_to_output_ratio` | – | **0.166667** | Output = differential input after the 1:6 belt (1:1 bevel gears assumed) |
+| ⚠️ `motor_position.output.sign` | – | **1 / 1 (verify on test, dump has −1 / 1)** | Both controllers +: j5 moves +, j6 stays. 5 + / 6 −: j6 moves + |
 | `motor_position.output.reference_source` | −1 | −1 (**must stay**) | The AS5048B measures a joint, not this controller's output |
-| ⚠️ `servo.max_current_A` | 100 A | **40 A** | ≈ 3.7–4.1 Nm per actuator. Peak only, see cooling below |
-| ⚠️ `servopos.position_min` [rev] | – | **−0.8055** | −(115° + 175°) / 360° = −0.805556, see [Limits](#limits-come-from-the-urdf) |
-| ⚠️ `servopos.position_max` [rev] | – | **0.8055** | +(115° + 175°) / 360° |
+| ⚠️ `servo.max_current_A` | 100 A | **25 A** | ≈ 7.9 Nm per actuator after 1:6. Peak only, see cooling below |
+| ⚠️ `servopos.position_min` [rev] | – | **−0.802778** | −(114° + 175°) / 360° = −0.802778, see [Limits](#limits-come-from-the-urdf) |
+| ⚠️ `servopos.position_max` [rev] | – | **0.8055** | +(115° + 175°) / 360° = 0.805556, rounded 0.02° below the URDF |
 | ⚠️ `servo.default_velocity_limit` [rev/s] | – | **0.955** | 1.2 · (2.5 + 2.5 rad/s) / 2π = 0.9549 |
 | ⚠️ `servo.max_velocity` [rev/s] | – | **0.955** | as above |
 | `servo.max_velocity_derate` [rev/s] | 0.5 | 0.5 | unchanged |
 | ⚠️ `servo.default_accel_limit` [rev/s²] | 4–12 | **20** | Loose upper bound, wrist inertia is small |
-| ⚠️ `servo.pid_position.kp` [Nm/rev] | 5000–12000 | **300 (start)** | 0.001 rev error → 0.3 Nm |
-| ⚠️ `servo.pid_position.ki` [Nm/(rev·s)] | 5000 | **300 (start)** | Starts at the level of `kp` (tuning step 3) |
-| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 10–40 | **3 (start)** | 1 % of `kp` (tuning step 2) |
-| ⚠️ `servo.pid_position.ilimit` [Nm] | 7.2–36 | **1.0** | Wrist gravity load is small. Chosen for a 15 A limit; with 40 A it can be raised if the wrist sags under payload |
+| ⚠️ `servo.pid_position.kp` [Nm/rev] | 1000–12000 | **1000** | 0.001 rev error → 1 Nm |
+| ⚠️ `servo.pid_position.ki` [Nm/(rev·s)] | 500–5000 | **500** | |
+| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 5–40 | **2** | |
+| ⚠️ `servo.pid_position.ilimit` [Nm] | 7.2–36 | **1.0** | Wrist gravity load is small. Raise towards ~1.5 Nm per actuator if the wrist sags under payload (2.5 Nm wrist pitch = 1.25 Nm per actuator) |
 | calibration `--cal-bw-hz` | 400 | 400 → `servo.pid_dq_hz` 400 | Drop to default 200 if the current loop is noisy |
 | `servo.flux_brake_*` | 8 V / 0.06 Ω | unchanged | |
 | `servo.pwm_rate_hz`, `max_current_desired_rate`, `max_voltage`, timeout, encoder (aux2) settings | | unchanged | |
 
 Points to check:
 
-- **Torque.** At 40 A each actuator gives ≈ 3.7–4.1 Nm. Each actuator carries
-  `(τ5 ± τ6) / 2`, so the URDF effort of 4 Nm on one joint needs ≈ 2 Nm (≈ 20 A) per
-  motor, and 4 Nm on both joints at once needs ≈ 4 Nm (≈ 40 A) on one motor. The URDF
-  effort is reachable, but only as a peak.
-- **Cooling.** 40 A is far above what a 4108 can carry continuously, especially inside
-  the wrist without prop airflow: copper loss is ≈ 1.5 · I² · R ≈ 240 W at 40 A versus
-  ≈ 15 W at 10 A. There is no motor thermistor, so nothing stops a stalled wrist from
-  burning the windings. Watch the motor temperature by hand during the first tests, and
-  lower `max_current_A` if the motors get hot under normal load.
+- **Torque.** At 25 A each actuator gives ≈ 7.9 Nm after 1:6. Each actuator carries
+  `(τ5 ± τ6) / 2`, so the URDF effort of 4 Nm on one joint needs ≈ 2 Nm (≈ 6.3 A) per
+  motor, and 4 Nm on both joints at once needs ≈ 4 Nm (≈ 12.6 A) on one motor. Both
+  are reachable well within 25 A.
+- **Cooling.** Each motor needs its 35 mm fan for continuous load. With fans, the tests
+  give ≈ 9–10 A continuous per motor (≈ 5 Nm wrist pitch); without fans only
+  ≈ 4–4.5 A, with the PETG mount reaching 60 °C (see
+  [mn5008_testing.md](mn5008_testing.md)). 25 A is a peak (≈ 1.5 · I² · R ≈ 140 W per
+  motor). There is no motor thermistor, so nothing stops a stalled wrist without fans
+  from overheating the PETG mounts.
 - **Stiffness.** A joint 5 error moves both actuators, so the joint stiffness is
   2 × `kp`. A joint 6 error also gives 2 × `kp`.
 - **Bevel ratio.** If the differential's bevel gears are not 1:1, j6 and its limits
@@ -241,70 +244,30 @@ Points to check:
 
 ## Known differences to the target values
 
-The actuator 1–3 dumps (last updated 2026-07-15) still contain older limits. The
-actuator 4–6 dumps have the limits, but not the secondary encoder or PID gains yet.
-Remove this section once everything below is done.
+All six dumps were updated on 2026-10-24. Limits, velocity settings, the secondary
+encoders, the axis 4 direction (checked) and the axis 4–6 PID tuning are done. What is still open is
+listed below. Remove this section once everything is done.
 
 ### TODO
 
-- [ ] Axis 1 (`--target 1 --console`):
-  - [ ] `conf set servopos.position_min -0.486111`
-  - [ ] `conf set servopos.position_max 0.486111`
-  - [ ] `conf set servo.default_velocity_limit 0.5997`
-  - [ ] `conf set servo.max_velocity 0.5997`
-  - [ ] `conf set servo.max_velocity_derate 0.5`
-  - [ ] `conf write`
-- [ ] Axis 2 (`--target 2 --console`):
-  - [ ] `conf set servo.default_velocity_limit 0.4775`
-  - [ ] `conf set servo.max_velocity 0.4775`
-  - [ ] `conf set servo.max_velocity_derate 0.5`
-  - [ ] `conf write`
-- [ ] Axis 3 (`--target 3 --console`):
-  - [ ] `conf set servopos.position_max 0.375`
-  - [ ] `conf set servo.default_velocity_limit 0.4775`
-  - [ ] `conf set servo.max_velocity 0.4775`
-  - [ ] `conf set servo.max_velocity_derate 0.5`
-  - [ ] Optional: raise `servo.default_accel_limit` above 6 rev/s² (see
-    [Acceleration limits](#acceleration-limits))
-  - [ ] `conf write`
-- [ ] Axis 4 (`--target 4 --console`):
-  - [ ] Secondary encoder (AS5048B on aux2, I2C device slot 0), step 4 of the
-    [setup procedure](#setup-procedure)
-  - [ ] Tune the position PID (`kp`/`ki`/`kd`, see [Position PID](#position-pid))
-  - [ ] `conf write`
 - [ ] Actuator 5 and 6 (`--target 5` / `--target 6 --console`, each):
-  - [x] `conf set aux2.uart.mode 0` (aux2 was still configured for a UART device)
-  - [ ] Secondary encoder (AS5048B on aux2, I2C device slot 0), step 4 of the
-    [setup procedure](#setup-procedure). This also replaces `aux2.pins.0/1.mode 3`
-    (UART) with 13.
-  - [x] Actuator 6 only: `conf set servo.max_velocity_derate 0.5` (was 0.05)
   - [ ] Verify both `output.sign` with the differential test in the
-    [axis 5/6 table](#axis-56-wrist-be4108-380kv)
-  - [ ] Tune the position PID (`kp`/`ki`/`kd`, see [Position PID](#position-pid))
+    [axis 5/6 table](#axis-56-wrist-mn5008-kv170). Actuator 5 has −1, the plan
+    assumes 1.
   - [ ] `conf write`
-- [ ] Test each axis: move to both URDF position limits and at URDF velocity (joint stream controller is
-  capped at 2.5 rad/s for all joints) and check that the joint tracks without hitting
-  the moteus limits. For axis 5/6 also move both joints at full speed at once, and
-  check motor temperature.
-- [ ] Re-dump all six controllers into this folder (step 8 of the
+- [ ] Test each axis: move to both URDF position limits and at URDF velocity (joint
+  stream controller is capped at 2.5 rad/s for all joints) and check that the joint
+  tracks without hitting the moteus limits. For axis 5/6 also move both joints at full
+  speed at once, and check motor temperature.
+- [ ] Re-dump actuator 5/6 after any changes above (step 8 of the
   [setup procedure](#setup-procedure)) and commit.
-- [ ] Replace the PID starting values in this README with the tuned values.
 - [ ] Document why axis 3 uses `ilimit 14.5` (see [Position PID](#position-pid)).
-- [ ] Remove this section and the "target values" note in the per-axis table.
 
 ### Differences
 
 | Parameter | Axis | In dump | Target | Reason |
 |---|---|---|---|---|
-| `servopos.position_min` | 1 | −0.42 | −0.486111 | URDF −175° |
-| `servopos.position_max` | 1 | 0.42 | 0.486111 | URDF +175° |
-| `servopos.position_max` | 3 | 0.361111 | 0.375 | URDF +135° |
-| `servo.default_velocity_limit` | 1 / 2 / 3 | 1.5 / 3 / 3 | 0.5997 / 0.4775 / 0.4775 | 1.2 × URDF velocity |
-| `servo.max_velocity` | 1 / 2 / 3 | 4 / 4 / 4 | 0.5997 / 0.4775 / 0.4775 | 1.2 × URDF velocity |
-| `servo.max_velocity_derate` | 1 / 2 / 3 | 2 | 0.5 | see [Velocity limits](#velocity-limits) |
-| `aux2.pins.0/1.mode` | 5 / 6 | 3 (UART) | 13 (I2C) | Left over from a previous config, set with the secondary encoder |
-| `motor_position.sources.1.*`, `aux2.i2c.*` | 4 / 5 / 6 | defaults | see [setup step 4](#setup-procedure) | Secondary encoder not set up yet |
-| `servo.pid_position.kp/ki/kd` | 4 / 5 / 6 | 4 / 1 / 0.05 (defaults) | see per-axis tables | Not tuned yet |
+| `motor_position.output.sign` | 5 | −1 | 1 (verify on test) | see [axis 5/6](#axis-56-wrist-mn5008-kv170) |
 
 ## Background: why each value is set
 
@@ -369,7 +332,9 @@ Settings:
   assembly, so the output pulley was made smaller. The configured value is 0.087302
   (126:11 ≈ 1:11.45); the report quotes ≈ 11.7, the config value is the one in use.
 - Axis 4: 1:4 → 0.25.
-- Axis 5/6: 1:4 per motor in front of the differential → 0.25. The differential itself
+- Axis 5/6: 1:6 belt per motor in front of the differential → 0.166667 (raised from the
+  original 1:4 / 1:5.5 for the MN5008, see
+  [wrist_motor_selection.md](wrist_motor_selection.md)). The differential itself
   is not configured on the controller; `moteus_interface` handles it (see
   [Units](#units)).
 
@@ -391,8 +356,10 @@ them:
 Axis 5/6 (differential): each controller sees `a = j5 + j6` or `b = j5 − j6`, so the
 limits are the extremes of that sum:
 
-- `servopos.position_min/max = ±(|j5 limit| + |j6 limit|) / 2π` = ±(115° + 175°) / 360°
-  = ±0.805556 rev (both URDF ranges are symmetric).
+- `servopos.position_min = (j5 lower + j6 lower) / 2π` = −(114° + 175°) / 360°
+  = −0.802778 rev, `servopos.position_max = (j5 upper + j6 upper) / 2π`
+  = (115° + 175°) / 360° = 0.805556 rev. The j6 range is symmetric, so `b = j5 − j6` has
+  the same extremes as `a`.
 - `servo.default_velocity_limit = servo.max_velocity = 1.2 · (v5 + v6) / 2π`
   = 1.2 · 5 / 2π = 0.9549 rev/s.
 
@@ -422,9 +389,10 @@ The two velocity parameters do different things:
 
 ### Acceleration limits
 
-`servo.default_accel_limit` (12 / 4 / 6 rev/s² ≈ 75 / 25 / 38 rad/s²) is deliberately
+`servo.default_accel_limit` (12 / 4 / 20 rev/s² ≈ 75 / 25 / 126 rad/s²) is deliberately
 loose: an upper bound, not a tuned value. The URDF has no acceleration limits, and the
-ROS controllers already command smooth trajectories (joint stream controller: 4 rad/s²), so in normal
+ROS controllers already command smooth trajectories (joint stream controller: 8 rad/s², impedance
+variant: 4 rad/s²), so in normal
 operation this limit never acts. It only matters when moteus' internal set point has to
 jump or catch up, e.g. after a large position step.
 
@@ -435,15 +403,15 @@ payload, no belt losses or motor inertia):
 |---|---|---|---|---|---|
 | 1 | 75 rad/s² | ≈ 0.75 kg·m² | ≈ 57 Nm | 6 Nm design / 8 Nm URDF | no, ≈ 8–10 rad/s² |
 | 2 | 25 rad/s² | ≈ 0.73 kg·m² | ≈ 18 Nm + 18.4 Nm gravity | 30 Nm design / 35 Nm URDF | about at the limit |
-| 3 | 38 rad/s² | ≈ 0.09 kg·m² | ≈ 3.3 Nm + ~5.5 Nm gravity | 9 Nm design / 15 Nm URDF | yes |
+| 3 | 126 rad/s² | ≈ 0.09 kg·m² | ≈ 11.3 Nm + ~5.5 Nm gravity | 9 Nm design / 15 Nm URDF | no, ≈ 40–100 rad/s² |
 
 Axis 4 (12 rev/s²) and axis 5/6 (20 rev/s² per actuator) are not estimated yet; the
 report has no inertias for them.
 
-On axis 1 and 2 the motor saturates before the limit is reached. If the set point jumps,
+On axis 1–3 the motor saturates before the limit is reached. If the set point jumps,
 these axes therefore move at full torque and the integral term winds up to `ilimit`,
-which can cause some overshoot instead of a clean ramp. This is accepted. Axis 3 is the
-only axis where the limit actually shapes the motion and may be raised.
+which can cause some overshoot instead of a clean ramp. This is accepted. Axis 3 was
+raised from 6 to 20 rev/s², so like axis 1 and 2 its limit no longer shapes the motion.
 
 ### Voltage and flux braking
 
@@ -503,9 +471,9 @@ Tuning procedure (per axis, with `tview`, report §7.0.4):
 `ilimit` = 1.2 × design torque from the drive sizing (report table 2.2): 1.2 · 6 Nm =
 7.2 Nm (axis 1), 1.2 · 30 Nm = 36 Nm (axis 2). Axis 3 uses 14.5 Nm, which does not
 match its 9 Nm design torque (1.2 · 9 = 10.8 Nm); the reason is not documented.
-Axis 4 uses 1.2 × its URDF effort (1.2 · 5 Nm = 6 Nm). Axis 5/6 use 1.0 Nm per actuator,
-chosen for the originally planned 15 A current limit; it may be raised now that 40 A is
-configured (see the [axis 5/6 section](#axis-56-wrist-be4108-380kv)).
+Axis 4 uses 1.2 × its URDF effort (1.2 · 5 Nm = 6 Nm). Axis 5/6 use 1.0 Nm per actuator;
+it may be raised if the wrist sags under payload (see the
+[axis 5/6 section](#axis-56-wrist-mn5008-kv170)).
 `ilimit` only bounds the integral term, it is not a torque limit.
 
 History (from the config commits):
@@ -515,6 +483,9 @@ History (from the config commits):
 | 2026-05-29, first setup | 1000 / 5 | 1000 / 15 | 1000 / 15 |
 | 2026-06-02, tuning | 3000 / 5 | 12000 / 40 | 6000 / 10 |
 | 2026-07-15, fw v1 | 5000 / 10 | 12000 / 40 | 6000 / 10 |
+
+Axis 4–6 were tuned on 2026-10-24: axis 4 `kp 1000 / ki 500 / kd 5`, actuator 5/6
+`kp 1000 / ki 500 / kd 2`.
 
 Axis 2 is the stiffest because it holds the whole arm against gravity. The single-axis
 tuning is only a starting point; final tuning has to be done on the assembled arm.

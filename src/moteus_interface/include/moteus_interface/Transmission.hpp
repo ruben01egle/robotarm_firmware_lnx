@@ -56,8 +56,8 @@ public:
     // by updating the actuators accordingly
     virtual bool validate_mode_switch() const = 0;
     // Commit: propagate the (already-validated) joint-space mode onto the
-    // actuator-space ModeFlags this transmission owns.
-    virtual void perform_mode_switch() = 0;
+    // actuator-space ModeFlags this transmission owns and return if the actuator changed modes
+    virtual bool perform_mode_switch() = 0;
 
     // One-shot startup calculation: reads the raw, uncorrected absolute encoder reading(s)
     // staged in ActuatorPort::home, offset-corrects them using per-joint calibration data

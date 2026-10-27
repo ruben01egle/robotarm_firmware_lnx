@@ -13,7 +13,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'tool',
-            default_value='axis_triad',
+            default_value='none',
             description='file name in robotarm_description/urdf/tools/ without .xacro',
         ),
         IncludeLaunchDescription(
