@@ -20,6 +20,24 @@
             }
         },
         {
+            "label": "Run Robot (axis triad)",
+            "type": "shell",
+            "command": "source install/setup.bash && ros2 launch robotarm_bringup robotarm_hardware.launch.py tool:=axis_triad",
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": true
+            }
+        },
+        {
             "label": "Run Mock",
             "type": "shell",
             "command": "source install/setup.bash && ros2 launch robotarm_bringup robotarm_mock.launch.py",
