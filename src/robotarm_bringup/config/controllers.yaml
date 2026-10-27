@@ -189,7 +189,7 @@ gc_controller:
     torque_rise_time: 0.03
 
     # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6)
-    joint_damping: [0.25, 0.7, 0.7, 0.2, 0.1, 0.02]
+    joint_damping: [0.25, 0.35, 0.5, 0.2, 0.1, 0.02]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
     # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
@@ -217,7 +217,7 @@ cartesian_impedance_controller:
     # both modes. Nm·s/rad, per joint in urdf order (axis1..axis6). in impedance mode joint damping
     # acts in parallel to the cartesian damper and only has to brake what the cartesian terms can't see (null space at
     # singularities, axes with zero cartesian stiffness).
-    joint_damping: [0.1, 0.2, 0.2, 0.1, 0.05, 0.003]
+    joint_damping: [0.05, 0.1, 0.1, 0.05, 0.1, 0.001]
 
     # both modes. Joint limit protection per joint: inside a zone in front of each urdf limit, the controller torque
     # towards the limit is scaled down linearly to 0 at the limit, and a spring pushes outwards with up to
@@ -237,6 +237,6 @@ cartesian_impedance_controller:
     # zeta of every mode in every pose: the damping matrix follows the stiffness and the task space inertia Λ(q)
     # (double diagonalization, see the robotarm_controllers README, background H). 0.7 ≈ 5 % overshoot. With the
     # armature still 0 in the urdf, Λ is ~20-30 % too light and the real zeta lower. Zero stiffness → no cartesian damping
-    cartesian_damping_ratio: 0.7    # unitless, NOT TUNED
+    cartesian_damping_ratio: 0.7    # unitless
     max_spring_force: 20.0          # N, norm of the translational spring force
     max_spring_moment: 2.0          # Nm, norm of the rotational spring moment, below the 4 Nm of the wrist motors
