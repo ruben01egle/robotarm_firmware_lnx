@@ -20,11 +20,12 @@ namespace robotarm_mujoco_hardware {
 namespace {
 
 constexpr const char* PIDS_PARAMETER = "pids_config_file";
+constexpr const char* HW_IF_TORQUE_FF = "torque_ff";   // as in moteus_interface
 
 const char* interface_name(int kind)
 {
-    static const char* names[] = {
-        hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY, hardware_interface::HW_IF_EFFORT};
+    static const char* names[] = {hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY,
+                                  HW_IF_TORQUE_FF, hardware_interface::HW_IF_EFFORT};
     return names[kind];
 }
 
@@ -87,13 +88,14 @@ hardware_interface::CallbackReturn RobotarmMujocoSystem::on_init(
         joints_.push_back(joint);
     }
 
-    // servo gains, needed as soon as a joint has position or velocity
-    servo_ = std::any_of(joints_.begin(), joints_.end(),
-                         [](const Joint& j) { return j.exported[POSITION] || j.exported[VELOCITY]; });
+    // servo gains, needed as soon as a joint has position, velocity or torque_ff (only acts through the servo)
+    servo_ = std::any_of(joints_.begin(), joints_.end(), [](const Joint& j) {
+        return j.exported[POSITION] || j.exported[VELOCITY] || j.exported[TORQUE_FF];
+    });
     const auto pids = info.hardware_parameters.find(PIDS_PARAMETER);
     if (servo_) {
         if (pids == info.hardware_parameters.end() || pids->second.empty()) {
-            RCLCPP_FATAL(get_logger(), "Position/velocity interfaces need the servo gains, hardware parameter %s",
+            RCLCPP_FATAL(get_logger(), "Position/velocity/torque_ff interfaces need the servo gains, hardware parameter %s",
                          PIDS_PARAMETER);
             return hardware_interface::CallbackReturn::ERROR;
         }
@@ -133,7 +135,7 @@ hardware_interface::CallbackReturn RobotarmMujocoSystem::on_init(
 
     // the base class loads the mujoco_plugins in on_init, the ServoPlugin has attached to the bridge by now
     if (!ServoBridge::instance().attached()) {
-        RCLCPP_FATAL(get_logger(), "Position/velocity interfaces need the ServoPlugin: add "
+        RCLCPP_FATAL(get_logger(), "Position/velocity/torque_ff interfaces need the ServoPlugin: add "
                      "robotarm_mujoco_hardware/ServoPlugin to the mujoco_plugins parameter (config/sim_plugins.yaml)");
         return hardware_interface::CallbackReturn::ERROR;
     }
@@ -251,6 +253,7 @@ hardware_interface::CallbackReturn RobotarmMujocoSystem::on_deactivate(const rcl
     // the servos let go, like the moteus when the hardware is stopped
     for (auto& target : targets_) {
         target.active = false;
+        target.torque_ff = 0.0;
     }
     if (servo_) {
         ServoBridge::instance().set_targets(targets_);
@@ -267,7 +270,7 @@ hardware_interface::return_type RobotarmMujocoSystem::prepare_command_mode_switc
     const std::vector<std::string>& start_interfaces,
     const std::vector<std::string>& stop_interfaces)
 {
-    // like moteus_interface: per joint either effort, or position/velocity, never both
+    // like moteus_interface: per joint either effort, or position/velocity/torque_ff, never both
     std::vector<std::array<bool, KINDS>> claims(joints_.size());
     for (size_t j = 0; j < joints_.size(); ++j) {
         std::copy(std::begin(joints_[j].claimed), std::end(joints_[j].claimed), claims[j].begin());
@@ -281,8 +284,8 @@ hardware_interface::return_type RobotarmMujocoSystem::prepare_command_mode_switc
         if (find_command(interface, j, kind)) claims[j][kind] = true;
     }
     for (size_t i = 0; i < joints_.size(); ++i) {
-        if (claims[i][EFFORT] && (claims[i][POSITION] || claims[i][VELOCITY])) {
-            RCLCPP_ERROR(get_logger(), "Joint %s: effort cannot be claimed together with position/velocity",
+        if (claims[i][EFFORT] && (claims[i][POSITION] || claims[i][VELOCITY] || claims[i][TORQUE_FF])) {
+            RCLCPP_ERROR(get_logger(), "Joint %s: effort cannot be claimed together with position/velocity/torque_ff",
                          joints_[i].name.c_str());
             return hardware_interface::return_type::ERROR;
         }
@@ -362,6 +365,10 @@ hardware_interface::return_type RobotarmMujocoSystem::write(const rclcpp::Time& 
             target.active = std::isfinite(joint.hold);
             target.position = joint.hold;
             target.velocity = v_ref;
+            // moteus: clamped to the effort limit, NaN → 0
+            const double torque_ff = joint.claimed[TORQUE_FF] ? command(j, TORQUE_FF) : 0.0;
+            target.torque_ff = std::isfinite(torque_ff)
+                ? std::clamp(torque_ff, -joint.gains.effort_limit, joint.gains.effort_limit) : 0.0;
             target.time = time.seconds();
             target.epoch = joint.epoch;
         }

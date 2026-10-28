@@ -459,6 +459,8 @@ bool CartesianImpedanceController::compute_impedance_torque()
     Eigen::Matrix<double, 6, 1> F_damper = - D * de;
 
     // compute tau
+    // use state q and dq instead of ref to take in expected deviations from ref (whole reason for compliance)
+    // -> actual robot pose is compensated
     if (!rbd_.recursive_newton_euler(
             data_.state.q,
             data_.state.dq,

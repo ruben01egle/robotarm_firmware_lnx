@@ -78,10 +78,11 @@ controller_manager:
     cartesian_impedance_controller:
       type: robotarm_controllers/CartesianImpedanceController
 
-    # Executes trajectories planned by MoveIt on the high-level PC (FollowJointTrajectory action
-    # ~/follow_joint_trajectory). Spawned inactive; activated by control_center for a mission.
     joint_trajectory_controller:
       type: joint_trajectory_controller/JointTrajectoryController
+
+    ff_controller:
+      type: robotarm_controllers/FeedforwardController
 
 moteus_hardware_system:
   ros__parameters:
@@ -109,6 +110,7 @@ joint_stream_controller:
     max_acceleration: 6.0
     max_jerk: 35.0
     sync_joints: false
+    chain_to: "ff_controller"  # chain to ff for better dynamics
 
 joint_stream_controller_impedance:
   ros__parameters:
@@ -152,6 +154,8 @@ cartesian_jog_controller:
 
     max_increment_linear: 0.003     # m, per axis clamp of one increment step
     max_increment_angular: 0.0524   # rad (3°), per axis clamp of one increment step
+
+    chain_to: "ff_controller"  # chain to ff for better dynamics
 
 cartesian_jog_controller_impedance:
   ros__parameters:
@@ -257,12 +261,21 @@ joint_trajectory_controller:
       - axis4
       - axis5
       - axis6
-    # position + velocity: interpolated position plus velocity feedforward, the PVC mode of
-    # moteus_interface. Same interfaces as joint_stream_controller and cartesian_jog_controller,
-    # so only one of them can be active.
+    # chained to ff_controller: claims ff_controller/<joint>/{position,velocity,acceleration}.
+    # The feedforward reaches moteus only through ff_controller's torque_ff. Never add effort here:
+    # moteus_interface rejects effort together with position/velocity on the same joint
+    # (command interface groups), so feedforward torque is only possible chained.
+    command_joints:
+      - ff_controller/axis1
+      - ff_controller/axis2
+      - ff_controller/axis3
+      - ff_controller/axis4
+      - ff_controller/axis5
+      - ff_controller/axis6
     command_interfaces:
       - position
       - velocity
+      - acceleration
     state_interfaces:
       - position
       - velocity
@@ -282,3 +295,8 @@ joint_trajectory_controller:
       axis4: {trajectory: 0.1, goal: 0.01}
       axis5: {trajectory: 0.1, goal: 0.01}
       axis6: {trajectory: 0.1, goal: 0.01}
+
+ff_controller:
+  ros__parameters:
+    torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
+    torque_rise_time: 0.03

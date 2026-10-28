@@ -16,10 +16,10 @@ struct ServoGains
 };
 
 // Position servo of one simulated joint, the structure of the moteus position loop:
-//   tau = kp·(p_ref − p) + kd·(v_ref − v) + ki·∫(p_ref − p) dt
+//   tau = kp·(p_ref − p) + kd·(v_ref − v) + ki·∫(p_ref − p) dt + tau_ff
 // v is the measured joint velocity, nothing is differentiated, so irregular cycle times do not turn into
-// torque noise. The output and the integral are clamped to the effort limit, and the integral only runs
-// while the output is not saturated (conditional integration).
+// torque noise. The output (feedforward included) and the integral are clamped to the effort limit, and the
+// integral only runs while the output is not saturated (conditional integration).
 class JointServo
 {
 public:
@@ -30,10 +30,10 @@ public:
     const ServoGains& gains() const { return gains_; }
 
     // dt <= 0: no time passed, the integral stays as it is
-    double update(double p_ref, double v_ref, double p, double v, double dt)
+    double update(double p_ref, double v_ref, double p, double v, double dt, double tau_ff = 0.0)
     {
         const double error = p_ref - p;
-        const double tau = gains_.kp * error + gains_.kd * (v_ref - v) + integral_;
+        const double tau = gains_.kp * error + gains_.kd * (v_ref - v) + integral_ + tau_ff;
         const double limit = gains_.effort_limit;
         if (dt > 0.0 && std::abs(tau) < limit) {
             integral_ = std::clamp(integral_ + gains_.ki * error * dt, -limit, limit);

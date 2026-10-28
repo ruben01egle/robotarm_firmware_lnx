@@ -9,15 +9,18 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 
 INACTIVE_CONTROLLERS = [
+    # upstream controllers chained to ff_controller
     'joint_stream_controller',
     'cartesian_jog_controller',
+    'joint_trajectory_controller',
+    # ff
+    'ff_controller',
+    # pure compliance
     'gc_controller',
     'cartesian_impedance_controller',
     # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
     'joint_stream_controller_impedance',
     'cartesian_jog_controller_impedance',
-    # executes trajectories planned by MoveIt on the high-level PC, activated by control_center
-    'joint_trajectory_controller',
 ]
 
 

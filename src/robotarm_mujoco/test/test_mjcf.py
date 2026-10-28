@@ -234,7 +234,7 @@ def test_sim_ros2_control_joints_match_the_hardware():
     sim_root = ET.fromstring(mjcf.xacro_urdf())
     for joint in sim_root.find('ros2_control').findall('joint'):
         commands = [c.get('name') for c in joint.findall('command_interface')]
-        assert commands == ['position', 'velocity', 'effort']
+        assert commands == ['position', 'velocity', 'torque_ff', 'effort']
 
 
 def test_sim_runs_the_robotarm_plugin():

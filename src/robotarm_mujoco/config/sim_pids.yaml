@@ -3,9 +3,10 @@
 # joint velocity, computed by its ServoPlugin before every physics step (1 kHz), with the controller's target
 # moved to the physics time:
 #
-#   tau = kp·(p* − p) + kd·(v* − v) + ki·∫(p* − p) dt
+#   tau = kp·(p* − p) + kd·(v* − v) + ki·∫(p* − p) dt + tau_ff
 #
 # clamped to the URDF effort limit, the integral too, and the integral pauses while the output saturates.
+# tau_ff is the torque_ff command (ff_controller), like the moteus feedforward torque.
 #
 # A generic servo that makes the sim follow position/velocity commands, NOT a model of the moteus position
 # loop: the gains are tuned for stable, stiff tracking in the sim only and say nothing about the real arm.

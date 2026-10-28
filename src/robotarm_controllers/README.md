@@ -8,12 +8,18 @@
 | `robotarm_controllers/CartesianJogController` | `cartesian_jog_controller::CartesianJogController` | Jerk limited Cartesian velocity jogging of the TCP |
 | `robotarm_controllers/JointStreamController` | `joint_stream_controller::JointStreamController` | Jerk limited joint space following of streamed position targets (e.g. teleoperation) |
 | `robotarm_controllers/CartesianImpedanceController` | `cartesian_impedance_controller::CartesianImpedanceController` | Gravity compensation (`gc`) or Cartesian impedance (`impedance`) on the joint torques, chainable |
+| `robotarm_controllers/FeedforwardController` | `feedforward_controller::FeedforwardController` | Passes a joint space reference to the moteus position loops and adds the inverse dynamics as `torque_ff`, chainable |
 
 The jog and the joint stream controller claim `position` + `velocity` command interfaces of all
 joints, so only one of them can drive the hardware at a time. With the `chain_to` parameter they
-instead write a joint space reference into the impedance controller, which claims `effort`
-([chaining](#chaining)). The hardware rejects `effort` together with `position`/`velocity` on the
-same joint.
+instead write a joint space reference into a downstream controller:
+
+- into the feedforward controller, which claims `position` + `velocity` + `torque_ff`: position
+  controlled, with the dynamics as feedforward ([FeedforwardController](#feedforwardcontroller)).
+  This is how `robotarm_bringup` runs the position controlled instances.
+- into the impedance controller, which claims `effort`: compliant ([chaining](#chaining)).
+
+The hardware rejects `effort` together with `position`/`velocity`/`torque_ff` on the same joint.
 
 ---
 
@@ -58,6 +64,7 @@ same joint.
   - [Safety and error handling](#safety-and-error-handling-2)
   - [Realtime considerations](#realtime-considerations-2)
   - [Known limitations and roadmap](#known-limitations-and-roadmap-2)
+- [FeedforwardController](#feedforwardcontroller)
 
 ---
 
@@ -296,8 +303,9 @@ ros2 topic pub --once /cartesian_jog_controller/increment_cmds robotarm_interfac
 With `chain_to: "cartesian_impedance_controller"` the controller does not drive the hardware. It
 claims the reference interfaces the impedance controller exports, and the arm follows the jogged
 motion **compliantly** instead of position controlled. Nothing else changes: same topics, same
-Ruckig, same limits. A second instance with its own name keeps the direct mode available
-(`robotarm_bringup` uses `cartesian_jog_controller` and `cartesian_jog_controller_impedance`).
+Ruckig, same limits. `robotarm_bringup` runs two instances: `cartesian_jog_controller` chained to
+the [feedforward controller](#feedforwardcontroller) (position controlled) and
+`cartesian_jog_controller_impedance` chained to the impedance controller.
 
 | | Direct | Chained |
 |---|---|---|
@@ -1265,7 +1273,8 @@ ros2 service call /joint_stream_controller/scale_speed robotarm_interface/srv/Se
 With `chain_to: "cartesian_impedance_controller"` the controller claims the reference interfaces of
 the impedance controller instead of the hardware, and the arm follows the trajectory
 **compliantly**. Topic, service and Ruckig are the same. `robotarm_bringup` runs this as a second
-instance, `joint_stream_controller_impedance`.
+instance, `joint_stream_controller_impedance`. Its position controlled instance,
+`joint_stream_controller`, is chained to the [feedforward controller](#feedforwardcontroller).
 
 | | Direct | Chained |
 |---|---|---|
@@ -2036,3 +2045,81 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 | `lambda`, `jinv_method` | `lambda` regularizes $\Lambda$, `jinv_method` is unused (no Jacobian inverse). In `robotarm_rbd` the same `lambda` also damps the Jacobian inverse, one value for two meanings. |
 | Start ramp | 1 s, hard-coded. |
 | ~~Realtime test~~ | **Done.** `test_cartesian_impedance`, see [building and testing](#building-and-testing). |
+
+---
+
+## FeedforwardController
+
+A thin chainable controller between a position controlled upstream and the moteus position loops.
+It passes the reference position and velocity through and adds the inverse dynamics of the
+reference as feedforward torque:
+
+$$
+\tau_{ff} = \text{RNEA}(q_d, \dot q_d, \ddot q_d) = M(q_d)\,\ddot q_d + C(q_d, \dot q_d)\,\dot q_d + g(q_d)
+$$
+
+The moteus PID then only corrects the model error instead of the full gravity and inertia load, so
+the drives can run with much lower `kp`/`ki` for the same accuracy. Lower gains mean less
+excitation of the belt resonances and less amplified encoder noise (the motivation was the low speed
+vibration of axis 2, see [docs/motor_cfg](../../docs/motor_cfg/README.md)). Everything is computed
+from the reference, nothing from the measurement, so the feedforward adds no second feedback path
+and no sensor noise.
+
+### Usage
+
+| Type | Name | Notes |
+|---|---|---|
+| Command interfaces | `<joint>/position`, `<joint>/velocity`, `<joint>/torque_ff` | position/velocity group of `moteus_interface` (PVC mode) |
+| State interfaces | `<joint>/position` | only for the hold pose on activation |
+| Reference interfaces (exported) | `<name>/<joint>/position`, `/velocity`, `/acceleration` | same layout as the impedance controller, e.g. `ff_controller/axis1/position` |
+
+There is no standalone input (no topics, no services). Upstream controllers:
+
+| Upstream | How it chains |
+|---|---|
+| `JointStreamController`, `CartesianJogController` | `chain_to: "ff_controller"` |
+| `joint_trajectory_controller` (stock) | `command_joints: [ff_controller/axis1, ...]`, same order and length as `joints`, with `command_interfaces: [position, velocity, acceleration]`. The JTC only gives a smooth acceleration if the trajectory contains accelerations (quintic splines, e.g. MoveIt with TOTG). Without them $\ddot q_d$ steps at every waypoint, and so does the inertia feedforward |
+
+Feedforward torque on top of position control is only possible through this chain: an upstream that
+claims `effort` together with `position`/`velocity` is rejected by `moteus_interface` (command
+interface groups).
+
+**Missing references.** Same rules as the impedance controller: a NaN position keeps the last valid
+one (on activation the measured pose), a NaN velocity or acceleration counts as 0. Without an
+upstream the controller holds the activation pose with the moteus position loop plus gravity
+feedforward.
+
+**Post-processing**, in this order: start ramp (from 0 to the full feedforward over 1 s, hard-coded),
+rate limit (`torque_rise_time`), clamp to `torque_scale` × URDF effort. The ramp starts at 0 and
+not at the measured effort, because the moteus PID is still active and already holds the load; the
+ramp hands the load over while its integrator unwinds. `moteus_interface` clamps `torque_ff` to the
+URDF effort a second time.
+
+### Parameters
+
+| Parameter | Default | Unit | Constraint | Meaning |
+|---|---|---|---|---|
+| `torque_scale` | `1.0` | – | (0, 1] | Fraction of the URDF effort limits the feedforward is clamped to |
+| `torque_rise_time` | `0.0` | s | ≥ 0, 0 disables | Minimum time from 0 to the effort limit, limits the torque rate per joint |
+
+### Switching
+
+The controller manager restarts a chainable controller (deactivate, change chained mode, activate)
+when its first upstream is activated or its last upstream deactivated in a **separate** switch
+request. The restart resets the feedforward to 0 and `moteus_interface` resets `torque_ff` on the
+new claim, so axis 2 briefly sags until the ramp and the moteus integrator catch up. Therefore:
+
+- activate and deactivate `ff_controller` together with its upstream, in one request,
+- change the upstream (e.g. stream → jog) in one request, `ff_controller` stays active and chained.
+
+The client side rules are in [docs/controller_switching](../../docs/controller_switching/README.md).
+
+### Known limitations and roadmap
+
+| Item | Status / notes |
+|---|---|
+| Friction | Not compensated. A Coulomb + viscous term ($F_c \tanh(\dot q_d / v_0) + b\,\dot q_d$) is the next step against stick-slip at low speed |
+| Simulation | The MuJoCo hardware has no `torque_ff` interface, so `ff_controller` and every upstream chained to it can't be activated in the sim. Open: add `torque_ff` to `robotarm_mujoco_hardware` |
+| Tests | No unit test yet (gravity at rest, pass-through of $q$/$\dot q$, NaN handling, ramp, no allocation in `update`) |
+| Gains | The moteus `kp`/`ki`/`kd` in `docs/motor_cfg` were tuned without feedforward and still have to be lowered |
+| Start ramp | 1 s, hard-coded |

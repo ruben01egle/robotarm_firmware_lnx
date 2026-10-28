@@ -89,10 +89,10 @@ Other options considered:
 
 ## Open points
 
+Done and verified on the arm (see the [motor config README](README.md#axis-56-wrist-mn5008-kv170)): `motor_position.rotor_to_output_ratio 0.166667` for the 1:6 belt, and `servo.max_current_A 25` (≈ 7.9 Nm per actuator after 1:6) instead of the 40 A of the old config. 25 A is above the 15 A first planned here, as a peak; the continuous limit is set by cooling, see [mn5008_testing.md](mn5008_testing.md).
+
 | Point | Action |
 |---|---|
-| Configs still have `motor_position.rotor_to_output_ratio 0.25` (1:4) | Set 0.16667 once the 1:6 belt is fitted |
-| Configs still have `servo.max_current_A 40` (~350 W copper loss at 40 A) | Set 15 A: ~0.8 Nm per motor, ~40 % above the worst expected load and equal to T-Motor's peak rating |
 | Motor overtemperature protection is disabled (no thermistor) | Glue an NTC to the stator and enable `servo.enable_motor_temperature`, or add I²t limiting in software |
 | +78 g at the end of the arm and larger rotor inertia | Re-check upstream joint holding torques and the wrist rotor inertia in [docs/dynamics](../dynamics/README.md) |
 | Torque test (lever and scale) not repeated on the MN5008 | Optional: confirms Kt and saturation |

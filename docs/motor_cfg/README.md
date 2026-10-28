@@ -17,10 +17,13 @@ defaults or values written by the calibration; this document only covers the val
 that were set up specifically for this robot. The files are named per actuator (CAN ID),
 not per joint, because controllers 5 and 6 each drive both wrist joints.
 
+**Status:** all values below match the dumps of 2026-10-27 and were verified on the
+assembled arm (limits, directions, encoder signs, PID tuning, switching from the
+torque controllers back to position control).
+
 - [Units](#units)
 - [Setup procedure](#setup-procedure)
 - [Overview](#overview)
-- [Known differences to the target values](#known-differences-to-the-target-values)
 - [Background: why each value is set](#background-why-each-value-is-set)
 
 ## Units
@@ -99,9 +102,10 @@ after `conf write`.
    conf set motor_position.sources.1.offset <counts>
    ```
    (Axis 1 currently uses I2C device slot 1 instead of 0 – same function, see below.)
-   On axis 5/6 the encoder on controller 5 measures joint 5 and the one on controller 6
-   measures joint 6 (`joint1/2_encoder_actuator` in the xacro), not the controller's
-   own output. That is fine because moteus never uses it, see [Encoders](#encoders).
+   On axis 5/6 the encoder on controller 6 (`wrist_b`) measures joint 5 and the one on
+   controller 5 (`wrist_a`) measures joint 6 (`joint1/2_encoder_actuator` in the xacro),
+   not the controller's own output. That is fine because moteus never uses it, see
+   [Encoders](#encoders). `sources.1.sign` is −1 on controller 6, 1 everywhere else.
 
 5. **Gearbox and direction** (per axis, see [Overview](#overview)):
    ```
@@ -113,9 +117,13 @@ after `conf write`.
    `servo.pwm_rate_hz`, `servo.max_current_desired_rate`, `servo.max_velocity_derate`.
 
 7. **Per-axis limits and PID**: `servopos.position_min/max`, `servo.max_velocity`,
-   `servo.default_velocity_limit`, `servo.default_accel_limit`,
    `servo.pid_position.kp/ki/kd/ilimit`. Derive the limits from the URDF
-   ([formulas](#limits-come-from-the-urdf)).
+   ([formulas](#limits-come-from-the-urdf)). Disable the drive trajectory limits on
+   every axis, `moteus_interface` requires this ([why](#velocity-limits)):
+   ```
+   conf set servo.default_velocity_limit nan
+   conf set servo.default_accel_limit nan
+   ```
 
 8. **`conf write`**, then dump a backup into this folder and commit it:
    ```
@@ -161,17 +169,18 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `motor_position.rotor_to_output_ratio` | 0.166667 | 0.033333 | 0.087302 | 0.25 |
 | `motor_position.output.sign` | −1 | 1 | 1 | 1 |
 | `motor_position.sources.1.i2c_device` | 1 | 0 | 0 | 0 |
-| `servopos.position_min` [rev] | −0.486111 | −0.444444 | −0.333333 | −0.472222 |
-| `servopos.position_max` [rev] | 0.486111 | 0.055556 | 0.369444 | 0.472222 |
-| `servo.default_velocity_limit` [rev/s] | 0.6 | 0.4775 | 0.4775 | 0.4775 |
+| `servopos.position_min` [rev] | −0.48611 | −0.444444 | −0.333333 | −0.472222 |
+| `servopos.position_max` [rev] | 0.48611 | 0.055556 | 0.369444 | 0.472222 |
+| `servo.default_velocity_limit` [rev/s] | nan | nan | nan | nan |
 | `servo.max_velocity` [rev/s] | 0.6 | 0.4775 | 0.4775 | 0.4775 |
-| `servo.default_accel_limit` [rev/s²] | 12 | 4 | 20 | 12 |
-| `servo.pid_position.kp` [Nm/rev] | 5000 | 12000 | 6000 | 1000 |
-| `servo.pid_position.ki` [Nm/(rev·s)] | 5000 | 5000 | 5000 | 500 |
-| `servo.pid_position.kd` [Nm/(rev/s)] | 10 | 40 | 10 | 5 |
+| `servo.default_accel_limit` [rev/s²] | nan | nan | nan | nan |
+| `servo.pid_position.kp` [Nm/rev] | 2500 | 6000 | 10000 | 1000 |
+| `servo.pid_position.ki` [Nm/(rev·s)] | 1000 | 5000 | 5000 | 500 |
+| `servo.pid_position.kd` [Nm/(rev/s)] | 20 | 260 | 40 | 5 |
 | `servo.pid_position.ilimit` [Nm] | 7.2 | 36 | 14.5 | 6 |
 
-All values in this table match the axis 1–4 dumps. The axis 1 velocity limits are
+All values in this table match the axis 1–4 dumps. The axis 1 position limits are
+±175° / 360° = 0.486111 rev, stored as 0.48611. The axis 1 `max_velocity` is
 1.2 × URDF = 0.5997 rev/s, rounded to 0.6. Axis 4 uses the same motor and shared
 settings as axis 1–3. Its `ilimit` is 1.2 × the URDF effort of 5 Nm. Its calibrated
 `motor.Kv` is 131, about 9 % below axis 1–3 (142–144). That is within normal motor
@@ -207,18 +216,19 @@ calibration temperature: measured cold, both are 0.146 Ω.
 | `id.id` | 1–4 | 5 / 6 | `can_id` in the xacro |
 | gearbox | – | 1:6 belt, then differential | |
 | ⚠️ `motor_position.rotor_to_output_ratio` | – | **0.166667** | Output = differential input after the 1:6 belt (1:1 bevel gears assumed) |
-| ⚠️ `motor_position.output.sign` | – | **1 / 1 (verify on test, dump has −1 / 1)** | Both controllers +: j5 moves +, j6 stays. 5 + / 6 −: j6 moves + |
+| ⚠️ `motor_position.output.sign` | – | **−1 / 1** | Verified on the arm: both controllers +: j5 moves +, j6 stays. 5 + / 6 −: j6 moves + |
+| ⚠️ `motor_position.sources.1.sign` | 1 | **1 / −1** | Controller 6 reads the joint 5 encoder, controller 5 the joint 6 encoder (see [Encoders](#encoders)); signs verified on the arm |
 | `motor_position.output.reference_source` | −1 | −1 (**must stay**) | The AS5048B measures a joint, not this controller's output |
 | ⚠️ `servo.max_current_A` | 100 A | **25 A** | ≈ 7.9 Nm per actuator after 1:6. Peak only, see cooling below |
 | ⚠️ `servopos.position_min` [rev] | – | **−0.802778** | −(114° + 175°) / 360° = −0.802778, see [Limits](#limits-come-from-the-urdf) |
 | ⚠️ `servopos.position_max` [rev] | – | **0.8055** | +(115° + 175°) / 360° = 0.805556, rounded 0.02° below the URDF |
-| ⚠️ `servo.default_velocity_limit` [rev/s] | – | **0.955** | 1.2 · (2.5 + 2.5 rad/s) / 2π = 0.9549 |
-| ⚠️ `servo.max_velocity` [rev/s] | – | **0.955** | as above |
+| `servo.default_velocity_limit` [rev/s] | nan | nan | required by `moteus_interface`, see [Velocity limits](#velocity-limits) |
+| ⚠️ `servo.max_velocity` [rev/s] | – | **0.955** | 1.2 · (2.5 + 2.5 rad/s) / 2π = 0.9549 |
 | `servo.max_velocity_derate` [rev/s] | 0.5 | 0.5 | unchanged |
-| ⚠️ `servo.default_accel_limit` [rev/s²] | 4–12 | **20** | Loose upper bound, wrist inertia is small |
-| ⚠️ `servo.pid_position.kp` [Nm/rev] | 1000–12000 | **1000** | 0.001 rev error → 1 Nm |
+| `servo.default_accel_limit` [rev/s²] | nan | nan | as above |
+| ⚠️ `servo.pid_position.kp` [Nm/rev] | 1000–10000 | **1300** | 0.001 rev error → 1.3 Nm |
 | ⚠️ `servo.pid_position.ki` [Nm/(rev·s)] | 500–5000 | **500** | |
-| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 5–40 | **2** | |
+| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 5–260 | **2** | |
 | ⚠️ `servo.pid_position.ilimit` [Nm] | 7.2–36 | **1.0** | Wrist gravity load is small. Raise towards ~1.5 Nm per actuator if the wrist sags under payload (2.5 Nm wrist pitch = 1.25 Nm per actuator) |
 | calibration `--cal-bw-hz` | 400 | 400 → `servo.pid_dq_hz` 400 | Drop to default 200 if the current loop is noisy |
 | `servo.flux_brake_*` | 8 V / 0.06 Ω | unchanged | |
@@ -241,33 +251,6 @@ Points to check:
 - **Bevel ratio.** If the differential's bevel gears are not 1:1, j6 and its limits
   scale with that ratio. The `ratio` param in the xacro is not used by
   `DifferentialTransmission`.
-
-## Known differences to the target values
-
-All six dumps were updated on 2026-10-24. Limits, velocity settings, the secondary
-encoders, the axis 4 direction (checked) and the axis 4–6 PID tuning are done. What is still open is
-listed below. Remove this section once everything is done.
-
-### TODO
-
-- [ ] Actuator 5 and 6 (`--target 5` / `--target 6 --console`, each):
-  - [ ] Verify both `output.sign` with the differential test in the
-    [axis 5/6 table](#axis-56-wrist-mn5008-kv170). Actuator 5 has −1, the plan
-    assumes 1.
-  - [ ] `conf write`
-- [ ] Test each axis: move to both URDF position limits and at URDF velocity (joint
-  stream controller is capped at 2.5 rad/s for all joints) and check that the joint
-  tracks without hitting the moteus limits. For axis 5/6 also move both joints at full
-  speed at once, and check motor temperature.
-- [ ] Re-dump actuator 5/6 after any changes above (step 8 of the
-  [setup procedure](#setup-procedure)) and commit.
-- [ ] Document why axis 3 uses `ilimit 14.5` (see [Position PID](#position-pid)).
-
-### Differences
-
-| Parameter | Axis | In dump | Target | Reason |
-|---|---|---|---|---|
-| `motor_position.output.sign` | 5 | −1 | 1 (verify on test) | see [axis 5/6](#axis-56-wrist-mn5008-kv170) |
 
 ## Background: why each value is set
 
@@ -313,10 +296,12 @@ Settings:
 - `sources.1.sign 1`: moteus requires all sources to count in the same direction.
   Check by turning the joint by hand and comparing `motor_position.sources.0/1` in
   `tview`.
-- On axis 5/6 the AS5048B wired to each controller measures a joint (5 or 6), not that
-  controller's differential input. moteus must therefore never use it
-  (`reference_source` stays −1); `DifferentialTransmission::home()` combines both
-  readings into actuator positions.
+- On axis 5/6 the AS5048B wired to each controller measures a joint, not that
+  controller's differential input: controller 6 (`wrist_b`) reads joint 5, controller 5
+  (`wrist_a`) reads joint 6 (`joint1/2_encoder_actuator` in the xacro). moteus must
+  therefore never use it (`reference_source` stays −1); `DifferentialTransmission::home()`
+  combines both readings into actuator positions. `sources.1.sign` is −1 on controller 6
+  (joint 5 encoder) and 1 on controller 5 (joint 6 encoder), verified on the arm.
 - Axis 1 has the AS5048B in I2C device slot 1 and axes 2/3 in slot 0. Both work the same,
   because `sources.1.i2c_device` points at the slot in use.
 
@@ -339,9 +324,10 @@ Settings:
   [Units](#units)).
 
 `motor_position.output.sign` makes the positive moteus direction match the positive
-joint direction in the URDF (of axis 1–3 only axis 1 needs −1). On axis 5/6 the signs
+joint direction in the URDF (of axis 1–4 only axis 1 needs −1). On axis 5/6 the signs
 must match the differential equations: both controllers positive → j5 positive, j6
-still; controller 5 positive and 6 negative → j6 positive.
+still; controller 5 positive and 6 negative → j6 positive. On the arm this needs −1 on
+controller 5 and 1 on controller 6.
 
 ### Limits come from the URDF
 
@@ -351,7 +337,7 @@ them:
 
 - `servopos.position_min/max = lower/upper / 2π` (no headroom: these are hard stops in the
   controller, and the planners already stay within the URDF).
-- `servo.default_velocity_limit = servo.max_velocity = 1.2 · velocity / 2π`.
+- `servo.max_velocity = 1.2 · velocity / 2π`.
 
 Axis 5/6 (differential): each controller sees `a = j5 + j6` or `b = j5 − j6`, so the
 limits are the extremes of that sum:
@@ -360,8 +346,7 @@ limits are the extremes of that sum:
   = −0.802778 rev, `servopos.position_max = (j5 upper + j6 upper) / 2π`
   = (115° + 175°) / 360° = 0.805556 rev. The j6 range is symmetric, so `b = j5 − j6` has
   the same extremes as `a`.
-- `servo.default_velocity_limit = servo.max_velocity = 1.2 · (v5 + v6) / 2π`
-  = 1.2 · 5 / 2π = 0.9549 rev/s.
+- `servo.max_velocity = 1.2 · (v5 + v6) / 2π` = 1.2 · 5 / 2π = 0.9549 rev/s.
 
 These limits are a diamond around the joint-space box. A controller cannot stop j5 at
 115° while j6 is at 0, so on axis 5/6 the moteus limits only catch gross errors. The real
@@ -371,33 +356,35 @@ joint limits are enforced only by the planners/URDF.
 
 The two velocity parameters do different things:
 
-- **`default_velocity_limit` / `default_accel_limit`** limit moteus' internal trajectory
-  in position mode. `moteus_interface` sends position + velocity every cycle and no
-  per-command limits, so these defaults apply. moteus moves its internal set point
-  toward the commanded position (which itself moves at the commanded velocity), and
-  speeds up to catch up if it lags, but never faster than `velocity_limit`. Setting it
-  20 % above the URDF limit lets the controller follow a command at the URDF limit and
-  still have headroom to correct tracking error. For the acceleration limit see
-  [Acceleration limits](#acceleration-limits).
+- **`default_velocity_limit` / `default_accel_limit`** are **`nan`** on all axes, i.e.
+  moteus' internal trajectory generator is off and the set point follows each command
+  directly. They have to be `nan`: `moteus_interface` runs torque mode as position mode
+  with `kp_scale = 0`, so the drive keeps a stale set point through a whole
+  gc/impedance session, and after every mode change the interface sends the measured
+  position once to resync it. moteus only takes that position over directly without
+  limits. With a limit set it ramps there from the stale set point instead, and leaving
+  a torque controller gives a large torque spike towards the pose at which it was
+  started (this happened on the arm, ending in a hardware fault). Details in the
+  [moteus_interface README](../../src/moteus_interface/README.md#setpoint-resync-after-a-mode-change).
+  Nothing is lost: the ROS controllers already command smooth trajectories, and
+  `timeout_mode` 12 does not use these limits.
 - **`max_velocity` / `max_velocity_derate`** are not a speed limit but a current
   limit: above `max_velocity` the allowed motoring current falls linearly and reaches 0
   at `max_velocity + max_velocity_derate`. Braking current is never limited, so the axis
   can always slow down. It is a safety net against runaway, e.g. after a bad command.
-  `default_velocity_limit` is clamped to `max_velocity`, so `max_velocity` must not be
-  lower; both are set to 1.2 × URDF. With `derate = 0.5 rev/s`, motoring current is 0 at
+  It is set to 1.2 × URDF. With `derate = 0.5 rev/s`, motoring current is 0 at
   about 1.1 rev/s (axis 1), 0.98 rev/s (axis 2–4) and 1.45 rev/s (axis 5/6 actuators).
 
 ### Acceleration limits
 
-`servo.default_accel_limit` (12 / 4 / 20 rev/s² ≈ 75 / 25 / 126 rad/s²) is deliberately
-loose: an upper bound, not a tuned value. The URDF has no acceleration limits, and the
-ROS controllers already command smooth trajectories (joint stream controller: 8 rad/s², impedance
-variant: 4 rad/s²), so in normal
-operation this limit never acts. It only matters when moteus' internal set point has to
-jump or catch up, e.g. after a large position step.
+`servo.default_accel_limit` is `nan`, see [Velocity limits](#velocity-limits). The URDF
+has no acceleration limits, and the ROS controllers already command smooth trajectories
+(joint stream controller: 6 rad/s², impedance variant: 4 rad/s²).
 
-Rough rigid-body estimate with the inertias from the report (outstretched arm, 0.5 kg
-payload, no belt losses or motor inertia):
+Background: the limit used to be a loose upper bound (12 / 4 / 20 rev/s² ≈ 75 / 25 /
+126 rad/s² for axis 1 / 2 / 3) that never acted in normal operation. The rough
+rigid-body estimate below (inertias from the report, outstretched arm, 0.5 kg payload,
+no belt losses or motor inertia) shows that axis 1 and 3 could not reach it anyway:
 
 | Axis | Limit | Inertia | Torque needed | Available | Reachable |
 |---|---|---|---|---|---|
@@ -405,13 +392,13 @@ payload, no belt losses or motor inertia):
 | 2 | 25 rad/s² | ≈ 0.73 kg·m² | ≈ 18 Nm + 18.4 Nm gravity | 30 Nm design / 35 Nm URDF | about at the limit |
 | 3 | 126 rad/s² | ≈ 0.09 kg·m² | ≈ 11.3 Nm + ~5.5 Nm gravity | 9 Nm design / 15 Nm URDF | no, ≈ 40–100 rad/s² |
 
-Axis 4 (12 rev/s²) and axis 5/6 (20 rev/s² per actuator) are not estimated yet; the
-report has no inertias for them.
+Axis 4 and axis 5/6 were not estimated; the report has no inertias for them.
 
-On axis 1–3 the motor saturates before the limit is reached. If the set point jumps,
-these axes therefore move at full torque and the integral term winds up to `ilimit`,
-which can cause some overshoot instead of a clean ramp. This is accepted. Axis 3 was
-raised from 6 to 20 rev/s², so like axis 1 and 2 its limit no longer shapes the motion.
+Without a limit, a set point jump makes an axis move at full torque and the integral
+term winds up to `ilimit`, which can cause some overshoot. On axis 1 and 3 that was
+already the case with the old limits. `moteus_interface` never commands such jumps: the
+controllers ramp, and the resync after a mode change sends the measured position, i.e.
+close to zero error.
 
 ### Voltage and flux braking
 
@@ -454,8 +441,8 @@ The arm runs on a 24 V supply; the moteus r4.11 is rated up to 44 V.
 
 ### Position PID
 
-Gains are in output units: with `kp = 5000`, an error of 0.001 rev (0.36°) on axis 1
-produces 5 Nm. They are three to four orders of magnitude above the moteus defaults
+Gains are in output units: with `kp = 2500`, an error of 0.001 rev (0.36°) on axis 1
+produces 2.5 Nm. They are three to four orders of magnitude above the moteus defaults
 (`kp 4, ki 1, kd 0.05`) because the output side sees the full gear ratio and the arm is
 meant to hold position stiffly.
 
@@ -483,9 +470,16 @@ History (from the config commits):
 | 2026-05-29, first setup | 1000 / 5 | 1000 / 15 | 1000 / 15 |
 | 2026-06-02, tuning | 3000 / 5 | 12000 / 40 | 6000 / 10 |
 | 2026-07-15, fw v1 | 5000 / 10 | 12000 / 40 | 6000 / 10 |
+| 2026-10-25, assembled arm | 5000 / 10 | 18000 / 40 | 10000 / 20 |
+| 2026-10-27, assembled arm, verified | 2500 / 20 | 6000 / 260 | 10000 / 40 |
 
-Axis 4–6 were tuned on 2026-10-24: axis 4 `kp 1000 / ki 500 / kd 5`, actuator 5/6
-`kp 1000 / ki 500 / kd 2`.
+On 2026-10-27 the axis 1 `ki` was also lowered from 5000 to 1000.
 
-Axis 2 is the stiffest because it holds the whole arm against gravity. The single-axis
-tuning is only a starting point; final tuning has to be done on the assembled arm.
+Axis 4–6: first tuned on 2026-10-24 (axis 4 `kp 1000 / ki 500 / kd 5`, actuator 5/6
+`kp 1000 / ki 500 / kd 2`). Actuator 5/6 `kp` was raised to 1500 on 2026-10-25 and set
+to 1300 on 2026-10-27; axis 4 is unchanged.
+
+Axis 2 carries the whole arm against gravity. With `kp 18000 / kd 40` it vibrated on
+the assembled arm, so its stiffness was lowered and its damping raised a lot
+(`kp 6000 / kd 260`); the integral term (`ki 5000`, `ilimit 36`) still holds the static
+load. The values above are the final tuning on the assembled arm.

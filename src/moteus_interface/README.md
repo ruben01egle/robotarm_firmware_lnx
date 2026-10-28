@@ -13,6 +13,7 @@ A [ros2_control](https://control.ros.org/) `SystemInterface` hardware plugin for
 - [Behavior / How It Works](#behavior--how-it-works)
   - [Configuration and homing sequence](#configuration-and-homing-sequence)
   - [Command interface groups and mode switching](#command-interface-groups-and-mode-switching)
+    - [Setpoint resync after a mode change](#setpoint-resync-after-a-mode-change)
   - [The read/write cycle](#the-readwrite-cycle)
   - [Execution modes: strict_sequential vs. pipelined](#execution-modes-strict_sequential-vs-pipelined)
   - [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling)
@@ -68,6 +69,21 @@ From `package.xml` / `CMakeLists.txt`:
 
 - **The official [mjbots fdcanusb](https://mjbots.com/products/fdcanusb) USB-to-CAN-FD adapter** (default device path `/dev/fdcanusb`). The custom transport in this package (see [Custom Transport Layer](#custom-transport-layer-experimental)) is written and tested specifically against this device — it is not a generic fdcanusb-protocol client and has not been validated against other CAN-FD adapters, clones, or UART-based alternatives.
 - Read/write permission on that serial device for the user running `ros2_control_node` (e.g. via a udev rule granting access, or membership in the group that owns the device — mjbots documents this for the fdcanusb; this repository doesn't ship its own udev rule).
+
+### Required drive configuration
+
+> [!WARNING]
+> Every moteus drive must have its default trajectory limits disabled:
+>
+> ```
+> conf set servo.default_velocity_limit nan
+> conf set servo.default_accel_limit nan
+> conf write
+> ```
+>
+> With either limit set, switching an actuator from a torque controller (`effort`, mode `TC`) back to `IDLE` or a position/velocity controller produces a large torque spike towards the pose at which the torque controller was started, up to a hardware fault. The interface does not check this setting, a wrong value fails silently. See [Setpoint resync after a mode change](#setpoint-resync-after-a-mode-change) for why.
+
+Check a drive with `conf get servo.default_accel_limit` (must print `nan`, also after a power cycle). The interface's own controllers already command smooth trajectories, so the drive-side trajectory generator isn't needed. `servo.max_velocity` is a separate current derating and stays active. The drive configs of the robot arm this package was built for are in [`docs/motor_cfg`](../../docs/motor_cfg/README.md).
 
 ### Build
 
@@ -231,7 +247,7 @@ Only relevant for a `differential` transmission, where either joint's dedicated 
 On `on_configure()`, the interface:
 
 1. Reads the ROS parameters above and instantiates `TransportUSB`, then calls its `declare_and_read_parameters()` and `initialize()` (which opens and configures the serial device: raw/non-canonical mode, low-latency ASYNC flag, no flow control).
-2. Builds fixed wire formats: commands are sent as `position`/`velocity`/`feedforward_torque` floats (everything else on the command side — kp/kd scale, torque/velocity/accel limits, voltage/current overrides, position bounds — is left at the controller's own defaults and not overridden per cycle). Query replies are read back as `int16` position/velocity/torque plus an `int8` fault code; everything else is ignored, except one extra register added specifically for the startup homing step: `kEncoder1Position` (secondary/output encoder), read as a float.
+2. Builds fixed wire formats: commands are sent as `position`/`velocity`/`feedforward_torque` floats (everything else on the command side — kp/kd scale, torque/velocity/accel limits, voltage/current overrides, position bounds — is left at the controller's own defaults and not overridden per cycle; the velocity/accel defaults must be `nan`, see [Required drive configuration](#required-drive-configuration)). Query replies are read back as `int16` position/velocity/torque plus an `int8` fault code; everything else is ignored, except one extra register added specifically for the startup homing step: `kEncoder1Position` (secondary/output encoder), read as a float.
 3. Sends an initial `MakeStop()` to every joint (with the extra encoder register attached) via a blocking `cycle()` (10 ms timeout) to get a first telemetry snapshot, then runs the watchdog in **strict** mode — any joint that doesn't answer or that reports a fault aborts configuration.
 4. For each actuator, reads back its raw `kEncoder1Position` extra register value and stages it; once every actuator has a value staged, each transmission's `home()` picks out the raw reading(s) belonging to its own joint(s), offset-corrects them (`remainder(encoder_value - encoder_offset/2π, 1.0)`) and combines them into actuator-space command(s), and `MakeOutputExact` is issued per actuator to directly overwrite that moteus controller's internal absolute output position — this is the non-standard homing step described in detail below.
 5. Cycles those `OutputExact` commands (10 ms timeout), re-checks the watchdog in strict mode.
@@ -247,7 +263,7 @@ The four command interfaces of a joint are split into two groups. Which group a 
 |---|---|---|---|
 | position/velocity | any of `position`, `velocity`, `torque_ff` | `PVC` | `PositionMode::Command` with position, velocity and feedforward torque; the controller's own PD gains stay active |
 | torque | `effort` | `TC` | `PositionMode::Command` with position/velocity ignored and `kp_scale`/`kd_scale`/`ilimit_scale` forced to `0`, so only the feedforward torque drives the motor |
-| — | nothing claimed | `IDLE` | `PositionMode::Command` with `NaN` position, `0` velocity, `0` torque, i.e. hold the current position |
+| — | nothing claimed | `IDLE` | `PositionMode::Command` with `NaN` position, `0` velocity, `0` torque, i.e. hold the drive's current internal set point (resynced to the measured position on entry, see below) |
 
 The groups are mutually exclusive per joint: a controller can claim any subset of one group (e.g. only `position`, or `position` + `torque_ff` for gravity-compensated position control), but a joint never has interfaces from both groups claimed at the same time. This is what makes torque-only control safe to rely on. ros2_control only prevents two controllers from claiming the *same* interface; without the groups, a second controller could claim `position` on a joint while a torque controller holds `effort`, and the drive would suddenly switch from zero-gain torque control to stiff position control under the torque controller's feet. With the groups, once a controller has claimed `effort` on a joint, any claim on that joint's `position`/`velocity`/`torque_ff` is rejected, so the torque controller is guaranteed that the drive stays in torque-only mode for as long as it holds the claim. That's also why the feedforward torque of the position/velocity group is a separate `torque_ff` interface instead of reusing `effort`.
 
@@ -258,7 +274,15 @@ Switching goes through the two ros2_control hooks:
    - `differential`: both joints must not mix groups **and** must claim the exact same set of interfaces, since each actuator's command is a combination of both joints and the two actuators can't run in different modes.
 
    The snapshots are always restored afterwards, whether the check passed or not. If any transmission says no, the whole switch is rejected (`return_type::ERROR`) and every joint of that transmission is logged with its requested interface set and the reason (mixed groups, or differing claims within the transmission). Interfaces belonging to other hardware components are ignored.
-2. **`perform_command_mode_switch()`** (commit). Applies the start/stop interfaces for real, resets the command value of every newly claimed interface to a safe default (`NaN` position, `0` velocity/`torque_ff`/`effort`) so a stale value from a previous controller is never sent, derives each joint's `CommandMode` from its claims, and then lets every transmission copy the joint modes onto its actuators (`perform_mode_switch()`). The modes are applied per actuator from then on.
+2. **`perform_command_mode_switch()`** (commit). Applies the start/stop interfaces for real, resets the command value of every newly claimed interface to a safe default (`NaN` position, `0` velocity/`torque_ff`/`effort`) so a stale value from a previous controller is never sent, derives each joint's `CommandMode` from its claims, and then lets every transmission copy the joint modes onto its actuators (`perform_mode_switch()`). The modes are applied per actuator from then on. `perform_mode_switch()` returns whether any of its actuators changed mode; all actuators of such a transmission are flagged for a setpoint resync.
+
+#### Setpoint resync after a mode change
+
+All three modes are sent as moteus position mode; `TC` only sets `kp_scale`/`kd_scale` to `0`. The drive therefore never sees a mode change, and its internal position set point is never cleared: a `NaN` position means "keep the current set point", which is only captured from the measured position while the set point is still empty (after `MakeStop()`). Through a whole torque-controller session the set point stays at the pose where the drive last held position. Once `kp_scale` is back to `1` in `IDLE` or `PVC`, the position loop pulls towards that old pose with the full error.
+
+To prevent this, the first `PVC` or `IDLE` frame after an actuator's mode changed sends the actuator's last measured position instead of the commanded or `NaN` position, which overwrites the set point. Afterwards the normal commands continue from there. If no reply to that frame arrives in the next `read()`, the resync is sent again with a fresh measurement, since only a reply proves the drive received it. The `TC` branch ignores the flag, so a switch into `TC` keeps it pending until the next `PVC`/`IDLE` frame.
+
+moteus only takes over a commanded position directly when neither a velocity nor an acceleration limit is active. With a limit set (including the drive defaults), the position becomes a trajectory target that starts at the stale set point, and the spike happens anyway. That's why both default limits must be `nan` ([Required drive configuration](#required-drive-configuration)).
 
 Example: with the differential wrist joints `axis5`/`axis6`, a controller claiming `axis5/position` and `axis6/position` is accepted; one claiming only `axis5/position`, or `axis5/position` + `axis6/effort`, is rejected. On an `identity` joint, claiming `axis1/position` + `axis1/effort` is rejected, `axis1/position` + `axis1/torque_ff` is fine.
 
@@ -272,7 +296,7 @@ Every cycle, `make_cyclic_commands()`:
   - **`TC`**: position `NaN`, velocity `0`, torque taken from `effort`.
   - **`IDLE`**: position `NaN`, velocity `0`, torque `0`.
 - Runs each transmission's `joint_to_actuator()` to get actuator-space commands.
-- Builds one frame per actuator according to that actuator's mode (see the table above). `NaN` velocity/torque values are replaced by `0`, and position and velocity are converted from radians / rad·s⁻¹ to the motor revolutions / rev·s⁻¹ units moteus expects (`value / 2π`).
+- Builds one frame per actuator according to that actuator's mode (see the table above). An actuator flagged for a [setpoint resync](#setpoint-resync-after-a-mode-change) gets its measured position instead of the commanded one in its next `PVC`/`IDLE` frame. `NaN` velocity/torque values are replaced by `0`, and position and velocity are converted from radians / rad·s⁻¹ to the motor revolutions / rev·s⁻¹ units moteus expects (`value / 2π`).
 
 **strict_sequential**: `write()` builds commands and performs a single blocking `transport_->cycle()` (write, then block for replies up to `timeout_transport_us`); `read()` then just parses whatever `cycle()` already collected.
 
@@ -378,6 +402,7 @@ Implications:
 - Only the official mjbots fdcanusb adapter is supported; no SocketCAN transport, and no support for other USB-CAN adapters.
 - The practical frequency ceiling today comes from the moteus controllers' own reply-latency jitter under their control-loop interrupt load (see [Reply-latency jitter and the effective frequency ceiling](#reply-latency-jitter-and-the-effective-frequency-ceiling)), not from this package's transport — running near that edge increases sporadic, watchdog-tolerated reply dropouts.
 - The secondary-encoder homing step in `on_configure()` is a setup-specific workaround (see above), not a general moteus homing solution — anyone without the author's aux-encoder wiring should remove it.
+- The required drive configuration (`servo.default_velocity_limit`/`default_accel_limit` = `nan`, see [Required drive configuration](#required-drive-configuration)) is not checked at startup; a drive with limits set only shows up as a torque spike after leaving torque mode.
 - The custom transport has no retry logic and no checksum support — it assumes a clean link to the official fdcanusb device.
 - The transport does not track upstream moteus protocol/firmware changes going forward (see [Divergence from upstream](#divergence-from-upstream)).
 

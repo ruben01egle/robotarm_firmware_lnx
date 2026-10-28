@@ -126,37 +126,35 @@ graph TD
 **Hardware interface (`ros2_control::SystemInterface`):**
 
 - `moteus_interface/MoteusInterface` — drives moteus controllers as
-  `position`/`velocity`/`effort` command+state joints. See
+  `position`/`velocity`/`torque_ff`/`effort` command and
+  `position`/`velocity`/`effort` state joints. See
   **[src/moteus_interface/README.md](src/moteus_interface/README.md)** for
   execution modes, homing behavior, watchdog/fault handling, and the custom
   transport layer.
 
-**Controllers (`ros2_control::ControllerInterface`):**
+**Controllers (`ros2_control`):**
 
-- `robotarm_controllers/JointStreamController` — subscribes to `~/commands`
-  (`std_msgs/Float64MultiArray`, raw per-joint position targets), runs them
-  through Ruckig for jerk-limited smoothing, and outputs `position`+`velocity`
-  commands. Exposes a `~/scale_speed` service
-  (`robotarm_interface/srv/SetFloat64`) to scale velocity/acceleration/jerk
-  limits at runtime.
-- `robotarm_controllers/CartesianJogController` — subscribes to
-  `~/twist_cmds` (`geometry_msgs/Twist`, TCP velocity in the base frame), runs
-  it through a Cartesian-space Ruckig for jerk-limited smoothing, maps it to
-  joint space via a damped-least-squares Jacobian inverse (`robotarm_rbd`) with
-  drift correction, slows down in front of joint position/velocity limits and
-  stops on excessive tracking error. Outputs `position`+`velocity` commands for
-  **all** joints (taken from the URDF), so it is mutually exclusive with
-  `joint_stream_controller`.
-- `joint_state_broadcaster` (stock `ros2_controllers` package) — publishes
-  `/joint_states` at a configurable rate.
+The controllers form two chains plus gravity compensation. An *upstream*
+controller turns an input (joint targets, twists, trajectories) into a smooth
+joint space reference; a *downstream* controller decides how the drives follow
+it.
 
-- `joint_trajectory_controller` (stock `ros2_controllers` package) — executes
-  joint trajectories received on the `~/follow_joint_trajectory` action
-  (`control_msgs/action/FollowJointTrajectory`), e.g. planned by MoveIt on the
-  high-level PC. Outputs `position`+`velocity` like `joint_stream_controller`
-  and `cartesian_jog_controller`, so only one of the three can be active. Aborts
-  a goal if the tracking error exceeds the `constraints` in `controllers.yaml`.
-  Activated by the high-level PC (control_center) for a mission, like the others.
+| Controller | Role | Input | Behavior |
+|---|---|---|---|
+| `ff_controller` | downstream, position controlled | reference of its upstream | moteus position loops + inverse dynamics as `torque_ff` |
+| `cartesian_impedance_controller` | downstream, compliant | reference of its upstream | joint torques: a virtual spring/damper on the TCP |
+| `gc_controller` | standalone | – | joint torques: gravity compensation, the arm floats for hand guiding |
+| `joint_stream_controller` | upstream of `ff_controller` | `~/commands` joint targets, `~/scale_speed` | jerk-limited (Ruckig) joint motion |
+| `cartesian_jog_controller` | upstream of `ff_controller` | `~/twist_cmds`, `~/increment_cmds` | jerk-limited Cartesian TCP jogging |
+| `joint_trajectory_controller` (stock) | upstream of `ff_controller` | `~/follow_joint_trajectory` action, e.g. from MoveIt | trajectory execution, aborts on tracking error |
+| `*_impedance` variants of stream and jog | upstream of `cartesian_impedance_controller` | same as above | same motion, executed compliantly |
+| `joint_state_broadcaster` (stock) | – | – | publishes `/joint_states` |
+
+A downstream controller is always activated **in the same switch request** as
+its upstream. Valid combinations and switching rules:
+**[docs/controller_switching/README.md](docs/controller_switching/README.md)**.
+Internals of the custom controllers:
+**[src/robotarm_controllers/README.md](src/robotarm_controllers/README.md)**.
 
 ## Usage / Getting Started
 
@@ -243,11 +241,12 @@ permissions for the fdcanusb adapter, Docker RT runtime flags — see
 - **[docs/timing/](docs/timing/)** — `timing_analyzer.py` and recorded transport
   timing CSVs/plots for analyzing `moteus_interface`'s per-cycle transport
   latency (produced by its `time_transport` option).
-- **[docs/motor_cfg/](docs/motor_cfg/)** — per-axis moteus controller register
-  configuration dumps (`axis1`/`axis2`/`axis3`), kept as a backup/reference of
-  each controller's calibrated configuration. Its
+- **[docs/motor_cfg/](docs/motor_cfg/)** — moteus controller register
+  configuration dumps for all six actuators (`actuator1`–`actuator6`), kept as a
+  backup/reference of each controller's calibrated and verified configuration. Its
   **[README](docs/motor_cfg/README.md)** is the setup guide: which values are set
-  for this robot, their units, and why.
+  for this robot, their units, and why. Wrist motor selection and thermal tests are
+  in the same folder.
 
 ## Status / Roadmap
 

@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <!-- ros2_control block of the MuJoCo simulation. Each joint is driven by the MJCF <motor> actuator of the same name:
      effort goes to it directly, position and velocity through the servo of robotarm_mujoco_hardware with the gains
-     of config/sim_pids.yaml (a generic servo, not a model of the moteus position loop). The joint list duplicates robotarm_description/urdf/robotarm.ros2_control.xacro,
-     test_mjcf.py checks that both stay equal. No torque_ff (moteus only, it only improves tracking) and no
+     of config/sim_pids.yaml (a generic servo, not a model of the moteus position loop). torque_ff is added to the
+     servo output like the moteus feedforward torque. The joint list and command interfaces duplicate
+     robotarm_description/urdf/robotarm.ros2_control.xacro, test_mjcf.py checks that both stay equal. No
      transmissions: MuJoCo drives axis5/axis6 directly. -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -19,6 +20,7 @@
       <joint name="axis1">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -28,6 +30,7 @@
       <joint name="axis2">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -37,6 +40,7 @@
       <joint name="axis3">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -46,6 +50,7 @@
       <joint name="axis4">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -55,6 +60,7 @@
       <joint name="axis5">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -64,6 +70,7 @@
       <joint name="axis6">
         <command_interface name="position"/>
         <command_interface name="velocity"/>
+        <command_interface name="torque_ff"/>
         <command_interface name="effort"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>

@@ -16,6 +16,7 @@ struct ServoTarget
     bool active = false;     // false: the servo does not touch the joint (effort claimed, hardware inactive)
     double position = 0.0;   // rad, at time t
     double velocity = 0.0;   // rad/s
+    double torque_ff = 0.0;  // Nm, added to the servo output, held (not extrapolated) until the next target
     double time = 0.0;       // s, sim time the target belongs to
     uint64_t epoch = 0;      // changes when the servo has to start fresh (integral reset)
 };

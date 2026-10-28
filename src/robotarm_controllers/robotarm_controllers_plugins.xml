@@ -22,4 +22,12 @@
       Cartesian Impedance Control and Gravity Compensation.
     </description>
   </class>
+
+  <class name="robotarm_controllers/FeedforwardController" 
+         type="feedforward_controller::FeedforwardController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      Feedforward for improved dynamics
+    </description>
+  </class>
 </library>

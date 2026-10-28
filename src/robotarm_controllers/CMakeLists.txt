@@ -28,6 +28,7 @@ add_library(${PROJECT_NAME} SHARED
   src/JointStreamController.cpp
   src/CartesianJogController.cpp
   src/CartesianImpedanceController.cpp
+  src/FeedforwardController.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -124,6 +125,25 @@ if(BUILD_TESTING)
     Eigen3::Eigen
   )
   ament_target_dependencies(test_cartesian_impedance
+    controller_interface
+    hardware_interface
+    lifecycle_msgs
+    rclcpp
+  )
+
+  # FeedforwardController: allocations in update(), the inverse dynamics against an own model, the
+  # reference handling and the safety layers (start ramp, rate limit, clamp). Same malloc interposer.
+  ament_add_gtest(test_feedforward
+    test/test_feedforward.cpp
+    test/malloc_counter.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_feedforward PRIVATE test)
+  target_link_libraries(test_feedforward
+    ${PROJECT_NAME}
+    ament_index_cpp::ament_index_cpp
+    Eigen3::Eigen
+  )
+  ament_target_dependencies(test_feedforward
     controller_interface
     hardware_interface
     lifecycle_msgs

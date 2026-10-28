@@ -2,14 +2,16 @@
 
 MuJoCo simulation of the robotarm, a stand-in for the real arm with the same controllers, the same
 `controllers.yaml` and the same command interfaces: `effort` for the torque controllers (gravity compensation,
-Cartesian impedance), `position` + `velocity` for joint stream and Cartesian jog.
+Cartesian impedance), `position` + `velocity` + `torque_ff` for `ff_controller`, which joint stream, Cartesian jog
+and the joint trajectory controller chain to.
 
 The hardware plugin is [`robotarm_mujoco_hardware`](../robotarm_mujoco_hardware), a thin layer over
 [`mujoco_ros2_control`](https://github.com/ros-controls/mujoco_ros2_control).
 
 > **Position and velocity are followed by a generic sim servo, not by a model of the moteus position loop.**
 > The gains ([config/sim_pids.yaml](config/sim_pids.yaml)) are tuned for stable, stiff tracking in the sim
-> only, and `torque_ff` does not exist here. Use the sim to check wiring, interface claims, controller
+> only. `torque_ff` is added to that servo like on the moteus, but against the much stiffer sim servo its
+> effect is small. Use the sim to check wiring, interface claims, controller
 > switching and what a controller does with the arm, not tracking performance or gains for the real arm. The
 > model parameters are not accurate enough for that either.
 
@@ -39,8 +41,8 @@ mock. Activate them like there:
 
 ```bash
 ros2 control set_hardware_component_state moteus_hardware_system active
-ros2 control switch_controllers --activate joint_stream_controller          # position/velocity, sim servo
-ros2 control switch_controllers --deactivate joint_stream_controller \
+ros2 control switch_controllers --activate ff_controller joint_stream_controller   # position/velocity/torque_ff, sim servo
+ros2 control switch_controllers --deactivate joint_stream_controller ff_controller \
   --activate gc_controller                                                   # gravity compensation and hold
 ros2 control switch_controllers --deactivate gc_controller \
   --activate cartesian_impedance_controller joint_stream_controller_impedance   # impedance, streamed targets
@@ -195,10 +197,12 @@ and to 0 with the controller manager's command limiter (`enforce_command_limits`
 targets because of the jittering sim timing, and the stiff servo turns each clipped step into a torque spike.
 
 - **Position + velocity claimed** (joint stream, Cartesian jog): `p*` and `v*` from the controller.
+- **`torque_ff` claimed** (`ff_controller`, which the joint stream, Cartesian jog and trajectory controllers
+  chain to): added to the servo torque, clamped to the effort limit, NaN → 0, like the moteus feedforward.
 - **Velocity only, or a NaN position:** `p*` integrates `v*` from the position at the claim, like the moteus.
 - **Nothing claimed:** holds the position the joint had when its last claim was released.
-- **Effort claimed:** the torque goes to the joint as it is. Effort together with position/velocity on one
-  joint is rejected, like by `moteus_interface`.
+- **Effort claimed:** the torque goes to the joint as it is. Effort together with position/velocity/torque_ff on
+  one joint is rejected, like by `moteus_interface`.
 
 The gains ([config/sim_pids.yaml](config/sim_pids.yaml), `kp`, `ki`, `kd` per joint) are ζ = 1 at ω = 80 rad/s
 for a reference inertia per joint, checked offline against the same loop with the URDF armature, also with
@@ -208,8 +212,8 @@ formulas.
 ## Joint list duplication
 
 The sim has its own ros2_control block
-([`urdf/robotarm_sim.ros2_control.xacro`](urdf/robotarm_sim.ros2_control.xacro)): `position`, `velocity`
-and `effort`, no `torque_ff`, no transmissions. The joint list therefore exists both here and in
+([`urdf/robotarm_sim.ros2_control.xacro`](urdf/robotarm_sim.ros2_control.xacro)): `position`, `velocity`,
+`torque_ff` and `effort`, no transmissions. The joint list therefore exists both here and in
 `robotarm_description`. `test_sim_ros2_control_joints_match_the_hardware` fails if they differ.
 
 ## What the sim does and does not model
@@ -235,7 +239,7 @@ the same URDF:
 - the TCP pose
 - that pure gravity feed-forward holds a pose for 2 s
 - that the vendored MuJoCo (the version the hardware plugin runs) compiles the scene
-- the ros2_control block: same joints as the hardware, position/velocity/effort, the
+- the ros2_control block: same joints as the hardware, position/velocity/torque_ff/effort, the
   `robotarm_mujoco_hardware` plugin, and servo gains for every joint
 
 `robotarm_rbd` is checked against Pinocchio in its own tests. If both pass, the simulated dynamics

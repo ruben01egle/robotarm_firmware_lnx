@@ -29,9 +29,11 @@ std::unordered_map<std::string, ServoGains> load_servo_gains(
 //    to the physics time, so target and state belong to the same moment however late the controller manager
 //    runs. A NaN position, or a claim of velocity only, integrates the velocity command from the position the
 //    joint had when it was claimed
+//  - torque_ff claimed: added to the servo torque, clamped to the effort limit, NaN → 0, like the moteus
+//    feedforward torque. It belongs to the position/velocity group, without position/velocity the servo holds
 //  - nothing claimed: holds its current position, like the moteus in its idle mode
-//  - a newly claimed command starts at NaN position / 0 velocity / 0 effort, like in moteus_interface
-//  - effort mixed with position/velocity on one joint is rejected, like by moteus_interface
+//  - a newly claimed command starts at NaN position / 0 velocity / 0 torque_ff / 0 effort, like in moteus_interface
+//  - effort mixed with position/velocity/torque_ff on one joint is rejected, like by moteus_interface
 //  - after a world reset (reset_world service, viewer), idle joints hold the reset pose
 class RobotarmMujocoSystem : public mujoco_ros2_control::MujocoSystemInterface
 {
@@ -59,13 +61,13 @@ private:
     static constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
     static constexpr long NONE = -1;
 
-    enum Kind { POSITION = 0, VELOCITY = 1, EFFORT = 2, KINDS = 3 };
+    enum Kind { POSITION = 0, VELOCITY = 1, TORQUE_FF = 2, EFFORT = 3, KINDS = 4 };
 
     struct Joint
     {
         std::string name;
-        bool exported[KINDS] = {false, false, false};   // command interfaces of the URDF
-        bool claimed[KINDS] = {false, false, false};
+        bool exported[KINDS] = {false, false, false, false};   // command interfaces of the URDF
+        bool claimed[KINDS] = {false, false, false, false};
         long state_position = NONE;   // index into states_
         long state_velocity = NONE;
         long base_effort = NONE;      // index into base_commands_
@@ -73,7 +75,10 @@ private:
         ServoGains gains;
         uint64_t epoch = 0;           // increased when the servo has to start fresh
 
-        bool idle() const { return !claimed[POSITION] && !claimed[VELOCITY] && !claimed[EFFORT]; }
+        bool idle() const
+        {
+            return !claimed[POSITION] && !claimed[VELOCITY] && !claimed[TORQUE_FF] && !claimed[EFFORT];
+        }
     };
 
     // "<joint>/<interface>" -> (joint index, kind), for the command interfaces of the URDF
@@ -91,7 +96,7 @@ private:
     std::vector<double> states_;
     std::vector<double> commands_;   // KINDS per joint
     std::vector<ServoTarget> targets_;   // posted to the ServoPlugin every write()
-    bool servo_ = false;                 // a joint has position or velocity
+    bool servo_ = false;                 // a joint has position, velocity or torque_ff
 };
 
 }  // namespace robotarm_mujoco_hardware

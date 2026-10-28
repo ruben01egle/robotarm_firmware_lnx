@@ -46,7 +46,7 @@ public:
             const double ahead = std::clamp(t - target.time, 0.0, MAX_EXTRAPOLATION);
             const double p_ref = target.position + target.velocity * ahead;
             data->ctrl[actuator_[j]] = servos_[j].update(
-                p_ref, target.velocity, data->qpos[qpos_[j]], data->qvel[qvel_[j]], dt);
+                p_ref, target.velocity, data->qpos[qpos_[j]], data->qvel[qvel_[j]], dt, target.torque_ff);
         }
     }
 

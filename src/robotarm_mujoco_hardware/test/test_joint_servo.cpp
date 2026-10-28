@@ -68,6 +68,33 @@ TEST(JointServo, IntegralIsClampedToTheEffortLimit)
     EXPECT_DOUBLE_EQ(servo.integral(), 5.0);
 }
 
+TEST(JointServo, FeedforwardIsAddedToTheOutput)
+{
+    JointServo servo(gains(10.0, 0.0, 2.0));
+    EXPECT_DOUBLE_EQ(servo.update(1.1, 1.0, 1.0, 0.5, 0.002, 3.0), 5.0);
+    EXPECT_DOUBLE_EQ(servo.update(1.0, 1.0, 1.0, 1.0, 0.002, -1.5), -1.5);
+}
+
+TEST(JointServo, FeedforwardCountsForTheClampAndTheIntegralPause)
+{
+    JointServo servo(gains(10.0, 1000.0, 0.0, 5.0));
+    // 1 Nm from the error + 4.5 Nm feedforward saturates: clamped, the integral pauses
+    EXPECT_DOUBLE_EQ(servo.update(0.1, 0.0, 0.0, 0.0, 0.01, 4.5), 5.0);
+    EXPECT_DOUBLE_EQ(servo.integral(), 0.0);
+    EXPECT_DOUBLE_EQ(servo.update(0.1, 0.0, 0.0, 0.0, 0.01, -6.0), -5.0);
+    EXPECT_DOUBLE_EQ(servo.integral(), 0.0);
+}
+
+TEST(JointServo, FeedforwardCarryingTheLoadLeavesTheIntegralAtZero)
+{
+    // at the target with the feedforward holding the load there is no error, so nothing integrates
+    JointServo servo(gains(100.0, 1000.0, 1.0, 50.0));
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_DOUBLE_EQ(servo.update(0.3, 0.0, 0.3, 0.0, 0.001, 12.0), 12.0);
+    }
+    EXPECT_DOUBLE_EQ(servo.integral(), 0.0);
+}
+
 class ServoGainsFile : public ::testing::Test
 {
 protected:
@@ -122,11 +149,13 @@ TEST(ServoBridge, HandsTargetsAndResetsBetweenTheSides)
     posted[1].active = true;
     posted[1].position = 0.5;
     posted[1].velocity = 1.0;
+    posted[1].torque_ff = 2.5;
     posted[1].time = 3.0;
     bridge.set_targets(posted);
     ASSERT_TRUE(bridge.read(joints, g, targets, version));
     EXPECT_TRUE(targets[1].active);
     EXPECT_DOUBLE_EQ(targets[1].position, 0.5);
+    EXPECT_DOUBLE_EQ(targets[1].torque_ff, 2.5);
     EXPECT_DOUBLE_EQ(targets[1].time, 3.0);
 
     // a wrong size is ignored instead of breaking the plugin's buffers

@@ -487,8 +487,10 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
             return hardware_interface::return_type::ERROR;
         }
 
-        if (actuators_[i].setpoint_sync_ == Actuator::SetpointSync::SENT && actuators_updated_[i]) {
-            actuators_[i].setpoint_sync_ = Actuator::SetpointSync::VALID;
+        // a reply confirms the resync frame arrived, without one it is resent with the next frame
+        if (actuators_[i].setpoint_sync_ == Actuator::SetpointSync::SENT) {
+            actuators_[i].setpoint_sync_ = actuators_updated_[i] ? Actuator::SetpointSync::VALID
+                                                                 : Actuator::SetpointSync::PENDING;
         }
         
         actuator_states_position_[i] = result.position * 2.0 * M_PI;
