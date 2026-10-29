@@ -29,6 +29,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'mode_manager = robotarm_bringup.mode_manager:main',
         ],
     },
 )

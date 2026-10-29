@@ -11,7 +11,12 @@
   <depend>robot_state_publisher</depend>
   <depend>rviz2</depend>
   
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>robotarm_interface</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>
   <exec_depend>moteus_interface</exec_depend>
   <exec_depend>robotarm_controllers</exec_depend>
@@ -22,6 +27,7 @@
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

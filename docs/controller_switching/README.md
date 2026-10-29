@@ -1,10 +1,57 @@
 # Controllers and how to switch them
 
-Handover for clients that activate controllers on the robot arm (e.g. a GUI). Describes the
-controller setup as of the feedforward chain (`ff_controller`) and what changed compared to
-`1f88fa7`, the last commit before the impedance work. Source of truth: `robotarm_bringup/config/controllers.yaml` and
-`robotarm_bringup/launch/robotarm.launch.py`. Controller internals are documented in
-`src/robotarm_controllers/README.md`.
+Handover for clients of the robot arm (e.g. a GUI). **Clients don't switch controllers or the
+hardware themselves anymore**: they request a mode from the `mode_manager`, see [Modes](#modes).
+The rest of this document describes what a mode consists of and the inputs of the controllers a
+client sends commands to. Source of truth: `robotarm_bringup/robotarm_bringup/modes.py`,
+`robotarm_bringup/config/controllers.yaml` and `robotarm_bringup/launch/robotarm.launch.py`.
+Controller internals are documented in `src/robotarm_controllers/README.md`.
+
+---
+
+## Modes
+
+`mode_manager` (started by every launch file, also mock and sim) is the only node that switches
+controllers and the hardware state. Interfaces in `robotarm_interface`:
+
+| Name | Type | Use |
+|---|---|---|
+| `/mode_manager/set_mode` | `robotarm_interface/srv/SetMode` | request a mode: `target.mode` = a `RobotarmMode` constant. Response: `success`, `message` (reason on failure), `mode` (actual mode afterwards, also on failure) |
+| `/mode_manager/state` | `robotarm_interface/msg/ModeState` | `mode` (actual mode), `available` (modes a request can switch to now, incl. the actual one), `switching` (a request is running). Latched: subscribe **reliable + transient local** to get the current state on connect, published on change |
+
+| Mode | Arm behavior | Commands go to |
+|---|---|---|
+| `LIMP` | drives unpowered, the arm is limp | – |
+| `STOPPED` | powered, no controller: the drives stop and hold on their own PID, no feedforward | – |
+| `EMERGENCY_OFF` | drives powered off, hardware finalized, only a firmware restart recovers | – |
+| `ARMED` | position hold with feedforward | – |
+| `JOINT_STREAM` | position controlled | `joint_stream_controller` |
+| `CARTESIAN_JOG` | position controlled | `cartesian_jog_controller` |
+| `TRAJECTORY` | position controlled | `joint_trajectory_controller` |
+| `GRAVITY_COMP` | floats, hand guiding | – |
+| `IMPEDANCE` | compliant hold of the activation pose | stiffness parameters of `cartesian_impedance_controller` |
+| `IMPEDANCE_JOINT_STREAM` | compliant | `joint_stream_controller_impedance` |
+| `IMPEDANCE_JOG` | compliant | `cartesian_jog_controller_impedance` |
+| `FAULT` (reported only) | leftovers of a controller error, cleaned up to `STOPPED` within 0.2 s | – |
+| `UNKNOWN` (reported only) | controller manager not reachable yet | – |
+
+- Every available mode can be requested from every mode, the mode manager does the steps in
+  between (hardware activation, one switch request). `LIMP` drops the arm wherever it is.
+- `available` lists a mode only if all of its controllers are loaded and the hardware is usable,
+  for greying out unavailable modes. A request for an unavailable mode fails with the reason.
+- `mode` is read from the controller manager, not from the last request. A state that is no mode (a
+  controller stopped on an error, a switch done by hand) is reported as `FAULT`, the leftover
+  controllers are deactivated and the mode becomes `STOPPED`.
+- Requesting `ARMED` from `STOPPED` lifts the arm slightly for a moment: the drive integrators
+  already carry the load when the feedforward is added.
+- A request while another one is running is rejected (`success = false`), not queued.
+  `EMERGENCY_OFF` is the exception: it is never rejected, aborts a running request, and afterwards
+  every other request is rejected (`available` is empty).
+
+```bash
+ros2 service call /mode_manager/set_mode robotarm_interface/srv/SetMode "{target: {mode: 1}}"  # ARMED
+ros2 topic echo /mode_manager/state
+```
 
 ---
 
@@ -21,6 +68,8 @@ controller setup as of the feedforward chain (`ff_controller`) and what changed 
 | – | stiffness of `cartesian_impedance_controller` | **new input**: settable at runtime as parameters, in the base or the tcp frame, see [runtime stiffness](#runtime-stiffness-cartesian_impedance_controller) |
 | – | `ff_controller` | new: adds the arm dynamics as feedforward torque to the position controlled modes |
 | `joint_stream_controller`, `cartesian_jog_controller`, `joint_trajectory_controller` drive the hardware directly | chained to `ff_controller` | **`ff_controller` has to be activated in the same request**, alone they fail to activate |
+| – | `hold_controller` | new: upstream of `ff_controller` in `ARMED`, keeps `ff_controller` active between all position controlled modes |
+| clients switch controllers and the hardware | `mode_manager` | **clients request a mode**, see [Modes](#modes) |
 
 A client that activated `cartesian_impedance_controller` for gravity compensation (hand guiding)
 has to activate `gc_controller` instead. A client that activated one of the position controlled
@@ -39,6 +88,7 @@ All are spawned **inactive** by `robotarm.launch.py`, except `joint_state_broadc
 | `joint_stream_controller` | `robotarm_controllers/JointStreamController` | the reference interfaces of `ff_controller` | topic + service, see below | position controlled, follows streamed joint targets |
 | `cartesian_jog_controller` | `robotarm_controllers/CartesianJogController` | the reference interfaces of `ff_controller` | topics, see below | position controlled, Cartesian jogging and increments of the TCP |
 | `joint_trajectory_controller` | `joint_trajectory_controller/JointTrajectoryController` (stock) | the reference interfaces of `ff_controller` | `FollowJointTrajectory` action, see below | position controlled, executes trajectories (e.g. planned by MoveIt) |
+| `hold_controller` | `robotarm_controllers/HoldController` | the reference interfaces of `ff_controller` | none | holds the pose measured at its activation |
 | `gc_controller` | `robotarm_controllers/CartesianImpedanceController` (mode `gc`) | `effort` of all joints | none | gravity compensation, the arm floats and can be guided by hand, stays where it is let go |
 | `cartesian_impedance_controller` | `robotarm_controllers/CartesianImpedanceController` (mode `impedance`) | `effort` of all joints, **exports reference interfaces** | reference interfaces from an upstream controller, stiffness parameters | compliant: the TCP is pulled towards a reference pose by a virtual spring/damper. Without upstream: holds the pose it was activated in |
 | `joint_stream_controller_impedance` | `robotarm_controllers/JointStreamController` | the reference interfaces of `cartesian_impedance_controller` | same as `joint_stream_controller` | joint stream, executed compliantly |
@@ -57,18 +107,21 @@ Two controllers are chainable: `ff_controller` (position controlled) and
 the same rules apply to both.
 
 ```
-joint_stream_controller      ─┐
+hold_controller              ─┐
+joint_stream_controller      ─┤
 cartesian_jog_controller     ─┼─(reference interfaces)─► ff_controller ─(position, velocity, torque_ff)─► hardware
 joint_trajectory_controller  ─┘
 ```
 
+The rules below are what `mode_manager` implements, a client doesn't have to follow them.
+
 - Only **one** upstream of `ff_controller` can be active at a time.
-- The upstream can only be activated while `ff_controller` is active, or in the **same** switch
-  request. Use the same request: activating `ff_controller` first and the upstream in a second
-  request restarts `ff_controller`, and the feedforward briefly drops to 0 (axis 2 sags slightly).
-- `ff_controller` can only be deactivated together with its active upstream, in the same request.
-- Changing the upstream (e.g. 1 → 2) in one request keeps `ff_controller` active without a restart.
-- `ff_controller` alone is valid (holds the activation pose), but not a combination to use.
+- `ff_controller` is restarted by the controller manager whenever it gains its first or loses its
+  last upstream (Jazzy changes the chained mode only on inactive controllers). A restart ramps the
+  feedforward in from 0, the arm sags. So `ff_controller` never runs without an upstream:
+  `hold_controller` is the upstream in `ARMED`, and between position controlled modes only the
+  upstream is swapped, in one request.
+- `ff_controller` is only activated or deactivated together with its upstream, in one request.
 
 `cartesian_impedance_controller` exports per joint
 `cartesian_impedance_controller/<joint>/position`, `/velocity` and `/acceleration`. An upstream
@@ -94,74 +147,55 @@ cartesian_jog_controller_impedance ─┘
 
 ---
 
-## Valid combinations
+## Modes and their controllers
 
-Exactly one of these is active at a time (plus `joint_state_broadcaster`):
+Exactly one of these is active at a time (plus `joint_state_broadcaster`), defined in `modes.py`:
 
-| # | Active controllers | Arm behavior | Control |
-|---|---|---|---|
-| 0 | none | drives hold their position | – |
-| 1 | `ff_controller` + `joint_stream_controller` | position controlled | joint targets |
-| 2 | `ff_controller` + `cartesian_jog_controller` | position controlled | twists / increments |
-| 3 | `gc_controller` | floats, hand guiding | – |
-| 4 | `cartesian_impedance_controller` | compliant hold of the activation pose | – |
-| 5 | `cartesian_impedance_controller` + `joint_stream_controller_impedance` | compliant | joint targets |
-| 6 | `cartesian_impedance_controller` + `cartesian_jog_controller_impedance` | compliant | twists / increments |
-| 7 | `ff_controller` + `joint_trajectory_controller` | position controlled | trajectories |
+| Mode | Hardware | Active controllers |
+|---|---|---|
+| `LIMP` | inactive | none |
+| `STOPPED` | active | none: the drives hold on their own PID |
+| `EMERGENCY_OFF` | finalized | whatever was active, nothing reaches the drives |
+| `ARMED` | active | `ff_controller` + `hold_controller` |
+| `JOINT_STREAM` | active | `ff_controller` + `joint_stream_controller` |
+| `CARTESIAN_JOG` | active | `ff_controller` + `cartesian_jog_controller` |
+| `TRAJECTORY` | active | `ff_controller` + `joint_trajectory_controller` |
+| `GRAVITY_COMP` | active | `gc_controller` |
+| `IMPEDANCE` | active | `cartesian_impedance_controller` |
+| `IMPEDANCE_JOINT_STREAM` | active | `cartesian_impedance_controller` + `joint_stream_controller_impedance` |
+| `IMPEDANCE_JOG` | active | `cartesian_impedance_controller` + `cartesian_jog_controller_impedance` |
+| `FAULT` | active | anything else, e.g. the upstream of a stopped `ff_controller` |
 
 **Why they are exclusive:**
-- 1, 2 and 7 claim the same reference interfaces of `ff_controller`, the controller manager rejects
-  two of them.
-- 3 and 4–6 claim the same `effort` interfaces, the controller manager rejects both.
-- `effort` and `position`/`velocity`/`torque_ff` on the same joint at once (e.g. 1 + 3) is rejected
-  by the hardware interface.
+- The upstreams of `ff_controller` claim the same reference interfaces, the controller manager
+  rejects two of them.
+- `gc_controller` and `cartesian_impedance_controller` claim the same `effort` interfaces, the
+  controller manager rejects both.
+- `effort` and `position`/`velocity`/`torque_ff` on the same joint at once is rejected by the
+  hardware interface.
 
 The controller manager runs with `strictness: strict`: a switch request that is not valid as a whole
 fails completely and changes nothing.
 
 ---
 
-## Switching
+## How `mode_manager` switches
 
-Always switch from one combination to the next in **one** request: deactivate everything of the old
-combination and activate everything of the new one together. The hardware validates the final state
-of a request, so a direct change between position and effort control works in one step.
+For each request it reads the actual hardware state and active controllers, then:
 
-CLI equivalents (the service is `/controller_manager/switch_controller`,
-`controller_manager_msgs/srv/SwitchController`):
+1. activates `moteus_hardware_system` if the target needs it and it is inactive
+   (it starts `inactive`, `hardware_components_initial_state`, and controllers can't be activated
+   on inactive hardware),
+2. sends **one** strict switch request: deactivate the active controllers that are not part of the
+   target mode, activate the missing ones. A controller in both modes (`ff_controller` between
+   position controlled modes) is not touched, so it is not restarted. The hardware validates the
+   final state of a request, so a direct change between position and effort control works in one
+   step,
+3. deactivates the hardware for `LIMP`.
 
-```bash
-# 0 -> 7: start trajectory execution
-ros2 control switch_controllers --activate ff_controller joint_trajectory_controller
-
-# 7 -> 1: change the upstream, ff_controller stays active
-ros2 control switch_controllers --deactivate joint_trajectory_controller \
-  --activate joint_stream_controller
-
-# 1 -> 3: joint stream to gravity compensation
-ros2 control switch_controllers --deactivate joint_stream_controller ff_controller \
-  --activate gc_controller
-
-# 3 -> 5: gravity compensation to compliant joint streaming
-ros2 control switch_controllers --deactivate gc_controller \
-  --activate cartesian_impedance_controller joint_stream_controller_impedance
-
-# 5 -> 6: change the upstream, the impedance controller stays active
-ros2 control switch_controllers --deactivate joint_stream_controller_impedance \
-  --activate cartesian_jog_controller_impedance
-
-# 6 -> 2: compliant jogging to position controlled jogging
-ros2 control switch_controllers \
-  --deactivate cartesian_jog_controller_impedance cartesian_impedance_controller \
-  --activate ff_controller cartesian_jog_controller
-```
-
-**Hardware:** `moteus_hardware_system` starts `inactive` (`hardware_components_initial_state`), and
-controllers can't be activated while it is inactive. It has to be activated first:
-
-```bash
-ros2 control set_hardware_component_state moteus_hardware_system active
-```
+If the switch fails after the hardware was activated, the hardware is deactivated again (back to
+`LIMP`). Switching by hand with `ros2 control switch_controllers` still works for debugging, the
+mode manager then reports what it finds (usually `FAULT` for anything that is no mode).
 
 ---
 
@@ -277,8 +311,10 @@ sending intermediate values from the GUI does not guarantee a smooth change.
 - **Activation of an effort controller** (`gc_controller`, `cartesian_impedance_controller`): the
   torque is ramped in over 1 s from the measured effort, so the arm is not yet fully held right after
   activation.
-- **Activation of `ff_controller`**: the moteus position loops hold the arm from the first cycle.
-  The feedforward torque is ramped in from 0 over 1 s on top.
+- **Activation of `ff_controller`** (`ARMED` or a position controlled mode from `LIMP`, an effort
+  mode or `STOPPED`): the moteus position loops hold the arm from the first cycle. The feedforward
+  torque is ramped in from 0 over 1 s on top. Between position controlled modes it stays active
+  and nothing is ramped.
 - **Activation of an upstream**: it starts from the measured joint position, so it does not jump.
   A new joint stream target or twist is only executed after activation.
 - **Error stop**: a controller whose update fails is deactivated by the controller manager. When
@@ -286,8 +322,8 @@ sending intermediate values from the GUI does not guarantee a smooth change.
   upstream stops (e.g. the jog controller's tracking check), its downstream controller holds the last
   reference.
   Which other controllers of a chain the controller manager deactivates along with a failing one
-  is not verified yet on this setup. A client should read the controller states
-  (`/controller_manager/list_controllers`) rather than assume a switch stayed in effect.
-- **Simulation** (`robotarm_mujoco/sim.launch.py`) loads the same controllers, but its hardware has
-  no `torque_ff` interface yet. `ff_controller` can't be activated there, so combinations 1, 2 and 7
-  are currently not available in the sim.
+  is not verified yet on this setup. Either way the remains are no mode: `mode_manager` reports
+  `FAULT` within its poll period (0.2 s) and deactivates them, ending in `STOPPED`. A client
+  should follow `/mode_manager/state` rather than assume a mode stayed in effect.
+- **Simulation** (`robotarm_mujoco/sim.launch.py`) loads the same controllers and the mode manager,
+  all modes are available there.

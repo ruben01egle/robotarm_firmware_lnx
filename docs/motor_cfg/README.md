@@ -21,10 +21,51 @@ not per joint, because controllers 5 and 6 each drive both wrist joints.
 assembled arm (limits, directions, encoder signs, PID tuning, switching from the
 torque controllers back to position control).
 
+- [TODO](#todo)
 - [Units](#units)
 - [Setup procedure](#setup-procedure)
 - [Overview](#overview)
 - [Background: why each value is set](#background-why-each-value-is-set)
+
+## TODO
+
+- [ ] **Set `servo.timeout_max_torque_Nm` per axis.** It is 5 Nm on all six controllers, never
+  chosen for this arm. This is the braking torque when the drive watchdog fires
+  (host or transport dead for `default_timeout_s` = 0.1 s): `timeout_mode` 12 commands
+  zero velocity without a position target, so only the damping term acts (≈ `kd · v`),
+  clamped to this value at the output. The arm brakes and stays where it stops, it does
+  not return. Per axis the value has to be:
+  - **above the worst-case gravity torque** of the joint (full payload, worst pose).
+    There is no position stiffness in this mode: below the gravity torque the joint
+    falls, above it the joint still sags slowly at ≈ `τ_gravity / kd`.
+  - **below what the gearbox/belts and the structure can take** when braking from full
+    speed.
+  - **reachable with `servo.max_current_A`** (axis 5/6: ≈ 7.9 Nm at 25 A).
+
+  Axis 5/6 are in actuator space: each actuator carries `(τ5 ± τ6) / 2`, see
+  [Axis 5/6](#axis-56-wrist-mn5008-kv170). Then update the shared table and the
+  per-axis tables, and dump the configs again.
+- [ ] **Lower `servo.max_current_A` to the torque the arm actually needs.** It is the
+  hard torque limit in every mode, including the PID hold in STOPPED, so it bounds the
+  braking torque when all controllers are deactivated. Right now it allows up to 5 × the
+  URDF effort (axis 2: 175 Nm at 100 A). Output torque constant
+  `Kt_out = (8.27 / Kv) / rotor_to_output_ratio` (linear, `motor.rotation_current_cutoff_A`
+  is 10000), values from the dumps of 2026-10-27:
+
+  | Actuator | `motor.Kv` | Kt_out [Nm/A] | Torque at current limit | URDF effort | I at 1.0 × effort | **I at 1.2 × effort** |
+  |---|---|---|---|---|---|---|
+  | 1 | 143.97 | 0.345 | 34.5 Nm (100 A) | 8 Nm | 23.2 A | **27.9 A** |
+  | 2 | 141.83 | 1.749 | 174.9 Nm (100 A) | 35 Nm | 20.0 A | **24.0 A** |
+  | 3 | 143.53 | 0.660 | 66.0 Nm (100 A) | 15 Nm | 22.7 A | **27.3 A** |
+  | 4 | 131.03 | 0.252 | 25.2 Nm (100 A) | 5 Nm | 19.8 A | **23.8 A** |
+  | 5 | 156.39 | 0.317 | 7.9 Nm (25 A) | 4 Nm | 12.6 A | **15.1 A** |
+  | 6 | 155.54 | 0.319 | 8.0 Nm (25 A) | 4 Nm | 12.5 A | **15.0 A** |
+
+  The 1.2 × margin keeps controllers (feedforward, model error) out of saturation in
+  normal motion. The limit is also the most any controller can ever get, so the URDF
+  efforts have to be the design maximum. Actuator 5/6 effort is per actuator: 4 Nm on
+  both wrist joints at once is 4 Nm on one actuator. Recompute after a recalibration
+  (`motor.Kv` changes) and keep `servo.timeout_max_torque_Nm` below the resulting torque.
 
 ## Units
 
@@ -145,12 +186,13 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `servo.max_voltage` | 35 V | Bus voltage above which the controller faults and drops all torque |
 | `servo.flux_brake_margin_voltage` | 8 V | Flux braking starts at `max_voltage − margin` = **27 V** |
 | `servo.flux_brake_resistance_ohm` | 0.06 Ω | Braking gain: d-axis current = overvoltage / 0.06 Ω (16.7 A/V) |
-| `servo.max_current_A` | 100 A (axis 1–4 only) | Phase current limit (board default), hard backstop for torque |
+| `servo.max_current_A` | 100 A (axis 1–4 only) | Phase current limit (board default), hard backstop for torque (too high, see [TODO](#todo)) |
 | `servo.fault_temperature` | 75 °C | Board temperature fault (default) |
 | `servo.pwm_rate_hz` | 20000 | PWM / current loop rate (default 30000) |
 | `servo.max_current_desired_rate` | 50000 A/s | Max slew of the desired current (default 10000) |
 | `servo.max_velocity_derate` | 0.5 rev/s | Motoring current falls to 0 at `max_velocity + derate` |
 | `servo.default_timeout_s` / `timeout_mode` | 0.1 s / 12 | Command watchdog: hold zero velocity after 100 ms without commands (defaults) |
+| `servo.timeout_max_torque_Nm` | 5 Nm | Torque limit in the timeout state, i.e. the braking torque when the watchdog fires (not tuned yet, see [TODO](#todo)) |
 | `motor_position.commutation_source` | 0 | Onboard SPI encoder (source 0) commutates the motor |
 | `motor_position.output.source` | 0 | Output position/velocity = onboard encoder × gear ratio |
 | `motor_position.output.reference_source` | −1 | moteus does **not** resolve the output position from the AS5048B |

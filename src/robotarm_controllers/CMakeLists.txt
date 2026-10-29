@@ -29,6 +29,7 @@ add_library(${PROJECT_NAME} SHARED
   src/CartesianJogController.cpp
   src/CartesianImpedanceController.cpp
   src/FeedforwardController.cpp
+  src/HoldController.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -144,6 +145,23 @@ if(BUILD_TESTING)
     Eigen3::Eigen
   )
   ament_target_dependencies(test_feedforward
+    controller_interface
+    hardware_interface
+    lifecycle_msgs
+    rclcpp
+  )
+
+  # HoldController: allocations in update() and the hold of the activation pose. Same malloc interposer.
+  ament_add_gtest(test_hold
+    test/test_hold.cpp
+    test/malloc_counter.cpp
+    SKIP_LINKING_MAIN_LIBRARIES)
+  target_include_directories(test_hold PRIVATE test)
+  target_link_libraries(test_hold
+    ${PROJECT_NAME}
+    ament_index_cpp::ament_index_cpp
+  )
+  ament_target_dependencies(test_hold
     controller_interface
     hardware_interface
     lifecycle_msgs

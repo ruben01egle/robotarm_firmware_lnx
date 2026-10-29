@@ -84,6 +84,9 @@ controller_manager:
     ff_controller:
       type: robotarm_controllers/FeedforwardController
 
+    hold_controller:
+      type: robotarm_controllers/HoldController
+
 moteus_hardware_system:
   ros__parameters:
     execution_mode: "pipelined"  # pipelined or strict_sequential
@@ -107,8 +110,8 @@ joint_stream_controller:
       - axis5
       - axis6
     max_velocity: 2.5               # rad/s, applies to all joints -> lowest URDF joint velocity limit (axis2-6)
-    max_acceleration: 6.0
-    max_jerk: 35.0
+    max_acceleration: 5.0
+    max_jerk: 20.0
     sync_joints: false
     chain_to: "ff_controller"  # chain to ff for better dynamics
 
@@ -300,3 +303,16 @@ ff_controller:
   ros__parameters:
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
+
+# Holds the activation pose as upstream of ff_controller while no motion controller is active, so
+# ff_controller stays chained and is never restarted (which would ramp the feedforward in from 0 again).
+hold_controller:
+  ros__parameters:
+    joints:
+      - axis1
+      - axis2
+      - axis3
+      - axis4
+      - axis5
+      - axis6
+    chain_to: "ff_controller"

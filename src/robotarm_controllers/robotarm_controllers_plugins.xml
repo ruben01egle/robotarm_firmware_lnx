@@ -7,7 +7,15 @@
     </description>
   </class>
 
-  <class name="robotarm_controllers/CartesianJogController" 
+  <class name="robotarm_controllers/HoldController"
+         type="hold_controller::HoldController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Holds the pose measured at activation, as upstream of a chainable controller.
+    </description>
+  </class>
+
+  <class name="robotarm_controllers/CartesianJogController"
          type="cartesian_jog_controller::CartesianJogController" 
          base_class_type="controller_interface::ControllerInterface">
     <description>

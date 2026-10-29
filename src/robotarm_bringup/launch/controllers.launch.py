@@ -1,5 +1,7 @@
 """
-Spawners of all controllers in controllers.yaml, shared by robotarm.launch.py and the MuJoCo sim.
+Spawners of all controllers in controllers.yaml and the mode manager.
+
+Shared by robotarm.launch.py and the MuJoCo sim.
 
 The joint_state_broadcaster starts active, every other controller is only loaded (inactive).
 Hardware, mock and sim load the same set, so a controller switch that works in one works in all.
@@ -13,6 +15,7 @@ INACTIVE_CONTROLLERS = [
     'joint_stream_controller',
     'cartesian_jog_controller',
     'joint_trajectory_controller',
+    'hold_controller',
     # ff
     'ff_controller',
     # pure compliance
@@ -41,4 +44,11 @@ def generate_launch_description():
         for controller in INACTIVE_CONTROLLERS
     ]
 
-    return LaunchDescription([joint_state_broadcaster_spawner, *inactive_spawners])
+    # the only client that switches controllers and the hardware state, see modes.py
+    mode_manager = Node(
+        package='robotarm_bringup',
+        executable='mode_manager',
+        output='screen',
+    )
+
+    return LaunchDescription([joint_state_broadcaster_spawner, *inactive_spawners, mode_manager])
