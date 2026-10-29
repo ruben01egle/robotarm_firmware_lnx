@@ -58,7 +58,7 @@
         {
             "label": "Run Sim",
             "type": "shell",
-            "command": "source install/setup.bash && ros2 launch robotarm_mujoco sim.launch.py",
+            "command": "source install/setup.bash && ros2 launch robotarm_mujoco sim.launch.py software_rendering:=false",
             "problemMatcher": [],
             "group": {
                 "kind": "test",

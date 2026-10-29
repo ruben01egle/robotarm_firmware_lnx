@@ -20,8 +20,14 @@
         "source=${localWorkspaceFolder},target=/robotarm_firmware_lnx,type=bind",
         "source=/etc/localtime,target=/etc/localtime,type=bind,ro",
         "source=/sys,target=/sys,type=bind",
-        "source=/dev,target=/dev,type=bind"
+        "source=/dev,target=/dev,type=bind",
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
     ],
+
+    "remoteEnv": {
+        "DISPLAY": "${localEnv:DISPLAY}"
+    },
+
 
     "customizations": {
         "vscode": {
@@ -38,5 +44,6 @@
         }
     },
 
-    "remoteUser": "root"
+    "remoteUser": "root",
+    "postCreateCommand": "git config --global --add safe.directory '*'"
 }
