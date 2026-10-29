@@ -189,7 +189,8 @@ This repo ships a [`.devcontainer`](.devcontainer) (VS Code Remote Containers)
 preconfigured with the ROS 2 dependencies and the privileged/RT runtime flags
 (`--cap-add=sys_nice`, `rtprio=99`, `memlock=-1`, and a bind-mount for
 `/dev/ttyACM0`) needed to talk to real hardware and run RT threads inside the
-container. Open the repo folder in VS Code and reopen in the container.
+container. Open the repo folder in VS Code and reopen in the container. See
+[.devcontainer/README.md](.devcontainer/README.md) for how the image is built.
 
 ### Bring-up
 

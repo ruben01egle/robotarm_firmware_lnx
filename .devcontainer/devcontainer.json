@@ -2,10 +2,17 @@
     "name": "Robotarm Dev Environment (Headless)",
     "build": {
         "context": "..",
-        "dockerfile": "./Dockerfile"
+        "dockerfile": "Dockerfile"
     },
     "workspaceFolder": "/robotarm_firmware_lnx",
-        
+    "mounts": [
+        // Repo root bind mount: colcon build/install/log stay on the host.
+        "source=${localWorkspaceFolder},target=/robotarm_firmware_lnx,type=bind",
+        "source=/etc/localtime,target=/etc/localtime,type=bind,ro",
+        "source=/sys,target=/sys,type=bind",
+        "source=/dev,target=/dev,type=bind",
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
+    ],
     "runArgs": [
         "--privileged",
         "--net=host",
@@ -13,22 +20,14 @@
         "--cap-add=sys_nice",
         "--ulimit", "rtprio=99",
         "--ulimit", "memlock=-1",
+        // fdcanusb; the container won't start if it isn't plugged in.
         "--device", "/dev/ttyACM0:/dev/ttyACM0"
     ],
-
-    "mounts": [
-        "source=${localWorkspaceFolder},target=/robotarm_firmware_lnx,type=bind",
-        "source=/etc/localtime,target=/etc/localtime,type=bind,ro",
-        "source=/sys,target=/sys,type=bind",
-        "source=/dev,target=/dev,type=bind",
-        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
-    ],
-
     "remoteEnv": {
         "DISPLAY": "${localEnv:DISPLAY}"
     },
-
-
+    "remoteUser": "root",
+    "postCreateCommand": "git config --global --add safe.directory '*'",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -42,8 +41,5 @@
                 "sanaajani.taskrunnercode"
             ]
         }
-    },
-
-    "remoteUser": "root",
-    "postCreateCommand": "git config --global --add safe.directory '*'"
+    }
 }
