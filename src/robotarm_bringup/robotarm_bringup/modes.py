@@ -23,10 +23,13 @@ class SwitchPlan:
     deactivate: list
     activate: list
     deactivate_hardware: bool    # after the switch
+    ff_ramp_start: str = None    # ramp_start of an activated ff_controller, else None
 
 
 FF = 'ff_controller'
 IMPEDANCE = 'cartesian_impedance_controller'
+# write effort, the drives run without position loop and integrator (moteus_interface TC mode)
+EFFORT_CONTROLLERS = frozenset({'gc_controller', IMPEDANCE})
 
 # ff_controller stays active in every position controlled mode, only its upstream changes. Its own
 # restart would ramp the feedforward in from 0 again, so hold_controller is the upstream in ARMED.
@@ -109,15 +112,24 @@ def plan_switch(hardware_state, active_controllers, target):
     All controllers change in one strict switch request, so a mode never exists half switched and
     a controller that stays (ff_controller between position modes) is not restarted. The hardware
     is activated before and deactivated after the switch, controllers only run on active hardware.
+
+    An activated ff_controller ramps in from the measured torque out of an effort mode (nothing
+    but that torque holds the arm, the drive integrators are 0) and from 0 otherwise (the drive
+    PID holds the arm, from limp the measured torque is 0 anyway).
     """
     spec = MODES.get(target)
     if spec is None:
         return None
     managed = frozenset(active_controllers) & MANAGED_CONTROLLERS
     hardware_active = hardware_state == 'active'
+    activate = sorted(spec.controllers - managed)
+    ff_ramp_start = None
+    if FF in activate:
+        ff_ramp_start = 'measured' if hardware_active and managed & EFFORT_CONTROLLERS else 'zero'
     return SwitchPlan(
         activate_hardware=spec.hardware_active and not hardware_active,
         deactivate=sorted(managed - spec.controllers),
-        activate=sorted(spec.controllers - managed),
+        activate=activate,
         deactivate_hardware=not spec.hardware_active and hardware_active,
+        ff_ramp_start=ff_ramp_start,
     )

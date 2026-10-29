@@ -303,6 +303,9 @@ ff_controller:
   ros__parameters:
     torque_scale: 1.0              # fraction of the urdf joint effort limits the commanded torque is clamped to.
     torque_rise_time: 0.03
+    # start of the 1 s ramp in on activation: "zero" or "measured" (the measured joint torque). Set by
+    # mode_manager before every activation: measured out of an effort mode, else zero
+    ramp_start: "zero"
 
 # Holds the activation pose as upstream of ff_controller while no motion controller is active, so
 # ff_controller stays chained and is never restarted (which would ramp the feedforward in from 0 again).

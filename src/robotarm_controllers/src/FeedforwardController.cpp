@@ -79,6 +79,7 @@ controller_interface::InterfaceConfiguration FeedforwardController::state_interf
     
     for (const auto & joint : rbd_joint_names_) {
         state_interfaces_config.names.push_back(joint + "/position");
+        state_interfaces_config.names.push_back(joint + "/effort");
     }
 
     return state_interfaces_config;
@@ -136,13 +137,29 @@ controller_interface::CallbackReturn FeedforwardController::on_activate(const rc
     // make sure hw is in defined state when claiming interfaces
     if (!fetch_robotarm_state_strict()) return controller_interface::CallbackReturn::ERROR;
 
+    // set by the mode manager before every activation
+    const std::string ramp_start = get_node()->get_parameter("ramp_start").as_string();
+    if (!valid_ramp_start(ramp_start)) return controller_interface::CallbackReturn::ERROR;
+
     // set ref to hold, fetch references only overwrittes them with valid data
     data_.ref.q_ref = data_.state.q;
     data_.ref.dq_ref.setZero();
     data_.ref.ddq_ref.setZero();
-    // start at torque zero because moteus pid is still active -> smooth blend in so i can unwind 
-    data_.ref.tau_start.setZero();
-    data_.ref.tau_cmd.setZero();
+    if (ramp_start == "measured") {
+        // coming from an effort mode: the drive integrators are held at 0 there (ilimit_scale 0), the
+        // measured torque is all that holds the arm -> continue from it
+        if (!data_.state.tau.allFinite()) {
+            RCLCPP_ERROR(get_node()->get_logger(), "ramp_start measured, but the measured torque is not finite");
+            return controller_interface::CallbackReturn::ERROR;
+        }
+        data_.ref.tau_start = data_.state.tau;
+    }
+    else {
+        // start at torque zero because moteus pid is still active -> smooth blend in so i can unwind
+        data_.ref.tau_start.setZero();
+    }
+    // the rate limit starts at the start torque, not at 0
+    data_.ref.tau_cmd = data_.ref.tau_start;
     // drop references of a previous activation, NaN holds q_ref until an upstream controller writes
     std::fill(reference_interfaces_.begin(), reference_interfaces_.end(),
               std::numeric_limits<double>::quiet_NaN());
@@ -247,6 +264,15 @@ void FeedforwardController::declare_parameters()
 
     node->declare_parameter<double>("torque_scale", 1.0);
     node->declare_parameter<double>("torque_rise_time", 0.0);
+    node->declare_parameter<std::string>("ramp_start", "zero");
+}
+
+bool FeedforwardController::valid_ramp_start(const std::string& ramp_start)
+{
+    if (ramp_start == "zero" || ramp_start == "measured") return true;
+    RCLCPP_ERROR(get_node()->get_logger(), "Parameter ramp_start must be \"zero\" or \"measured\", got \"%s\"",
+                 ramp_start.c_str());
+    return false;
 }
 
 controller_interface::CallbackReturn FeedforwardController::read_parameters()
@@ -267,6 +293,10 @@ controller_interface::CallbackReturn FeedforwardController::read_parameters()
         return controller_interface::CallbackReturn::ERROR;
     }
 
+    if (!valid_ramp_start(node->get_parameter("ramp_start").as_string())) {
+        return controller_interface::CallbackReturn::ERROR;
+    }
+
     return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -274,15 +304,17 @@ bool FeedforwardController::fetch_robotarm_state_strict()
 {
     for (size_t i = 0; i < rbd_.get_dof(); ++i)
     {
-        auto pos_opt = state_interfaces_[i].get_optional();
+        auto pos_opt = state_interfaces_[i * num_states_per_joint_ + 0].get_optional();
+        auto eff_opt = state_interfaces_[i * num_states_per_joint_ + 1].get_optional();
 
-        if (!pos_opt.has_value())
+        if (!pos_opt.has_value() || !eff_opt.has_value())
         {
             RCLCPP_ERROR(get_node()->get_logger(), "Hardware-State for joint %s could not be read",
                          rbd_joint_names_[i].c_str());
             return false;
         }
         data_.state.q[i] = pos_opt.value();
+        data_.state.tau[i] = eff_opt.value();
     }
     return true;
 }

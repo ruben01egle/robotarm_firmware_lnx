@@ -166,6 +166,35 @@ def test_limp_deactivates_everything_then_the_hardware():
     assert plan.deactivate_hardware and not plan.activate_hardware
 
 
+EFFORT_MODES = [M.GRAVITY_COMP, M.IMPEDANCE, M.IMPEDANCE_JOINT_STREAM, M.IMPEDANCE_JOG]
+POSITION_MODES = [M.ARMED, M.JOINT_STREAM, M.CARTESIAN_JOG, M.TRAJECTORY]
+
+
+@pytest.mark.parametrize('a', EFFORT_MODES)
+@pytest.mark.parametrize('b', POSITION_MODES)
+def test_ff_continues_the_measured_torque_out_of_an_effort_mode(a, b):
+    assert plan_switch(*active_of(a), b).ff_ramp_start == 'measured'
+
+
+@pytest.mark.parametrize('a', [M.LIMP, M.STOPPED])
+@pytest.mark.parametrize('b', POSITION_MODES)
+def test_ff_ramps_from_zero_while_the_drive_pid_holds(a, b):
+    assert plan_switch(*active_of(a), b).ff_ramp_start == 'zero'
+
+
+def test_ff_ramps_from_zero_out_of_a_fault():
+    # leftovers of an effort chain, but no effort controller writes anymore: the drives hold on PID
+    plan = plan_switch('active', {'joint_stream_controller_impedance'}, M.ARMED)
+    assert plan.ff_ramp_start == 'zero'
+
+
+def test_ff_ramp_start_only_set_when_ff_is_activated():
+    for a in MODES:
+        for b in MODES:
+            plan = plan_switch(*active_of(a), b)
+            assert (plan.ff_ramp_start is not None) == ('ff_controller' in plan.activate)
+
+
 def test_broadcaster_is_never_touched():
     for a in MODES:
         for b in MODES:

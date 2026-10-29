@@ -21,6 +21,10 @@ from controller_manager_msgs.srv import ListHardwareComponents
 from controller_manager_msgs.srv import SetHardwareComponentState
 from controller_manager_msgs.srv import SwitchController
 from lifecycle_msgs.msg import State
+from rcl_interfaces.msg import Parameter
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.msg import ParameterValue
+from rcl_interfaces.srv import SetParameters
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException
@@ -31,6 +35,7 @@ from rclpy.qos import QoSProfile
 from rclpy.task import Future
 from robotarm_bringup.modes import available_modes
 from robotarm_bringup.modes import detect_mode
+from robotarm_bringup.modes import FF
 from robotarm_bringup.modes import missing_controllers
 from robotarm_bringup.modes import mode_name
 from robotarm_bringup.modes import MODES
@@ -67,6 +72,9 @@ class ModeManager(Node):
             callback_group=self._cb)
         self._switch = self.create_client(
             SwitchController, f'{cm}/switch_controller', callback_group=self._cb)
+        # controller nodes live in the controller manager's namespace
+        self._ff_parameters = self.create_client(
+            SetParameters, f'{cm.rsplit("/", 1)[0]}/{FF}/set_parameters', callback_group=self._cb)
 
         # one switch at a time (request or fault cleanup), a request while another one runs is
         # rejected rather than queued. EMERGENCY_OFF doesn't take it. The poll only reads and never
@@ -162,6 +170,8 @@ class ModeManager(Node):
             f'{mode_name(detect_mode(hardware_state, active))} -> {mode_name(target)}: '
             f'deactivate {plan.deactivate}, activate {plan.activate}')
 
+        if plan.ff_ramp_start is not None:
+            await self._set_ff_ramp_start(plan.ff_ramp_start)
         if plan.activate_hardware:
             await self._set_hardware_state(State.PRIMARY_STATE_ACTIVE, 'active')
             self._check_emergency()
@@ -292,6 +302,14 @@ class ModeManager(Node):
         res = await self._call(self._set_hardware, req)
         if not res.ok:
             raise ModeError(f'hardware component {self._hardware} did not become {label}')
+
+    async def _set_ff_ramp_start(self, ramp_start):
+        req = SetParameters.Request()
+        req.parameters = [Parameter(name='ramp_start', value=ParameterValue(
+            type=ParameterType.PARAMETER_STRING, string_value=ramp_start))]
+        res = await self._call(self._ff_parameters, req)
+        if not res.results or not res.results[0].successful:
+            raise ModeError(f'{FF} ramp_start {ramp_start} not set')
 
     async def _call(self, client, request):
         if not client.service_is_ready():

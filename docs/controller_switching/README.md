@@ -312,9 +312,16 @@ sending intermediate values from the GUI does not guarantee a smooth change.
   torque is ramped in over 1 s from the measured effort, so the arm is not yet fully held right after
   activation.
 - **Activation of `ff_controller`** (`ARMED` or a position controlled mode from `LIMP`, an effort
-  mode or `STOPPED`): the moteus position loops hold the arm from the first cycle. The feedforward
-  torque is ramped in from 0 over 1 s on top. Between position controlled modes it stays active
-  and nothing is ramped.
+  mode or `STOPPED`): the moteus position loops hold the arm from the first cycle, the feedforward
+  is ramped in over 1 s on top. `mode_manager` sets its `ramp_start` parameter before every
+  activation:
+  - out of an effort mode `measured`: the ramp starts at the measured joint torque. In an effort
+    mode the drives run with `ilimit_scale` 0, so their integrators are empty and the measured
+    torque is all that holds the arm, the feedforward continues it without a dip.
+  - from `LIMP`, `STOPPED` and a fault `zero`: the drive PID (with its integrator) holds the arm,
+    starting at the measured torque would double it. From `LIMP` it is about 0 anyway.
+
+  Between position controlled modes `ff_controller` stays active and nothing is ramped.
 - **Activation of an upstream**: it starts from the measured joint position, so it does not jump.
   A new joint stream target or twist is only executed after activation.
 - **Error stop**: a controller whose update fails is deactivated by the controller manager. When

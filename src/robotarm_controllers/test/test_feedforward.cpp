@@ -114,7 +114,7 @@ protected:
         ASSERT_EQ(controller_->get_node()->activate().id(), State::PRIMARY_STATE_ACTIVE);
     }
 
-    // fresh hardware interfaces, commands 0, measured position q
+    // fresh hardware interfaces, commands 0, measured position q and torque 0
     void assign(const Eigen::VectorXd & q)
     {
         cmd_.clear();
@@ -122,7 +122,7 @@ protected:
         const auto cmd_names = controller_->command_interface_configuration().names;
         const auto state_names = controller_->state_interface_configuration().names;
         ASSERT_EQ(cmd_names.size(), 3 * dof_);
-        ASSERT_EQ(state_names.size(), dof_);
+        ASSERT_EQ(state_names.size(), 2 * dof_);
 
         std::vector<hardware_interface::LoanedCommandInterface> loaned_cmd;
         std::vector<hardware_interface::LoanedStateInterface> loaned_state;
@@ -143,8 +143,34 @@ protected:
     void set_state(const Eigen::VectorXd & q)
     {
         for (size_t j = 0; j < dof_; ++j) {
-            (void)state_[j]->set_value(q[j]);
+            (void)state_[2 * j]->set_value(q[j]);
         }
+    }
+
+    void set_effort(const Eigen::VectorXd & tau_measured)
+    {
+        for (size_t j = 0; j < dof_; ++j) {
+            (void)state_[2 * j + 1]->set_value(tau_measured[j]);
+        }
+    }
+
+    // deactivate and activate again at q with measured torque tau_measured, ramp_start set before
+    void reactivate(const Eigen::VectorXd & q, const Eigen::VectorXd & tau_measured,
+                    const std::string & ramp_start)
+    {
+        ASSERT_EQ(controller_->get_node()->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+        controller_->release_interfaces();
+        assign(q);
+        set_effort(tau_measured);
+        ASSERT_TRUE(controller_->get_node()->set_parameter(
+            rclcpp::Parameter("ramp_start", ramp_start)).successful);
+        ASSERT_EQ(controller_->get_node()->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    }
+
+    // the measured torque of a gravity compensating effort mode, off the model so it can't be mistaken
+    Eigen::VectorXd effort_mode_torque(const Eigen::VectorXd & q)
+    {
+        return gravity(q) + Eigen::VectorXd::Constant(dof_, 0.2);
     }
 
     // writes the references like an upstream controller, an empty vector leaves NaN
@@ -276,6 +302,7 @@ TEST_F(FeedforwardTest, ConfigureRejectsInvalidParameters)
         {"non-finite torque scale", rclcpp::Parameter("torque_scale", nan)},
         {"negative rise time", rclcpp::Parameter("torque_rise_time", -0.1)},
         {"non-finite rise time", rclcpp::Parameter("torque_rise_time", nan)},
+        {"unknown ramp start", rclcpp::Parameter("ramp_start", "last")},
     };
     for (const auto & [what, param] : cases) {
         EXPECT_EQ(configure({param}), State::PRIMARY_STATE_UNCONFIGURED) << what;
@@ -292,7 +319,8 @@ TEST_F(FeedforwardTest, InterfaceLayout)
         EXPECT_EQ(cmd_names[3 * j + 0], names_[j] + "/position");
         EXPECT_EQ(cmd_names[3 * j + 1], names_[j] + "/velocity");
         EXPECT_EQ(cmd_names[3 * j + 2], names_[j] + "/torque_ff");
-        EXPECT_EQ(state_names[j], names_[j] + "/position");
+        EXPECT_EQ(state_names[2 * j + 0], names_[j] + "/position");
+        EXPECT_EQ(state_names[2 * j + 1], names_[j] + "/effort");
 
         const std::string prefix = std::string(controller_name) + "/" + names_[j];
         EXPECT_EQ(refs_[3 * j + 0]->get_name(), prefix + "/position");
@@ -470,6 +498,58 @@ TEST_F(FeedforwardTest, ReactivationDropsStaleReferencesAndRestartsRamp)
     EXPECT_VEC_NEAR(tau(), zero(), exact) << "ramp did not restart";
     settle();
     EXPECT_VEC_NEAR(tau(), gravity(q_new), exact);
+}
+
+TEST_F(FeedforwardTest, StartRampBlendsFromMeasuredTorque)
+{
+    // out of an effort mode: continues from the measured torque, no step in the first cycle even with
+    // a rate limit, linear to the feedforward over 1 s
+    const Eigen::VectorXd q = regular_pose();
+    start(q, {rclcpp::Parameter("torque_rise_time", 0.03)});
+    settle();
+    const Eigen::VectorXd tau_measured = effort_mode_torque(q);
+    reactivate(q, tau_measured, "measured");
+
+    ASSERT_TRUE(step(1).ok);
+    EXPECT_VEC_NEAR(tau(), tau_measured, exact);
+    ASSERT_TRUE(step(500).ok);
+    EXPECT_VEC_NEAR(tau(), Eigen::VectorXd(0.5 * (tau_measured + gravity(q))), exact);
+    settle();
+    EXPECT_VEC_NEAR(tau(), gravity(q), exact);
+}
+
+TEST_F(FeedforwardTest, StartRampZeroIgnoresMeasuredTorque)
+{
+    // the drive PID holds the measured torque (STOPPED), taking it over would double it
+    const Eigen::VectorXd q = regular_pose();
+    start(q);
+    settle();
+    reactivate(q, effort_mode_torque(q), "zero");
+    ASSERT_TRUE(step(1).ok);
+    EXPECT_VEC_NEAR(tau(), zero(), exact);
+}
+
+TEST_F(FeedforwardTest, ActivationRefusesInvalidRampStart)
+{
+    const Eigen::VectorXd q = regular_pose();
+    start(q);
+    ASSERT_EQ(controller_->get_node()->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_TRUE(controller_->get_node()->set_parameter(rclcpp::Parameter("ramp_start", "last")).successful);
+    EXPECT_NE(controller_->get_node()->activate().id(), State::PRIMARY_STATE_ACTIVE);
+}
+
+TEST_F(FeedforwardTest, ActivationRefusesNonFiniteMeasuredTorque)
+{
+    const Eigen::VectorXd q = regular_pose();
+    start(q);
+    ASSERT_EQ(controller_->get_node()->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    controller_->release_interfaces();
+    assign(q);
+    Eigen::VectorXd tau_measured = gravity(q);
+    tau_measured[1] = nan;
+    set_effort(tau_measured);
+    ASSERT_TRUE(controller_->get_node()->set_parameter(rclcpp::Parameter("ramp_start", "measured")).successful);
+    EXPECT_NE(controller_->get_node()->activate().id(), State::PRIMARY_STATE_ACTIVE);
 }
 
 TEST_F(FeedforwardTest, NonFiniteActivationStateNeverReachesHardware)

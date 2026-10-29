@@ -21,7 +21,8 @@ class FeedforwardController : public controller_interface::ChainableControllerIn
 public:
     struct Measured {
         Eigen::VectorXd q;
-        void resize(size_t n) { q.resize(n); }
+        Eigen::VectorXd tau;                 // only read on activation (ramp_start measured)
+        void resize(size_t n) { q.resize(n); tau.resize(n); }
     };
 
     struct Reference {                       // persistent, reset on activate
@@ -81,6 +82,7 @@ protected:
 private:
     void declare_parameters();
     controller_interface::CallbackReturn read_parameters();
+    bool valid_ramp_start(const std::string& ramp_start);
 
     void fetch_references();
     bool fetch_robotarm_state_strict();    // all joints or fail, for a valid start in on_activate
@@ -100,6 +102,7 @@ private:
     RobotarmData data_;
 
     static constexpr size_t num_refs_per_joint_ = 3;
+    static constexpr size_t num_states_per_joint_ = 2;
     static constexpr size_t num_cmd_interfaces_per_joint_ = 3;
 };
 
