@@ -421,6 +421,12 @@ TEST_F(CartesianImpedanceTest, ConfigureRejectsInvalidParameters)
         {"push above 1", make_params("gc", {rclcpp::Parameter("joint_limit_push", 1.5)})},
         {"torque scale 0", make_params("gc", {rclcpp::Parameter("torque_scale", 0.0)})},
         {"negative rise time", make_params("gc", {rclcpp::Parameter("torque_rise_time", -0.1)})},
+        {"joint damping cap with 5 entries",
+         make_params("impedance", {rclcpp::Parameter("max_joint_damping", std::vector<double>{5, 5, 5, 5, 5})})},
+        {"negative joint damping cap",
+         make_params("impedance", {rclcpp::Parameter("max_joint_damping", std::vector<double>{5, 5, 5, 5, 5, -1})})},
+        {"joint damping cap below joint_damping",
+         make_params("impedance", {rclcpp::Parameter("max_joint_damping", std::vector<double>{0.5, 5, 5, 5, 5, 5})})},
     };
     for (const auto & [what, params] : cases) {
         EXPECT_EQ(configure(params), State::PRIMARY_STATE_UNCONFIGURED) << what;
@@ -470,9 +476,12 @@ TEST_F(CartesianImpedanceTest, GcUpdateDoesNotAllocate)
 TEST_F(CartesianImpedanceTest, ImpedanceUpdateDoesNotAllocate)
 {
     // from the first cycle on: no references, then a streamed trajectory the arm lags behind, then
-    // a joint inside its limit zone and a rate limited torque step (logs a throttled warning)
+    // a joint inside its limit zone and a rate limited torque step (logs a throttled warning).
+    // Every joint damping cap just above joint_damping, so the cap acts on all joints
     const Eigen::VectorXd q0 = regular_pose();
-    start(q0, make_params("impedance", {rclcpp::Parameter("torque_rise_time", 0.05)}));
+    start(q0, make_params("impedance", {
+        rclcpp::Parameter("torque_rise_time", 0.05),
+        rclcpp::Parameter("max_joint_damping", std::vector<double>{1.1, 2.1, 1.1, 0.11, 0.11, 0.11})}));
 
     StepResult r = step(300);
     EXPECT_TRUE(r.ok);
@@ -879,6 +888,67 @@ TEST_F(CartesianImpedanceTest, DampingStaysBoundedThroughWristSingularity)
             << "joint damping jumps between axis5 = " << -half_range + 2.0 * half_range * (k - 1) / (samples - 1)
             << " and the next sample";
     }
+}
+
+TEST_F(CartesianImpedanceTest, JointDampingCapLimitsOnlyTheCappedJoint)
+{
+    // the cap turns the projected damper Jᵀ·D·J into S·Jᵀ·D·J·S with s_i = √(allowed_i / d_ii): the capped
+    // joint ends up exactly at its cap, its couplings shrink by s, a joint below its cap keeps its own
+    // damping, and the matrix stays symmetric positive semidefinite. Expected from the independent
+    // modal_damping, so equal up to the rounding of the decompositions
+    const Eigen::VectorXd q = regular_pose();
+    const auto J = jacobian(q);
+    const Eigen::MatrixXd D_cart = J.transpose() * modal_damping(q) * J;
+    const Eigen::Map<const Eigen::VectorXd> d_j(joint_damping.data(), dof_);
+
+    // axis5 at its joint_damping plus a third of its cartesian part, all others far above
+    constexpr size_t c = 4;
+    ASSERT_GT(D_cart(c, c), 0.01) << "axis5 is barely damped in this pose, the cap would not act";
+    std::vector<double> cap(dof_, 1e3);
+    cap[c] = joint_damping[c] + D_cart(c, c) / 3.0;
+    start(q, make_params("impedance", {rclcpp::Parameter("max_joint_damping", cap)}));
+    settle();
+
+    const Eigen::MatrixXd C = measured_joint_damping(q);
+    EXPECT_NEAR(C(c, c), cap[c], 1e-6) << "capped joint is not at its cap";
+    for (size_t i = 0; i < dof_; ++i) {
+        if (i == c) continue;
+        EXPECT_NEAR(C(i, i), D_cart(i, i) + d_j[i], 1e-6) << "uncapped joint " << i << " lost damping";
+    }
+
+    Eigen::VectorXd s = Eigen::VectorXd::Ones(dof_);
+    s[c] = std::sqrt(1.0 / 3.0);
+    Eigen::MatrixXd expected = s.asDiagonal() * D_cart * s.asDiagonal();
+    expected.diagonal() += d_j;
+    EXPECT_LT((C - expected).cwiseAbs().maxCoeff(), 1e-6) << "measured\n" << C << "\nexpected\n" << expected;
+
+    const Eigen::MatrixXd C_sym = 0.5 * (C + C.transpose());
+    EXPECT_LT((C - C_sym).cwiseAbs().maxCoeff(), 1e-6) << "capped damping is not symmetric";
+    EXPECT_GE(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(C_sym).eigenvalues().minCoeff(), -1e-9)
+        << "capped damping can add energy";
+}
+
+TEST_F(CartesianImpedanceTest, CappedDampingDissipatesAndActsOnVelocityErrorOnly)
+{
+    // all joints capped hard: following the reference exactly still gives no damping torque (dq and dq_ref
+    // are scaled alike), and moving against a reference at rest still takes energy out
+    const Eigen::VectorXd q = regular_pose();
+    start(q, make_params("impedance", {
+        rclcpp::Parameter("max_joint_damping", std::vector<double>{1.01, 2.01, 1.01, 0.101, 0.101, 0.101})}));
+    settle();
+
+    Eigen::VectorXd dq(6);
+    dq << 0.3, -0.2, 0.4, -0.5, 0.3, 0.6;
+    set_reference(q, dq);
+    set_state(q, dq);
+    ASSERT_TRUE(step(1).ok);
+    EXPECT_VEC_NEAR(tau(), gravity(q) + dynamics(q, dq, Eigen::VectorXd::Zero(dof_)), exact);
+
+    set_reference(q);
+    set_state(q, dq);
+    ASSERT_TRUE(step(1).ok);
+    const Eigen::VectorXd damping_torque = tau() - gravity(q) - dynamics(q, dq, Eigen::VectorXd::Zero(dof_));
+    EXPECT_LT(damping_torque.dot(dq), 0.0) << "capped damping adds energy";
 }
 
 TEST_F(CartesianImpedanceTest, DampingActsOnVelocityError)

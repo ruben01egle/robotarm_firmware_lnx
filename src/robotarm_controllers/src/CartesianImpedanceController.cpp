@@ -168,6 +168,23 @@ controller_interface::CallbackReturn CartesianImpedanceController::on_configure(
         }
     }
 
+    // optional, but if given: one cap per joint, and joint_damping alone must fit below it
+    if (max_joint_damping_.size() > 0) {
+        if (static_cast<size_t>(max_joint_damping_.size()) != rbd_.get_dof()) {
+            RCLCPP_ERROR(get_node()->get_logger(), "Parameter max_joint_damping needs one entry per joint (%zu), got %ld",
+                         rbd_.get_dof(), max_joint_damping_.size());
+            return controller_interface::CallbackReturn::ERROR;
+        }
+        for (size_t i = 0; i < rbd_.get_dof(); ++i) {
+            if (max_joint_damping_[i] < joint_damping_[i]) {
+                RCLCPP_ERROR(get_node()->get_logger(),
+                             "Parameter max_joint_damping[%zu] = %f is below joint_damping[%zu] = %f of joint %s",
+                             i, max_joint_damping_[i], i, joint_damping_[i], rbd_joint_names_[i].c_str());
+                return controller_interface::CallbackReturn::ERROR;
+            }
+        }
+    }
+
     // the upper and lower zone of a joint must not overlap
     for (size_t i = 0; i < rbd_.get_dof(); ++i) {
         const auto & lim = joint_limits_[i];
@@ -405,9 +422,6 @@ bool CartesianImpedanceController::compute_impedance_torque()
     Eigen::AngleAxisd aa_err(R_err);
     e.tail<3>() = aa_err.angle() * aa_err.axis();
 
-    Eigen::Matrix<double, 6, 1> de;
-    de.noalias() = data_.tmp.j * data_.state.dq - data_.tmp.j_ref * data_.ref.dq_ref;
-
     // compute damping
     // Λ = L·Lᵀ
     Eigen::Matrix<double, 6, 6> Lambda;
@@ -452,6 +466,26 @@ bool CartesianImpedanceController::compute_impedance_torque()
     const Eigen::Matrix<double, 6, 6> LV = L * V;
     const Eigen::Matrix<double, 6, 6> D = LV * d_w.asDiagonal() * LV.transpose();
 
+    // cap the damping each joint feels: diag(Jᵀ·D·J) + joint_damping <= max_joint_damping (see the README,
+    // "Background I"). The damper becomes S·Jᵀ·D·J·S with s_i = √(allowed_i / d_ii): a capped joint sits
+    // exactly at its cap, the matrix stays symmetric positive semidefinite (still dissipative), uncapped joints
+    // keep their damping and only lose their coupling to capped ones. dq and dq_ref are scaled alike, so following
+    // the reference exactly still gives no damping torque
+    auto & s = data_.tmp.damping_scale;
+    s.setOnes();
+    if (max_joint_damping_.size() > 0) {
+        data_.tmp.d_j.noalias() = D * data_.tmp.j;
+        for (Eigen::Index i = 0; i < s.size(); ++i) {
+            const double d_ii = data_.tmp.j.col(i).dot(data_.tmp.d_j.col(i));   // (Jᵀ·D·J)_ii
+            const double allowed = max_joint_damping_[i] - joint_damping_[i];   // >= 0, checked in on_configure
+            if (d_ii > allowed) s[i] = std::sqrt(allowed / d_ii);
+        }
+    }
+    data_.tmp.dq_scaled = s.cwiseProduct(data_.state.dq);
+    data_.tmp.dq_ref_scaled = s.cwiseProduct(data_.ref.dq_ref);
+    Eigen::Matrix<double, 6, 1> de;
+    de.noalias() = data_.tmp.j * data_.tmp.dq_scaled - data_.tmp.j_ref * data_.tmp.dq_ref_scaled;
+
     // compute impedance
     Eigen::Matrix<double, 6, 1> F_spring = - K * e;
     F_spring.head<3>() = clamp_norm(F_spring.head<3>(), impedance_.max_spring_force);
@@ -472,7 +506,10 @@ bool CartesianImpedanceController::compute_impedance_torque()
         RCLCPP_ERROR(get_node()->get_logger(), "rbd runtime error: %s \n", rbd_.last_error());
         return false;
     }
-    data_.tmp.tau_impedance.noalias() = data_.tmp.j.transpose() * (F_spring + F_damper);
+    // the spring is not scaled, only the damper torque gets s a second time
+    data_.tmp.tau_damper.noalias() = data_.tmp.j.transpose() * F_damper;
+    data_.tmp.tau_impedance.noalias() = data_.tmp.j.transpose() * F_spring;
+    data_.tmp.tau_impedance += s.cwiseProduct(data_.tmp.tau_damper);
     data_.tmp.tau_joint_damped.noalias() = - joint_damping_.cwiseProduct(data_.state.dq - data_.ref.dq_ref);
     data_.tmp.tau_mode.noalias() = data_.tmp.tau_dyn_ff + data_.tmp.tau_impedance + data_.tmp.tau_joint_damped;
     return true;
@@ -504,6 +541,7 @@ void CartesianImpedanceController::declare_parameters()
     node->declare_parameter<double>("max_linear_stiffness", 0.0);       // in N/m, per axis
     node->declare_parameter<double>("max_angular_stiffness", 0.0);      // in Nm/rad, per axis
     node->declare_parameter<double>("cartesian_damping_ratio", 0.0);
+    node->declare_parameter<std::vector<double>>("max_joint_damping", std::vector<double>());   // per joint, empty = no cap
     node->declare_parameter<double>("max_spring_force", 0.0);
     node->declare_parameter<double>("max_spring_moment", 0.0);
 }
@@ -553,6 +591,7 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
 
     if (!read_non_negative_array(node, "joint_damping", joint_damping_) ||
         !read_non_negative_array(node, "joint_limit_zone", joint_limit_zone_) ||
+        !read_non_negative_array(node, "max_joint_damping", max_joint_damping_) ||
         !read_non_negative_array(node, "hold_stiffness", gc_.hold_stiffness) ||
         !read_non_negative_array(node, "hold_breakaway_torque", gc_.hold_breakaway_torque)) {
         return controller_interface::CallbackReturn::ERROR;
@@ -600,6 +639,10 @@ controller_interface::CallbackReturn CartesianImpedanceController::read_paramete
             RCLCPP_WARN(node->get_logger(), "Cartesian impedance parameters are ignored in gc mode");
         }
         impedance_ = ImpedanceParams{};
+        if (max_joint_damping_.size() > 0) {
+            RCLCPP_WARN(node->get_logger(), "max_joint_damping is ignored in gc mode");
+            max_joint_damping_.resize(0);
+        }
         break;
 
     case Mode::IMPEDANCE: {

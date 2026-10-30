@@ -28,6 +28,12 @@ constexpr uint32_t pipelined_read_timeout_us = 200;
 
 constexpr bool kTransportDebug = MOTEUS_TRANSPORT_DEBUG;
 
+// fault register values >= 96 are no faults: the controller keeps running and only reports
+// which limit is currently active (e.g. 99 = servo.max_current_A). Clears itself once the
+// limit is no longer hit. Mirrors moteus::errc::kLimitMaxVelocity in moteus fw/error.h,
+// which is firmware-only and not part of the client library
+constexpr int8_t kFirstLimitCode = 96;
+
 
 // Parse static parameters from the URDF here.
 // Dynamic/ROS parameters from the YAML configuration require 'get_node()' 
@@ -479,10 +485,16 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
     for (size_t i = 0; i < actuators_.size(); ++i) 
     {
         const auto& result = actuator_results_[i];
-        if (result.fault != 0)
+        if (result.fault >= kFirstLimitCode)
+        {
+            RCLCPP_WARN_THROTTLE(rclcpp::get_logger("MoteusInterface"), *get_clock(), 1000,
+                            "Limit active on Actuator %s (CAN-ID: %d)! Limit Code: %d",
+                            actuators_[i].name_.c_str(), actuators_[i].can_id_, result.fault);
+        }
+        else if (result.fault != 0)
         {
             RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"),
-                            "HARDWARE FAULT on Actuator %s (CAN-ID: %d)! Error Code: %d", 
+                            "HARDWARE FAULT on Actuator %s (CAN-ID: %d)! Error Code: %d",
                             actuators_[i].name_.c_str(), actuators_[i].can_id_, result.fault);
             return hardware_interface::return_type::ERROR;
         }

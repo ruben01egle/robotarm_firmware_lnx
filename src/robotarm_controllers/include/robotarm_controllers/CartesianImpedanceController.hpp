@@ -53,9 +53,14 @@ public:
         Eigen::VectorXd tau_breakaway;
         Eigen::VectorXd tau_dyn_ff;
         Eigen::VectorXd tau_impedance;
+        Eigen::VectorXd tau_damper;
+        Eigen::VectorXd damping_scale;      // per joint factor s of the cartesian damper, 1 = not capped
+        Eigen::VectorXd dq_scaled;          // s·dq
+        Eigen::VectorXd dq_ref_scaled;      // s·dq_ref
         Eigen::VectorXd zero;
         Eigen::Matrix<double, 6, Eigen::Dynamic> j;
         Eigen::Matrix<double, 6, Eigen::Dynamic> j_ref;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> d_j;   // D·J
         void resize(size_t n) {
             tau_new.resize(n);
             tau_limiter.resize(n);
@@ -65,9 +70,14 @@ public:
             tau_breakaway.resize(n);
             tau_dyn_ff.resize(n);
             tau_impedance.resize(n);
+            tau_damper.resize(n);
+            damping_scale.setOnes(n);
+            dq_scaled.resize(n);
+            dq_ref_scaled.resize(n);
             zero.setZero(n);
             j.resize(6, n);
-            j_ref.resize(6, n);}
+            j_ref.resize(6, n);
+            d_j.resize(6, n);}
     };
 
     struct RobotarmData {
@@ -164,6 +174,9 @@ private:
     double torque_scale_ = 1.0;
     double torque_rise_time_ = 0;
     Eigen::VectorXd joint_damping_;   // Nm·s/rad, per joint in rbd joint order, both modes
+    // Nm·s/rad, per joint, impedance mode only: upper bound of the total damping a joint feels (cartesian damper
+    // projected onto the joint + joint_damping). Empty = no cap
+    Eigen::VectorXd max_joint_damping_;
     // joint limit protection, both modes
     Eigen::VectorXd joint_limit_zone_;   // rad, per joint, width of the zone in front of each limit, 0 disables a joint
     double joint_limit_push_ = 0.0;      // fraction of the scaled effort limit pushing outwards at the limit, all joints

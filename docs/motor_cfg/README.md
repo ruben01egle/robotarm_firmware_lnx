@@ -17,9 +17,12 @@ defaults or values written by the calibration; this document only covers the val
 that were set up specifically for this robot. The files are named per actuator (CAN ID),
 not per joint, because controllers 5 and 6 each drive both wrist joints.
 
-**Status:** all values below match the dumps of 2026-10-27 and were verified on the
-assembled arm (limits, directions, encoder signs, PID tuning, switching from the
-torque controllers back to position control).
+**Status:** all values below match the dumps of 2026-10-30. Limits, directions, encoder
+signs and switching from the torque controllers back to position control were verified
+on the assembled arm on 2026-10-27. On 2026-10-30 all axes were retuned (current loop and
+encoder filter 200 Hz, new PID gains, torque and timeout limits), axis 2 was
+recalibrated and got a cogging compensation table, after the low-speed oscillation
+investigation in [docs/tuning](../tuning/).
 
 - [TODO](#todo)
 - [Units](#units)
@@ -29,43 +32,16 @@ torque controllers back to position control).
 
 ## TODO
 
-- [ ] **Set `servo.timeout_max_torque_Nm` per axis.** It is 5 Nm on all six controllers, never
-  chosen for this arm. This is the braking torque when the drive watchdog fires
-  (host or transport dead for `default_timeout_s` = 0.1 s): `timeout_mode` 12 commands
-  zero velocity without a position target, so only the damping term acts (≈ `kd · v`),
-  clamped to this value at the output. The arm brakes and stays where it stops, it does
-  not return. Per axis the value has to be:
-  - **above the worst-case gravity torque** of the joint (full payload, worst pose).
-    There is no position stiffness in this mode: below the gravity torque the joint
-    falls, above it the joint still sags slowly at ≈ `τ_gravity / kd`.
-  - **below what the gearbox/belts and the structure can take** when braking from full
-    speed.
-  - **reachable with `servo.max_current_A`** (axis 5/6: ≈ 7.9 Nm at 25 A).
+No open items.
 
-  Axis 5/6 are in actuator space: each actuator carries `(τ5 ± τ6) / 2`, see
-  [Axis 5/6](#axis-56-wrist-mn5008-kv170). Then update the shared table and the
-  per-axis tables, and dump the configs again.
-- [ ] **Lower `servo.max_current_A` to the torque the arm actually needs.** It is the
-  hard torque limit in every mode, including the PID hold in STOPPED, so it bounds the
-  braking torque when all controllers are deactivated. Right now it allows up to 5 × the
-  URDF effort (axis 2: 175 Nm at 100 A). Output torque constant
-  `Kt_out = (8.27 / Kv) / rotor_to_output_ratio` (linear, `motor.rotation_current_cutoff_A`
-  is 10000), values from the dumps of 2026-10-27:
+Done on 2026-10-30:
 
-  | Actuator | `motor.Kv` | Kt_out [Nm/A] | Torque at current limit | URDF effort | I at 1.0 × effort | **I at 1.2 × effort** |
-  |---|---|---|---|---|---|---|
-  | 1 | 143.97 | 0.345 | 34.5 Nm (100 A) | 8 Nm | 23.2 A | **27.9 A** |
-  | 2 | 141.83 | 1.749 | 174.9 Nm (100 A) | 35 Nm | 20.0 A | **24.0 A** |
-  | 3 | 143.53 | 0.660 | 66.0 Nm (100 A) | 15 Nm | 22.7 A | **27.3 A** |
-  | 4 | 131.03 | 0.252 | 25.2 Nm (100 A) | 5 Nm | 19.8 A | **23.8 A** |
-  | 5 | 156.39 | 0.317 | 7.9 Nm (25 A) | 4 Nm | 12.6 A | **15.1 A** |
-  | 6 | 155.54 | 0.319 | 8.0 Nm (25 A) | 4 Nm | 12.5 A | **15.0 A** |
-
-  The 1.2 × margin keeps controllers (feedforward, model error) out of saturation in
-  normal motion. The limit is also the most any controller can ever get, so the URDF
-  efforts have to be the design maximum. Actuator 5/6 effort is per actuator: 4 Nm on
-  both wrist joints at once is 4 Nm on one actuator. Recompute after a recalibration
-  (`motor.Kv` changes) and keep `servo.timeout_max_torque_Nm` below the resulting torque.
+- [x] `servo.timeout_max_torque_Nm` set per axis, every value above the worst-case
+  gravity torque and reachable with `servo.max_current_A`.
+- [x] `servo.max_current_A` lowered from 100 A to 1.2 × the URDF effort (actuator 5/6:
+  20 A, see [Torque and timeout limits](#torque-and-timeout-limits)).
+- [x] Hard stop of axis 2 from full speed with the lower current limits, which also
+  clamp the flux braking current (see [Voltage and flux braking](#voltage-and-flux-braking)).
 
 ## Units
 
@@ -118,11 +94,26 @@ after `conf write`.
    moteus calibration guide, the rotor turns in both directions at speed and must not
    see any load):
    ```
-   python3 -m moteus.moteus_tool --target <id> --calibrate --cal-bw-hz 400
+   python3 -m moteus.moteus_tool --target <id> --calibrate --cal-bw-hz 200
    ```
-   This writes all `motor.*` values, the onboard encoder compensation table and the
-   current loop gains (`servo.pid_dq_*`). Recalibrate after a motor/controller swap or
-   when the controller is remounted on the motor.
+   This writes all `motor.*` values (resistance, inductance, `Kv`, commutation offset
+   table), `servo.pid_dq_hz` and the motor encoder filter
+   `motor_position.sources.0.pll_filter_hz` (both = `--cal-bw-hz`, see
+   [Current loop and PWM](#current-loop-and-pwm)). Recalibrate after a motor/controller
+   swap or when the controller is remounted on the motor. Afterwards recompute
+   `servo.max_current_A` (`Kv` changes, see
+   [Torque and timeout limits](#torque-and-timeout-limits)).
+
+   **Cogging compensation (axis 2 only so far):** with the first belt stage fitted and
+   tensioned, but the second stage off (motor turns freely, but sees the real belt
+   tension), measure and store the table:
+   ```
+   python3 utils/compensate_cogging.py --target 2 --split-count 16 -o cogging.json
+   python3 utils/compensate_cogging.py --target 2 -i cogging.json --store
+   ```
+   (`utils/` of the moteus source, vendored under
+   `build/moteus_interface/_deps/moteus-src/`). This writes `motor.cogging_dq_scale` and
+   the 1024 `motor.cogging_dq_comp.*` values. The table is used in position mode only.
 
 4. **Configure the output encoder (aux2, I2C)** – see [Encoders](#encoders):
    ```
@@ -186,13 +177,13 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `servo.max_voltage` | 35 V | Bus voltage above which the controller faults and drops all torque |
 | `servo.flux_brake_margin_voltage` | 8 V | Flux braking starts at `max_voltage − margin` = **27 V** |
 | `servo.flux_brake_resistance_ohm` | 0.06 Ω | Braking gain: d-axis current = overvoltage / 0.06 Ω (16.7 A/V) |
-| `servo.max_current_A` | 100 A (axis 1–4 only) | Phase current limit (board default), hard backstop for torque (too high, see [TODO](#todo)) |
+| `servo.max_current_A` | per axis, see below | Phase current limit = hard torque limit in every mode, see [Torque and timeout limits](#torque-and-timeout-limits) |
 | `servo.fault_temperature` | 75 °C | Board temperature fault (default) |
 | `servo.pwm_rate_hz` | 20000 | PWM / current loop rate (default 30000) |
 | `servo.max_current_desired_rate` | 50000 A/s | Max slew of the desired current (default 10000) |
 | `servo.max_velocity_derate` | 0.5 rev/s | Motoring current falls to 0 at `max_velocity + derate` |
 | `servo.default_timeout_s` / `timeout_mode` | 0.1 s / 12 | Command watchdog: hold zero velocity after 100 ms without commands (defaults) |
-| `servo.timeout_max_torque_Nm` | 5 Nm | Torque limit in the timeout state, i.e. the braking torque when the watchdog fires (not tuned yet, see [TODO](#todo)) |
+| `servo.timeout_max_torque_Nm` | per axis, see below | Torque limit in the timeout state, i.e. the braking torque when the watchdog fires |
 | `motor_position.commutation_source` | 0 | Onboard SPI encoder (source 0) commutates the motor |
 | `motor_position.output.source` | 0 | Output position/velocity = onboard encoder × gear ratio |
 | `motor_position.output.reference_source` | −1 | moteus does **not** resolve the output position from the AS5048B |
@@ -200,7 +191,8 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `aux2.pins.0/1.mode` | 13 | aux2 pins 0/1 are I2C SCL/SDA |
 | `aux2.i2c.*` | 400 kHz, mode 1, pullup 0 | Fast-mode I2C, internal pull-ups off |
 | `aux2.i2c.devices.N` | type 1, address 64, poll 1000 µs | AS5048B at 0x40, polled at 1 kHz |
-| calibration | `--cal-bw-hz 400` → `servo.pid_dq_hz` 400 | Current loop bandwidth |
+| `servo.pid_dq_hz` | 200 Hz | Current loop bandwidth (was 400 until 2026-10-30), see [Current loop and PWM](#current-loop-and-pwm) |
+| `motor_position.sources.0.pll_filter_hz` | 200 Hz | Motor encoder filter, sets the noise on position/velocity (was 400) |
 
 ### Per axis (axis 1–4, LA8308)
 
@@ -216,12 +208,18 @@ Shared by all six controllers unless a row says otherwise; for axis 5/6 differen
 | `servo.default_velocity_limit` [rev/s] | nan | nan | nan | nan |
 | `servo.max_velocity` [rev/s] | 0.6 | 0.4775 | 0.4775 | 0.4775 |
 | `servo.default_accel_limit` [rev/s²] | nan | nan | nan | nan |
-| `servo.pid_position.kp` [Nm/rev] | 2500 | 6000 | 10000 | 1000 |
-| `servo.pid_position.ki` [Nm/(rev·s)] | 1000 | 5000 | 5000 | 500 |
-| `servo.pid_position.kd` [Nm/(rev/s)] | 20 | 260 | 40 | 5 |
-| `servo.pid_position.ilimit` [Nm] | 7.2 | 36 | 14.5 | 6 |
+| `servo.pid_position.kp` [Nm/rev] | 3000 | 10000 | 8000 | 750 |
+| `servo.pid_position.ki` [Nm/(rev·s)] | 500 | 2500 | 1000 | 100 |
+| `servo.pid_position.kd` [Nm/(rev/s)] | 25 | 1000 | 100 | 5 |
+| `servo.pid_position.ilimit` [Nm] | 2 | 8 | 4 | 1 |
+| `servo.max_current_A` [A] | 28 | 23 | 27 | 24 |
+| `servo.timeout_max_torque_Nm` [Nm] | 8 | 30 | 12 | 5 |
+| `motor.Kv` (calibrated) | 143.97 | 134.80 | 143.53 | 131.03 |
+| `motor.cogging_dq_scale` | 0 (off) | 0.00258 (table stored) | 0 (off) | 0 (off) |
 
-All values in this table match the axis 1–4 dumps. The axis 1 position limits are
+All values in this table match the axis 1–4 dumps. Axis 2 was recalibrated on
+2026-10-30 (its `Kv` went from 141.8 to 134.8); axis 1, 3 and 4 still have their older
+calibration. The axis 1 position limits are
 ±175° / 360° = 0.486111 rev, stored as 0.48611. The axis 1 `max_velocity` is
 1.2 × URDF = 0.5997 rev/s, rounded to 0.6. Axis 4 uses the same motor and shared
 settings as axis 1–3. Its `ilimit` is 1.2 × the URDF effort of 5 Nm. Its calibrated
@@ -261,31 +259,32 @@ calibration temperature: measured cold, both are 0.146 Ω.
 | ⚠️ `motor_position.output.sign` | – | **−1 / 1** | Verified on the arm: both controllers +: j5 moves +, j6 stays. 5 + / 6 −: j6 moves + |
 | ⚠️ `motor_position.sources.1.sign` | 1 | **1 / −1** | Controller 6 reads the joint 5 encoder, controller 5 the joint 6 encoder (see [Encoders](#encoders)); signs verified on the arm |
 | `motor_position.output.reference_source` | −1 | −1 (**must stay**) | The AS5048B measures a joint, not this controller's output |
-| ⚠️ `servo.max_current_A` | 100 A | **25 A** | ≈ 7.9 Nm per actuator after 1:6. Peak only, see cooling below |
+| ⚠️ `servo.max_current_A` | 23–28 A | **20 A** | ≈ 6.4 Nm per actuator after 1:6 = 1.6 × the 4 Nm URDF effort. Peak only, see cooling below |
+| `servo.timeout_max_torque_Nm` | 5–30 Nm | **5 Nm** | Reachable with 20 A, well above the wrist gravity load |
 | ⚠️ `servopos.position_min` [rev] | – | **−0.802778** | −(114° + 175°) / 360° = −0.802778, see [Limits](#limits-come-from-the-urdf) |
 | ⚠️ `servopos.position_max` [rev] | – | **0.8055** | +(115° + 175°) / 360° = 0.805556, rounded 0.02° below the URDF |
 | `servo.default_velocity_limit` [rev/s] | nan | nan | required by `moteus_interface`, see [Velocity limits](#velocity-limits) |
 | ⚠️ `servo.max_velocity` [rev/s] | – | **0.955** | 1.2 · (2.5 + 2.5 rad/s) / 2π = 0.9549 |
 | `servo.max_velocity_derate` [rev/s] | 0.5 | 0.5 | unchanged |
 | `servo.default_accel_limit` [rev/s²] | nan | nan | as above |
-| ⚠️ `servo.pid_position.kp` [Nm/rev] | 1000–10000 | **1300** | 0.001 rev error → 1.3 Nm |
-| ⚠️ `servo.pid_position.ki` [Nm/(rev·s)] | 500–5000 | **500** | |
-| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 5–260 | **2** | |
-| ⚠️ `servo.pid_position.ilimit` [Nm] | 7.2–36 | **1.0** | Wrist gravity load is small. Raise towards ~1.5 Nm per actuator if the wrist sags under payload (2.5 Nm wrist pitch = 1.25 Nm per actuator) |
-| calibration `--cal-bw-hz` | 400 | 400 → `servo.pid_dq_hz` 400 | Drop to default 200 if the current loop is noisy |
+| ⚠️ `servo.pid_position.kp` [Nm/rev] | 750–10000 | **450** | 0.001 rev error → 0.45 Nm. Lowered from 1300 for the 200 Hz filters, see below |
+| ⚠️ `servo.pid_position.ki` [Nm/(rev·s)] | 100–2500 | **50** | |
+| ⚠️ `servo.pid_position.kd` [Nm/(rev/s)] | 5–1000 | **4** | |
+| `servo.pid_position.ilimit` [Nm] | 1–8 | **1.0** | Wrist gravity load is small (≤ 1.4 Nm on joint 5 with 1 kg payload, i.e. ≤ 0.7 Nm per actuator) and carried by the feedforward |
+| `servo.pid_dq_hz`, `sources.0.pll_filter_hz` | 200 | 200 | With the old `kp 1300 / kd 2` the wrist vibrated violently at 200 Hz, see [Current loop and PWM](#current-loop-and-pwm) |
 | `servo.flux_brake_*` | 8 V / 0.06 Ω | unchanged | |
 | `servo.pwm_rate_hz`, `max_current_desired_rate`, `max_voltage`, timeout, encoder (aux2) settings | | unchanged | |
 
 Points to check:
 
-- **Torque.** At 25 A each actuator gives ≈ 7.9 Nm after 1:6. Each actuator carries
+- **Torque.** At 20 A each actuator gives ≈ 6.4 Nm after 1:6. Each actuator carries
   `(τ5 ± τ6) / 2`, so the URDF effort of 4 Nm on one joint needs ≈ 2 Nm (≈ 6.3 A) per
   motor, and 4 Nm on both joints at once needs ≈ 4 Nm (≈ 12.6 A) on one motor. Both
-  are reachable well within 25 A.
+  are reachable within 20 A.
 - **Cooling.** Each motor needs its 35 mm fan for continuous load. With fans, the tests
   give ≈ 9–10 A continuous per motor (≈ 5 Nm wrist pitch); without fans only
   ≈ 4–4.5 A, with the PETG mount reaching 60 °C (see
-  [mn5008_testing.md](mn5008_testing.md)). 25 A is a peak (≈ 1.5 · I² · R ≈ 140 W per
+  [mn5008_testing.md](mn5008_testing.md)). 20 A is a peak (≈ 1.5 · I² · R ≈ 90 W per
   motor). There is no motor thermistor, so nothing stops a stalled wrist without fans
   from overheating the PETG mounts.
 - **Stiffness.** A joint 5 error moves both actuators, so the joint stiffness is
@@ -442,6 +441,59 @@ already the case with the old limits. `moteus_interface` never commands such jum
 controllers ramp, and the resync after a mode change sends the measured position, i.e.
 close to zero error.
 
+### Torque and timeout limits
+
+**`servo.max_current_A`** is the hard torque limit in every mode, including the PID hold
+in STOPPED, so it also bounds the braking torque when all controllers are deactivated.
+It is set to 1.2 × the URDF effort, which keeps the controllers (feedforward, model error)
+out of saturation in normal motion. Because it is also the most any controller can ever
+get, the URDF efforts have to be the design maximum. Output torque constant
+`Kt_out = (8.27 / Kv) / rotor_to_output_ratio` (linear, `motor.rotation_current_cutoff_A`
+is 10000), values from the dumps of 2026-10-30:
+
+| Actuator | `motor.Kv` | Kt_out [Nm/A] | URDF effort | I at 1.2 × effort | `max_current_A` | Torque at limit |
+|---|---|---|---|---|---|---|
+| 1 | 143.97 | 0.345 | 8 Nm | 27.8 A | 28 A | 9.7 Nm |
+| 2 | 134.80 | 1.840 | 35 Nm | 22.8 A | 23 A | 42.3 Nm |
+| 3 | 143.53 | 0.660 | 15 Nm | 27.3 A | 27 A | 17.8 Nm |
+| 4 | 131.03 | 0.252 | 5 Nm | 23.8 A | 24 A | 6.1 Nm |
+| 5 | 156.39 | 0.317 | 4 Nm | 15.1 A | 20 A | 6.3 Nm (1.6 ×) |
+| 6 | 155.54 | 0.319 | 4 Nm | 15.0 A | 20 A | 6.4 Nm (1.6 ×) |
+
+Recompute after every recalibration (axis 2 went from 24 A to 23 A after its `Kv`
+changed from 141.8 to 134.8). Actuator 5/6 effort is per actuator: 4 Nm on both wrist
+joints at once is 4 Nm on one actuator. Actuator 5/6 are the exception to the 1.2 ×
+rule: they run at 20 A (1.6 ×), which leaves room for the 5 Nm timeout torque. 20 A is a
+peak; the continuous limit is set by cooling, see [Axis 5/6](#axis-56-wrist-mn5008-kv170).
+
+**`servo.timeout_max_torque_Nm`** is the braking torque when the drive watchdog fires
+(host or transport dead for `default_timeout_s` = 0.1 s): `timeout_mode` 12 commands zero
+velocity without a position target, so only the damping term acts (≈ `kd · v`), clamped
+to this value at the output. The arm brakes and stays where it stops, it does not
+return. Per axis the value has to be:
+
+- **above the worst-case gravity torque** of the joint. There is no position stiffness in
+  this mode: below the gravity torque the joint falls, above it the joint still sags
+  slowly at ≈ `τ_gravity / kd`.
+- **below what the gearbox/belts and the structure can take** when braking from full
+  speed.
+- **reachable with `servo.max_current_A`**, otherwise it has no effect.
+
+Worst-case gravity torque over the joint range, from the MuJoCo model (20000 random
+poses, payload added to the last link):
+
+| Axis | 0 kg | 0.5 kg | 1 kg | `timeout_max_torque_Nm` | Torque at `max_current_A` |
+|---|---|---|---|---|---|
+| 1 | 0 | 0 | 0 | 8 | 9.7 |
+| 2 | 18.5 | 21.7 | 25.0 | 30 | 42.3 |
+| 3 | 4.6 | 6.4 | 8.1 | 12 | 17.8 |
+| 4 | 0.4 | 0.9 | 1.4 | 5 | 6.1 |
+| 5/6 (joint 5) | 0.4 | 0.9 | 1.4 | 5 (per actuator) | 6.3 |
+
+All axes are above gravity with margin, and every timeout torque is reachable with its
+current limit. Joint 5 gravity is shared by both wrist actuators, so each sees
+at most ≈ 0.7 Nm.
+
 ### Voltage and flux braking
 
 The arm runs on a 24 V supply; the moteus r4.11 is rated up to 44 V.
@@ -464,27 +516,41 @@ The arm runs on a 24 V supply; the moteus r4.11 is rated up to 44 V.
 - Margin 8 V instead of the default 3 V: braking starts 3 V above the nominal supply
   voltage, so supply ripple does not trigger it, while there is still 8 V of room before
   the fault. 0.06 Ω (16.7 A per volt) is gentler than the default 0.025 Ω; the braking
-  current reaches `max_current_A` (100 A) at about 33 V, still below the fault.
+  current is clamped to `servo.max_current_A` (the firmware limits d and q current
+  alike). With the per-axis limits of 2026-10-30 (20–28 A) braking saturates at about
+  28.2–28.7 V; above that the bus can keep rising to the 35 V fault if the regenerated
+  power is larger than what all six motors can dissipate together (≈ 1.5 · I² · R, roughly
+  40–90 W each at their current limit). Before 2026-10-30 (100 A) it saturated only at
+  33 V. A hard stop of axis 2 from full speed was done with the lower limits on
+  2026-10-30.
 - The report's worst-case estimate (≈30 J stored energy in a full-speed stop) is small
   compared to the thermal capacity of the windings, so no external brake resistor is
   used.
 
 ### Current loop and PWM
 
-- `--cal-bw-hz 400`: current loop bandwidth 400 Hz instead of the default 200 Hz, halving
-  the torque response time to ~2.5 ms for a stiffer position loop. Downside: more audible
-  noise.
+- `servo.pid_dq_hz 200` and `motor_position.sources.0.pll_filter_hz 200` (the moteus
+  default, `--cal-bw-hz 200`). Until 2026-10-30 both were 400 Hz. Halving them made the
+  position/velocity signals much cleaner and the motors much quieter, and allowed the
+  high `kd` on axis 2. Both can be changed with `conf set` without recalibrating: the
+  firmware computes the current loop gains at runtime from `pid_dq_hz` and the calibrated
+  resistance and inductance (`kp = 2π · pid_dq_hz · L_q`, `ki = 2π · pid_dq_hz · R`).
+- The filters only matter for axes whose position loop is fast. Axes 1–3 have slow loops
+  (a few Hz) and kept their gains. The wrist (actuator 5/6, low inertia, 1:6) has a loop
+  of several tens of Hz: with the old `kp 1300 / kd 2` it vibrated violently at 200 Hz,
+  because the extra filter delay ate its phase margin. It was retuned to
+  `kp 450 / kd 4`, which is softer but much better damped.
 - `servo.max_current_desired_rate 50000` A/s: the default 10000 A/s slew limit would cap
-  how fast the 400 Hz current loop can change its set point.
+  how fast the current loop can change its set point.
 - `servo.pwm_rate_hz 20000`: lowered from 30 kHz because the 1 kHz `ros2_control` loop
   over the fdcanusb was not stable at 30 kHz (commit `cd8fa64`). Lower PWM also increases
   efficiency, at the cost of peak power and bandwidth.
-- `servo.max_current_A 100`: board default, left as the only hard torque backstop.
+- `servo.max_current_A`: per axis, see [Torque and timeout limits](#torque-and-timeout-limits).
 
 ### Position PID
 
-Gains are in output units: with `kp = 2500`, an error of 0.001 rev (0.36°) on axis 1
-produces 2.5 Nm. They are three to four orders of magnitude above the moteus defaults
+Gains are in output units: with `kp = 3000`, an error of 0.001 rev (0.36°) on axis 1
+produces 3 Nm. They are three to four orders of magnitude above the moteus defaults
 (`kp 4, ki 1, kd 0.05`) because the output side sees the full gear ratio and the arm is
 meant to hold position stiffly.
 
@@ -497,13 +563,27 @@ Tuning procedure (per axis, with `tview`, report §7.0.4):
 3. Set `ilimit` to about 20 % above the maximum expected static load torque, then raise
    `ki` starting at the level of `kp`.
 
-`ilimit` = 1.2 × design torque from the drive sizing (report table 2.2): 1.2 · 6 Nm =
-7.2 Nm (axis 1), 1.2 · 30 Nm = 36 Nm (axis 2). Axis 3 uses 14.5 Nm, which does not
-match its 9 Nm design torque (1.2 · 9 = 10.8 Nm); the reason is not documented.
-Axis 4 uses 1.2 × its URDF effort (1.2 · 5 Nm = 6 Nm). Axis 5/6 use 1.0 Nm per actuator;
-it may be raised if the wrist sags under payload (see the
-[axis 5/6 section](#axis-56-wrist-mn5008-kv170)).
+**`ki` / `ilimit` are small on purpose.** The feedforward controller (`ff_controller`,
+RNEA, always active) supplies the gravity and inertia torque as `torque_ff`, so the
+integral term only has to cover model error, payload and friction: `ilimit` 2 / 8 / 4 /
+1 / 1 / 1 Nm (axis 1–4, actuator 5/6). Until 2026-10-27 `ilimit` was 1.2 × the design
+torque (up to 36 Nm on axis 2), so the integral could hold the full load on its own; that
+large, slow integral term together with high `kp` invites slow swinging. Without the
+feedforward (e.g. the PID hold in STOPPED), the joint now sags until `kp` and the
+integral carry the gravity load: on axis 2 with 0.5 kg payload in the worst pose
+(21.7 − 8) Nm / 10000 Nm/rev ≈ 0.0014 rev ≈ 0.5°, on axis 3 (6.4 − 4) / 8000 ≈ 0.1°.
 `ilimit` only bounds the integral term, it is not a torque limit.
+
+**Axis 2 and the low-speed oscillation (2026-10-30).** At very low speed axis 2 (and
+less so axis 3) shook because of a torque ripple locked to the motor angle: mainly
+20 and 40 per motor revolution (once/twice per electrical cycle; 20 pole pairs), about
+0.4–0.5 Nm at the output and growing with load and belt tension, plus slot cogging at
+36 and 108 per revolution. The cogging table removes the slot ripple (36/108 velocity
+ripple dropped 2–4 ×), but not the load-dependent 20/40. Against those, high `kd` helps
+most: at the ripple frequency (≈ 20 × motor speed) `kd · ω` exceeds `kp`, so `kd` acts as
+a viscous brake. `kd` 600 → 1100 kept improving it; 1200–1300 started vibrations while
+moving (encoder noise and belt), so it is set to 1000 for margin, with `kp` 10000.
+Logging/FFT script: [joint_state_log.py](../tuning/joint_state_log.py).
 
 History (from the config commits):
 
@@ -514,14 +594,17 @@ History (from the config commits):
 | 2026-07-15, fw v1 | 5000 / 10 | 12000 / 40 | 6000 / 10 |
 | 2026-10-25, assembled arm | 5000 / 10 | 18000 / 40 | 10000 / 20 |
 | 2026-10-27, assembled arm, verified | 2500 / 20 | 6000 / 260 | 10000 / 40 |
+| 2026-10-30, 200 Hz filters, feedforward | 3000 / 25 | 10000 / 1000 | 8000 / 100 |
 
-On 2026-10-27 the axis 1 `ki` was also lowered from 5000 to 1000.
+On 2026-10-27 the axis 1 `ki` was also lowered from 5000 to 1000. On 2026-10-30 all
+`ki` / `ilimit` were lowered (see above).
 
 Axis 4–6: first tuned on 2026-10-24 (axis 4 `kp 1000 / ki 500 / kd 5`, actuator 5/6
 `kp 1000 / ki 500 / kd 2`). Actuator 5/6 `kp` was raised to 1500 on 2026-10-25 and set
-to 1300 on 2026-10-27; axis 4 is unchanged.
+to 1300 on 2026-10-27. On 2026-10-30 axis 4 went to `kp 750 / ki 100 / kd 5` and
+actuator 5/6 to `kp 450 / ki 50 / kd 4` for the 200 Hz filters.
 
 Axis 2 carries the whole arm against gravity. With `kp 18000 / kd 40` it vibrated on
-the assembled arm, so its stiffness was lowered and its damping raised a lot
-(`kp 6000 / kd 260`); the integral term (`ki 5000`, `ilimit 36`) still holds the static
-load. The values above are the final tuning on the assembled arm.
+the assembled arm, so on 2026-10-27 its stiffness was lowered and its damping raised
+(`kp 6000 / kd 260`). Since 2026-10-30 the feedforward carries the load, and `kd` 1000
+damps the low-speed ripple (see above).
