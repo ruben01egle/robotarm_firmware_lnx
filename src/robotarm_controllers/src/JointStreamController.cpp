@@ -215,8 +215,6 @@ controller_interface::return_type JointStreamController::update(const rclcpp::Ti
 
         double speed_scale = speed_scale_.load();
         ruckig_input_->max_velocity[i] = max_velocity_ * speed_scale;
-        ruckig_input_->max_acceleration[i] = max_acceleration_ * speed_scale * speed_scale;
-        ruckig_input_->max_jerk[i] = max_jerk_ * speed_scale * speed_scale * speed_scale;
     }
 
     update_reference_ = false;

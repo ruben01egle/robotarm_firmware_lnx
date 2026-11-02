@@ -1,0 +1,35 @@
+# Axis3 (LA8308, 20 pole pairs, 1:11.45): ripple vs. speed and load, friction. ~11 min.
+# Same q3 range (-1.2 .. +0.45) at two q2 positions, the load shifts by about 3 Nm between them. Both strokes
+# cross the torque sign change, the load on axis3 depends mostly on the forearm angle q2 + q3.
+
+name: axis3
+description: axis3 ripple and friction identification, 2 load levels
+
+poses:
+  upright: [0.0, -1.57, -1.2, 0.0, 0.0, 0.0]   # load +4.4 .. -1.7 Nm
+  forward: [0.0, -0.8, -1.2, 0.0, 0.0, 0.0]    # load +2.3 .. -4.2 Nm
+
+defaults:
+  axis: axis3
+  stroke: 1.65              # rad, 3 rotor revolutions
+  speeds:                   # rad/s, f20 = 20 * 11.45 * v / 2pi
+    - 0.0274                # f20 = 1 Hz
+    - 0.0549                # 2 Hz
+    - 0.0823                # 3 Hz
+    - 0.1097                # 4 Hz
+    - 0.1646                # 6 Hz
+    - 0.2194                # 8 Hz
+    - 0.3291                # 12 Hz
+    - 0.6                   # friction
+    - 1.0                   # friction
+    - 1.5                   # friction
+
+sweeps:
+  - name: warmup
+    pose: upright
+    speeds: [0.6]
+    repeat: 3
+  - name: upright
+    pose: upright
+  - name: forward
+    pose: forward

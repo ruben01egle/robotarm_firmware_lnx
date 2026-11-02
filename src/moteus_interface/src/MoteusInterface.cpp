@@ -49,6 +49,20 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     is_active_ = false;
     transport_timing_ = false;
 
+    // read here and not in read_ros_parameters(): state interfaces are exported before on_configure()
+    hw_diagnostics_ = false;
+    if (auto node = get_node())
+    {
+        hw_diagnostics_ = node->has_parameter("hw_diagnostics")
+            ? node->get_parameter("hw_diagnostics").as_bool()
+            : node->declare_parameter("hw_diagnostics", false);
+    }
+    else
+    {
+        RCLCPP_WARN(rclcpp::get_logger("MoteusInterface"), "Node not available in on_init, hw_diagnostics disabled");
+    }
+    RCLCPP_INFO(rclcpp::get_logger("MoteusInterface"), "HW diagnostics: %s", hw_diagnostics_ ? "true" : "false");
+
     // Joint space
     size_t num_joints = info_.joints.size();
     if (num_joints == 0)
@@ -122,6 +136,12 @@ hardware_interface::CallbackReturn MoteusInterface::on_init(
     actuator_states_position_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
     actuator_states_velocity_.assign(num_actuators, 0.0);
     actuator_states_torque_.assign(num_actuators, 0.0);
+
+    actuator_states_rotor_position_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
+    actuator_states_pid_p_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
+    actuator_states_pid_i_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
+    actuator_states_pid_d_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
+    actuator_states_torque_ff_.assign(num_actuators, std::numeric_limits<double>::quiet_NaN());
 
     actuators_.resize(num_actuators);
     actuators_updated_.assign(num_actuators, false);
@@ -313,6 +333,21 @@ std::vector<hardware_interface::StateInterface> MoteusInterface::export_state_in
             hardware_interface::HW_IF_EFFORT,
             &hw_states_effort_[i]
         ));
+    }
+
+    // actuator space, not part of the URDF: JointState ignores them, they only show up in
+    // dynamic_joint_states of a broadcaster without an interface filter
+    if (hw_diagnostics_)
+    {
+        for (size_t i = 0; i < actuators_.size(); ++i)
+        {
+            const auto& name = actuators_[i].name_;
+            state_interfaces.emplace_back(hardware_interface::StateInterface(name, HW_IF_ROTOR_POSITION, &actuator_states_rotor_position_[i]));
+            state_interfaces.emplace_back(hardware_interface::StateInterface(name, HW_IF_PID_P, &actuator_states_pid_p_[i]));
+            state_interfaces.emplace_back(hardware_interface::StateInterface(name, HW_IF_PID_I, &actuator_states_pid_i_[i]));
+            state_interfaces.emplace_back(hardware_interface::StateInterface(name, HW_IF_PID_D, &actuator_states_pid_d_[i]));
+            state_interfaces.emplace_back(hardware_interface::StateInterface(name, HW_IF_TORQUE_FF, &actuator_states_torque_ff_[i]));
+        }
     }
     return state_interfaces;
 }
@@ -508,6 +543,16 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
         actuator_states_position_[i] = result.position * 2.0 * M_PI;
         actuator_states_velocity_[i] = result.velocity * 2.0 * M_PI;
         actuator_states_torque_[i]   = result.torque;
+
+        if (hw_diagnostics_)
+        {
+            constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+            actuator_states_rotor_position_[i] = get_extra_register_value(result, moteus::Register::kEncoder0Position).value_or(nan) * 2.0 * M_PI;
+            actuator_states_pid_p_[i]     = get_extra_register_value(result, moteus::Register::kPositionKp).value_or(nan);
+            actuator_states_pid_i_[i]     = get_extra_register_value(result, moteus::Register::kPositionKi).value_or(nan);
+            actuator_states_pid_d_[i]     = get_extra_register_value(result, moteus::Register::kPositionKd).value_or(nan);
+            actuator_states_torque_ff_[i] = get_extra_register_value(result, moteus::Register::kPositionFeedforward).value_or(nan);
+        }
     }
 
     for (const auto& transmission : transmissions_) {
@@ -638,12 +683,28 @@ hardware_interface::CallbackReturn MoteusInterface::on_configure(const rclcpp_li
         encoder1.resolution = moteus::Resolution::kFloat;
         read_override.extra[0] = encoder1;
 
+        // cyclic query with hw_diagnostics: rotor angle and the drive's position loop terms.
+        // Extras must be in ascending register order (the library encodes them as one range)
+        moteus::Query::Format diagnostics_format = read_format;
+        const moteus::Register diagnostic_registers[] = {
+            moteus::Register::kPositionKp,
+            moteus::Register::kPositionKi,
+            moteus::Register::kPositionKd,
+            moteus::Register::kPositionFeedforward,
+            moteus::Register::kEncoder0Position,
+        };
+        for (size_t j = 0; j < std::size(diagnostic_registers); ++j)
+        {
+            diagnostics_format.extra[j].register_number = diagnostic_registers[j];
+            diagnostics_format.extra[j].resolution = moteus::Resolution::kInt16;
+        }
+
         size_t num_joints = actuators_.size();
         for (size_t i = 0; i < num_joints; ++i)
         {
             moteus::Controller::Options options;
             options.id = actuators_[i].can_id_;
-            options.query_format = read_format;
+            options.query_format = hw_diagnostics_ ? diagnostics_format : read_format;
             options.position_format = write_format;
             // options.transport left unset: controller_ is only used to build/parse frames (Make*),
             // never to send them, so Controller::transport() is never invoked. Do not call

@@ -30,7 +30,6 @@ controllers and the hardware state. Interfaces in `robotarm_interface`:
 | `TRAJECTORY` | position controlled | `joint_trajectory_controller` |
 | `GRAVITY_COMP` | floats, hand guiding | – |
 | `IMPEDANCE` | compliant hold of the activation pose | stiffness parameters of `cartesian_impedance_controller` |
-| `IMPEDANCE_JOINT_STREAM` | compliant | `joint_stream_controller_impedance` |
 | `IMPEDANCE_JOG` | compliant | `cartesian_jog_controller_impedance` |
 | `FAULT` (reported only) | leftovers of a controller error, cleaned up to `STOPPED` within 0.2 s | – |
 | `UNKNOWN` (reported only) | controller manager not reachable yet | – |
@@ -63,7 +62,6 @@ ros2 topic echo /mode_manager/state
 | `cartesian_jog_controller` | `cartesian_jog_controller` | unchanged |
 | `cartesian_impedance_controller` = gravity compensation | `gc_controller` | **gravity compensation now has its own name** |
 | – | `cartesian_impedance_controller` = Cartesian impedance | **same name, new behavior**: it now holds the TCP with a virtual spring instead of floating |
-| – | `joint_stream_controller_impedance` | new, joint stream feeding the impedance controller |
 | – | `cartesian_jog_controller_impedance` | new, jogging feeding the impedance controller |
 | – | stiffness of `cartesian_impedance_controller` | **new input**: settable at runtime as parameters, in the base or the tcp frame, see [runtime stiffness](#runtime-stiffness-cartesian_impedance_controller) |
 | – | `ff_controller` | new: adds the arm dynamics as feedforward torque to the position controlled modes |
@@ -91,10 +89,9 @@ All are spawned **inactive** by `robotarm.launch.py`, except `joint_state_broadc
 | `hold_controller` | `robotarm_controllers/HoldController` | the reference interfaces of `ff_controller` | none | holds the pose measured at its activation |
 | `gc_controller` | `robotarm_controllers/CartesianImpedanceController` (mode `gc`) | `effort` of all joints | none | gravity compensation, the arm floats and can be guided by hand, stays where it is let go |
 | `cartesian_impedance_controller` | `robotarm_controllers/CartesianImpedanceController` (mode `impedance`) | `effort` of all joints, **exports reference interfaces** | reference interfaces from an upstream controller, stiffness parameters | compliant: the TCP is pulled towards a reference pose by a virtual spring/damper. Without upstream: holds the pose it was activated in |
-| `joint_stream_controller_impedance` | `robotarm_controllers/JointStreamController` | the reference interfaces of `cartesian_impedance_controller` | same as `joint_stream_controller` | joint stream, executed compliantly |
 | `cartesian_jog_controller_impedance` | `robotarm_controllers/CartesianJogController` | the reference interfaces of `cartesian_impedance_controller` | same as `cartesian_jog_controller` | jogging, executed compliantly |
 
-The `*_impedance` instances are the same classes as their position controlled counterparts,
+`cartesian_jog_controller_impedance` is the same class as `cartesian_jog_controller`,
 configured with `chain_to: "cartesian_impedance_controller"` instead of `chain_to: "ff_controller"`.
 Only `ff_controller`, `gc_controller` and `cartesian_impedance_controller` touch the hardware.
 
@@ -128,12 +125,9 @@ The rules below are what `mode_manager` implements, a client doesn't have to fol
 controller claims them and writes a joint space reference every cycle:
 
 ```
-joint_stream_controller_impedance  ─┐
-                                    ├─(reference interfaces)─► cartesian_impedance_controller ─(effort)─► hardware
-cartesian_jog_controller_impedance ─┘
+cartesian_jog_controller_impedance ─(reference interfaces)─► cartesian_impedance_controller ─(effort)─► hardware
 ```
 
-- Only **one** upstream can be active at a time (both claim the same reference interfaces).
 - The upstream can only be activated while `cartesian_impedance_controller` is active, or in the
   **same** switch request.
 - `cartesian_impedance_controller` can only be deactivated together with its active upstream, in the
@@ -162,7 +156,6 @@ Exactly one of these is active at a time (plus `joint_state_broadcaster`), defin
 | `TRAJECTORY` | active | `ff_controller` + `joint_trajectory_controller` |
 | `GRAVITY_COMP` | active | `gc_controller` |
 | `IMPEDANCE` | active | `cartesian_impedance_controller` |
-| `IMPEDANCE_JOINT_STREAM` | active | `cartesian_impedance_controller` + `joint_stream_controller_impedance` |
 | `IMPEDANCE_JOG` | active | `cartesian_impedance_controller` + `cartesian_jog_controller_impedance` |
 | `FAULT` | active | anything else, e.g. the upstream of a stopped `ff_controller` |
 
@@ -206,7 +199,7 @@ of a class have the same interface under different names.
 
 | Controller | Name | Type | Notes |
 |---|---|---|---|
-| `joint_stream_controller`, `joint_stream_controller_impedance` | `/<name>/commands` | `std_msgs/msg/Float64MultiArray` | target joint positions in rad, 6 values, order `axis1`…`axis6` |
+| `joint_stream_controller` | `/<name>/commands` | `std_msgs/msg/Float64MultiArray` | target joint positions in rad, 6 values, order `axis1`…`axis6` |
 | | `/<name>/scale_speed` (service) | `robotarm_interface/srv/SetFloat64` | speed scale in (0, 1], other values are rejected (`success = false`) |
 | `cartesian_jog_controller`, `cartesian_jog_controller_impedance` | `/<name>/twist_cmds` | `geometry_msgs/msg/TwistStamped` | TCP velocity, `header.frame_id` empty or the base link = base frame, `tcp` = tool frame. A non-zero twist has to be repeated at > 4 Hz, it is zeroed after 250 ms |
 | | `/<name>/increment_cmds` | `robotarm_interface/msg/CartesianIncrement` | relative TCP step, same frame selection |

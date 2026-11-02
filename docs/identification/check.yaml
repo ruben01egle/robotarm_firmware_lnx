@@ -1,0 +1,18 @@
+# Quick check before the full runs, ~2 min: one axis2 sweep in the mid load pose, at the critical ripple
+# frequency and one fast speed. Afterwards check in check_<date>/run.json and mid.csv:
+# hw_diagnostics true, no missed samples, pid_p / position error about kp (see README.md).
+
+name: check
+description: functional check of hw_diagnostics, recorder and runner before the identification runs
+
+poses:
+  mid: [0.0, -1.2, -0.4, 0.0, 0.0, 0.0]     # axis2 load -14.0 .. -4.5 Nm over the stroke
+
+sweeps:
+  - name: mid
+    pose: mid
+    axis: axis2
+    stroke: 0.63            # 3 rotor revolutions
+    speeds:
+      - 0.0419              # f20 = 4 Hz, the critical band: the ripple should be clearly visible
+      - 0.25                # fast

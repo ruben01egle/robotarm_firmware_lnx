@@ -1,0 +1,47 @@
+# Axis2 (LA8308, 20 pole pairs, 1:30): ripple vs. speed, load and direction, friction. ~35 min.
+# The grid is dense around 4 Hz for both orders: order 20 at f20 = 3 .. 5 Hz, order 40 at f20 = 1.5 .. 2.5 Hz.
+# The load varies a lot along each stroke, but within one pose it is tied to the axis position. Two poses over the
+# same q2 range (-1.2 .. -0.57) at different loads separate load effects from position effects. Plus one pose
+# where the gravity torque crosses zero within the stroke. Loads from the URDF gravity model.
+
+name: axis2
+description: axis2 ripple and friction identification, 2 load levels + torque sign change
+
+poses:
+  low:  [0.0, -1.2, -1.5, 0.0, 0.0, 0.0]    # load -9.2 .. -0.7 Nm, forearm points up and back
+  high: [0.0, -1.2, 0.75, 0.0, 0.0, 0.0]    # load -16.3 .. -9.0 Nm, forearm about horizontal
+  sign: [0.0, -1.9, 0.0, 0.0, 0.0, 0.0]     # load +6.3 .. -5.1 Nm, arm straight, leaning back past vertical
+
+defaults:
+  axis: axis2
+  stroke: 0.63              # rad, 3 rotor revolutions
+  speeds:                   # rad/s, f20 = ripple frequency of order 20 = 20 * 30 * v / 2pi, f40 = 2 * f20
+    - 0.0105                # f20 = 1 Hz
+    - 0.0157                # 1.5 Hz,  f40 = 3 Hz
+    - 0.0183                # 1.75 Hz, f40 = 3.5 Hz
+    - 0.0209                # 2 Hz,    f40 = 4 Hz, order 40 in the resonance
+    - 0.0236                # 2.25 Hz, f40 = 4.5 Hz
+    - 0.0262                # 2.5 Hz,  f40 = 5 Hz
+    - 0.0314                # 3 Hz
+    - 0.0367                # 3.5 Hz
+    - 0.0419                # 4 Hz, order 20 in the resonance seen in the old logs
+    - 0.0471                # 4.5 Hz
+    - 0.0524                # 5 Hz
+    - 0.0628                # 6 Hz
+    - 0.0838                # 8 Hz
+    - 0.1257                # 12 Hz
+    - 0.25                  # friction
+    - 0.5                   # friction
+    - 0.75                  # friction, still ~0.25 rad at constant speed
+
+sweeps:
+  - name: warmup
+    pose: low
+    speeds: [0.25]
+    repeat: 3
+  - name: low
+    pose: low
+  - name: high
+    pose: high
+  - name: sign
+    pose: sign

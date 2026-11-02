@@ -1,0 +1,32 @@
+# Axis1 (LA8308, 20 pole pairs, 1:6): ripple vs. speed and inertia, friction. ~9 min.
+# Vertical axis, no gravity load: the poses change the inertia (and so the resonance frequency) instead.
+# The stroke turns the whole arm by 180 deg (-90 .. +90 deg), keep that half circle free.
+
+name: axis1
+description: axis1 ripple and friction identification, arm tucked and extended
+
+poses:
+  tucked:   [-1.57, -1.57, 1.8, 0.0, 0.0, 0.0]   # forearm folded down, tcp radius ~0.42 m (q3 2.2 comes
+                                                 # within 2 cm of the upper arm)
+  extended: [-1.57, -0.6, 0.5, 0.0, 0.0, 0.0]    # arm reaching forward, tcp radius ~0.67 m
+
+defaults:
+  axis: axis1
+  stroke: 3.14              # rad, 3 rotor revolutions
+  speeds:                   # rad/s, f20 = 20 * 6 * v / 2pi
+    - 0.0524                # f20 = 1 Hz
+    - 0.1047                # 2 Hz
+    - 0.2094                # 4 Hz
+    - 0.4189                # 8 Hz
+    - 0.8378                # 16 Hz
+    - 1.2                   # friction
+
+sweeps:
+  - name: warmup
+    pose: tucked
+    speeds: [0.8]
+    repeat: 2
+  - name: tucked
+    pose: tucked
+  - name: extended
+    pose: extended

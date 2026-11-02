@@ -1,0 +1,34 @@
+# Wrist axes 5/6 (MN5008, 14 pole pairs, 1:6 per motor): ripple vs. speed and friction, almost no gravity load.
+# ~9 min. One pose each, around the SRDF "ready" pose.
+# The wrist is a differential (wrist_a = q5 + q6, wrist_b = q5 - q6): sweeping axis5 or axis6 moves both motors by
+# the stroke, recorded per motor. A stroke of pi is 3 rotor revolutions of each motor.
+
+name: wrist
+description: wrist (axis5, axis6) ripple and friction identification
+
+poses:
+  axis5: [0.0, -1.3, 1.5, 0.0, -1.55, 0.0]
+  axis6: [0.0, -1.3, 1.5, 0.0, 1.0, -1.57]
+
+defaults:
+  stroke: 3.14              # rad, 3 rotor revolutions of each motor
+  speeds:                   # rad/s, f14 = 14 * 6 * v / 2pi (order 14: 14 pole pairs), f28 = 2 * f14
+    - 0.0748                # f14 = 1 Hz
+    - 0.1496                # 2 Hz
+    - 0.2992                # 4 Hz
+    - 0.5984                # 8 Hz
+    - 1.1968                # 16 Hz
+    - 2.0                   # friction
+
+sweeps:
+  - name: warmup
+    pose: axis5
+    axis: axis5
+    speeds: [1.1968]
+    repeat: 2
+  - name: axis5
+    pose: axis5
+    axis: axis5
+  - name: axis6
+    pose: axis6
+    axis: axis6

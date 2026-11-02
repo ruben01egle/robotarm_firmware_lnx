@@ -1,0 +1,40 @@
+# Example sweep config for the motion runner (see README.md). Ripple identification on axis2: constant speed
+# moves at several speeds, in poses with different gravity load on axis2.
+#
+# EXAMPLE POSES derived from the SRDF "ready" pose (axis2 -1.3, axis3 1.5, axis5 1.0). The runner checks them
+# against the URDF limits, not against collisions: check every pose and stroke on the arm before running.
+
+name: axis2_ripple
+description: axis2 torque ripple vs. speed and load, constant speed strokes of about 3 motor revolutions
+
+approach_speed: 0.3         # rad/s, moves to the start poses
+settle_time: 1.0            # s at rest before each move, recorded
+position_tolerance: 0.01    # rad
+velocity_tolerance: 0.02    # rad/s
+limit_margin: 0.05          # rad to the URDF limits
+
+poses:                      # [axis1 .. axis6] in rad, the order of the joint stream controller's joints
+  ready:     [0.0, -1.3, 1.5, 0.0, 1.0, 0.0]
+  forearm_out: [0.0, -1.3, 0.5, 0.0, 0.0, 0.0]    # forearm further out: more load on axis2
+  forearm_in:  [0.0, -1.3, 2.2, 0.0, 1.0, 0.0]    # forearm folded back: less load
+
+defaults:                   # for every sweep, a sweep's own keys win
+  axis: axis2
+  stroke: 0.6               # rad, signed: out to pose + stroke, then back to the pose
+  speeds: [0.01, 0.02, 0.03, 0.04, 0.06, 0.08, 0.15]
+  repeat: 1
+
+sweeps:
+  - name: warmup
+    pose: ready
+    speeds: [0.15]
+    repeat: 3
+  - name: ready
+    pose: ready
+  - name: forearm_out
+    pose: forearm_out
+  - name: forearm_in
+    pose: forearm_in
+  - name: ready_down        # same pose, the stroke the other way
+    pose: ready
+    stroke: -0.6

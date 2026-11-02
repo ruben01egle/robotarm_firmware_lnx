@@ -1199,7 +1199,7 @@ parameters, and a target is taken as it is.
 | Type | Name | Notes |
 |---|---|---|
 | Command interfaces | `<joint>/position`, `<joint>/velocity` | joints from the `joints` parameter, interleaved per joint |
-| Command interfaces, chained | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | instead of the above when `chain_to` is set, see [chained to the impedance controller](#chained-to-the-impedance-controller-1) |
+| Command interfaces, chained | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | instead of the above when `chain_to` is set, see [chained](#chained) |
 | State interfaces | `<joint>/position`, `<joint>/velocity` | same layout |
 | Subscription | `~/commands` (`std_msgs/msg/Float64MultiArray`) | i.e. `/joint_stream_controller/commands`, target joint positions in rad, one per joint, in `joints` order |
 | Service | `~/scale_speed` (`robotarm_interface/srv/SetFloat64`) | runtime speed scale in (0, 1], see [background C](#background-c-speed-scaling) |
@@ -1226,7 +1226,7 @@ up as a Ruckig error on the first `update()`.
 | `max_acceleration` | `2.0` | rad/s² | > 0 (not validated) | Ruckig acceleration limit, all joints |
 | `max_jerk` | `2.0` | rad/s³ | > 0 (not validated) | Ruckig jerk limit, all joints |
 | `sync_joints` | `false` | – | | `true`: `Synchronization::Time` (all joints arrive together), `false`: `None`, see [background D](#background-d-synchronization) |
-| `chain_to` | `""` | – | | Empty: drive the hardware. Otherwise the name of the downstream controller to write the reference into ([chained](#chained-to-the-impedance-controller-1)) |
+| `chain_to` | `""` | – | | Empty: drive the hardware. Otherwise the name of the downstream controller to write the reference into ([chained](#chained)) |
 
 Tuning hints:
 - **`max_velocity`**: one value for all joints, so it has to fit the slowest joint. `robotarm_bringup`
@@ -1269,13 +1269,13 @@ Halve the speed (also while moving):
 ros2 service call /joint_stream_controller/scale_speed robotarm_interface/srv/SetFloat64 "{data: 0.5}"
 ```
 
-#### Chained to the impedance controller
+#### Chained
 
-With `chain_to: "cartesian_impedance_controller"` the controller claims the reference interfaces of
-the impedance controller instead of the hardware, and the arm follows the trajectory
-**compliantly**. Topic, service and Ruckig are the same. `robotarm_bringup` runs this as a second
-instance, `joint_stream_controller_impedance`. Its position controlled instance,
-`joint_stream_controller`, is chained to the [feedforward controller](#feedforwardcontroller).
+With `chain_to` set the controller claims the reference interfaces of the downstream controller
+instead of the hardware. Topic, service and Ruckig are the same. `robotarm_bringup` chains
+`joint_stream_controller` to the [feedforward controller](#feedforwardcontroller). There is no
+instance chained to the impedance controller: following joint targets through a Cartesian
+impedance didn't track well.
 
 | | Direct | Chained |
 |---|---|---|
@@ -1284,8 +1284,7 @@ instance, `joint_stream_controller_impedance`. Its position controlled instance,
 | On activation | $q_{meas}$, 0 | $q_{meas}$, 0, 0 |
 
 Unlike the jog controller, the acceleration needs no finite difference: it is Ruckig's own
-`new_acceleration`, exactly consistent with position and velocity. The activation command is in the
-[impedance controller's section](#running-it-2).
+`new_acceleration`, exactly consistent with position and velocity.
 
 #### Lifecycle behavior
 
@@ -1374,8 +1373,8 @@ The measured state is used once, to seed Ruckig, and the timing of that matters:
 | every later cycle | Ruckig's own output |
 
 Seeding on the first *target* rather than on activation means the trajectory starts where the arm
-actually is when the stream starts. In the chained case the arm is compliant and may have been
-pushed in between; seeding on activation would start with a step back to the activation pose.
+actually is when the stream starts. If the arm moved in between, seeding on activation would start
+with a step back to the activation pose.
 
 ### Background C: speed scaling
 
@@ -1435,8 +1434,7 @@ Cartesian, this one is in joint space, and both are re-seeded from measurements.
 What the controller does **not** have, compared to the jog controller:
 
 - **No joint limit handling.** The target is taken as it is. Only the hardware limits of the drives
-  (and in the chained case the impedance controller's [joint limit
-  protection](#background-f-joint-limit-protection)) stop a joint at its limit.
+  stop a joint at its limit.
 - **No tracking check.** After seeding, measurements are not read at all. A blocked arm, a drive
   fault or a frozen state are not detected by this controller.
 
@@ -1517,12 +1515,11 @@ Like the jog controller, the joint names, limits and the TCP come from the URDF 
 
 The controller is a `ChainableControllerInterface`. An upstream controller claims its reference
 interfaces and writes a joint space reference every cycle, in the same realtime cycle and before
-this controller's update. Both upstream controllers of this package can do that, selected with
-their `chain_to` parameter:
+this controller's update. `robotarm_bringup` chains `cartesian_jog_controller_impedance` to it, with
+`chain_to: "cartesian_impedance_controller"`:
 
 | Upstream | Reference | Acceleration |
 |---|---|---|
-| `JointStreamController` | joint space Ruckig towards streamed targets | Ruckig output |
 | `CartesianJogController` | jogged / incremented TCP motion, through $J^+$ | difference of $\dot q_{cmd}$, see [chained to the impedance controller](#chained-to-the-impedance-controller) |
 
 Any controller that writes `<joint>/position`, `/velocity`, `/acceleration` works, e.g. a
@@ -1650,8 +1647,8 @@ cartesian_impedance_controller:
 #### Running it
 
 `robotarm_bringup/launch/robotarm.launch.py` spawns all instances from `controllers.yaml`
-**inactive**: `gc_controller`, `cartesian_impedance_controller` and the chained upstream controllers
-`joint_stream_controller_impedance` and `cartesian_jog_controller_impedance`.
+**inactive**: `gc_controller`, `cartesian_impedance_controller` and the chained upstream controller
+`cartesian_jog_controller_impedance`.
 
 Gravity compensation (no position controller may be active on the same joints):
 
@@ -1659,13 +1656,11 @@ Gravity compensation (no position controller may be active on the same joints):
 ros2 control switch_controllers --activate gc_controller --deactivate joint_stream_controller
 ```
 
-Impedance with streamed joint targets, both in **one** switch:
+Impedance with Cartesian jogging, both in **one** switch:
 
 ```bash
 ros2 control switch_controllers --deactivate gc_controller \
-  --activate cartesian_impedance_controller joint_stream_controller_impedance
-ros2 topic pub --once /joint_stream_controller_impedance/commands std_msgs/msg/Float64MultiArray \
-  "{data: [0.0, -1.0, 1.0, 0.0, 0.5, 0.0]}"    # example values, check them against the joint limits
+  --activate cartesian_impedance_controller cartesian_jog_controller_impedance
 ```
 
 Activated alone, `cartesian_impedance_controller` holds the activation pose compliantly.

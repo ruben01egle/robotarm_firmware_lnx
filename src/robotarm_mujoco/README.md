@@ -45,7 +45,7 @@ ros2 control switch_controllers --activate ff_controller joint_stream_controller
 ros2 control switch_controllers --deactivate joint_stream_controller ff_controller \
   --activate gc_controller                                                   # gravity compensation and hold
 ros2 control switch_controllers --deactivate gc_controller \
-  --activate cartesian_impedance_controller joint_stream_controller_impedance   # impedance, streamed targets
+  --activate cartesian_impedance_controller cartesian_jog_controller_impedance   # impedance, jogging
 ```
 
 A joint no controller claims holds its position, like the moteus in its idle mode: after activating the

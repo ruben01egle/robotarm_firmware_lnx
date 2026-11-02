@@ -22,7 +22,6 @@ INACTIVE_CONTROLLERS = [
     'gc_controller',
     'cartesian_impedance_controller',
     # upstream controllers chained to cartesian_impedance_controller (chain_to in controllers.yaml)
-    'joint_stream_controller_impedance',
     'cartesian_jog_controller_impedance',
 ]
 

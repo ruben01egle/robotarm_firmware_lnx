@@ -43,8 +43,6 @@ MODES = {
     RobotarmMode.TRAJECTORY: ModeSpec(True, frozenset({FF, 'joint_trajectory_controller'})),
     RobotarmMode.GRAVITY_COMP: ModeSpec(True, frozenset({'gc_controller'})),
     RobotarmMode.IMPEDANCE: ModeSpec(True, frozenset({IMPEDANCE})),
-    RobotarmMode.IMPEDANCE_JOINT_STREAM: ModeSpec(
-        True, frozenset({IMPEDANCE, 'joint_stream_controller_impedance'})),
     RobotarmMode.IMPEDANCE_JOG: ModeSpec(
         True, frozenset({IMPEDANCE, 'cartesian_jog_controller_impedance'})),
 }

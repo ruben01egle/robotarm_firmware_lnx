@@ -21,6 +21,12 @@ namespace moteus_interface
 
 constexpr char HW_IF_TORQUE_FF[] = "torque_ff";
 
+// hw_diagnostics state interfaces, exported per actuator (prefix = actuator name)
+constexpr char HW_IF_ROTOR_POSITION[] = "rotor_position";
+constexpr char HW_IF_PID_P[] = "pid_p";
+constexpr char HW_IF_PID_I[] = "pid_i";
+constexpr char HW_IF_PID_D[] = "pid_d";
+
 
 class MoteusInterface : public hardware_interface::SystemInterface
 {
@@ -217,6 +223,13 @@ private:
     std::vector<double> actuator_states_velocity_;
     std::vector<double> actuator_states_torque_;
 
+    // actuator state diagnostics (hw_diagnostics only), as reported by the drive
+    std::vector<double> actuator_states_rotor_position_;    // encoder 0, rad within one rotor revolution
+    std::vector<double> actuator_states_pid_p_;             // position loop terms, Nm
+    std::vector<double> actuator_states_pid_i_;
+    std::vector<double> actuator_states_pid_d_;
+    std::vector<double> actuator_states_torque_ff_;         // feedforward torque the drive received, Nm
+
     std::vector<Joint> joints_;
     std::vector<std::unique_ptr<transmission::Transmission>> transmissions_;
     std::vector<Actuator> actuators_;
@@ -228,6 +241,8 @@ private:
     std::shared_ptr<transport::Transport> transport_;
     uint32_t timeout_us_;
     bool transport_timing_;
+
+    bool hw_diagnostics_;
     
     std::vector<mjbots::moteus::Query::Result> actuator_results_;
     std::vector<mjbots::moteus::CanFdFrame> command_frames_;

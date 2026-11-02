@@ -166,7 +166,7 @@ def test_limp_deactivates_everything_then_the_hardware():
     assert plan.deactivate_hardware and not plan.activate_hardware
 
 
-EFFORT_MODES = [M.GRAVITY_COMP, M.IMPEDANCE, M.IMPEDANCE_JOINT_STREAM, M.IMPEDANCE_JOG]
+EFFORT_MODES = [M.GRAVITY_COMP, M.IMPEDANCE, M.IMPEDANCE_JOG]
 POSITION_MODES = [M.ARMED, M.JOINT_STREAM, M.CARTESIAN_JOG, M.TRAJECTORY]
 
 
@@ -184,7 +184,7 @@ def test_ff_ramps_from_zero_while_the_drive_pid_holds(a, b):
 
 def test_ff_ramps_from_zero_out_of_a_fault():
     # leftovers of an effort chain, but no effort controller writes anymore: the drives hold on PID
-    plan = plan_switch('active', {'joint_stream_controller_impedance'}, M.ARMED)
+    plan = plan_switch('active', {'cartesian_jog_controller_impedance'}, M.ARMED)
     assert plan.ff_ramp_start == 'zero'
 
 

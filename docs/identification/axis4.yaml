@@ -1,0 +1,28 @@
+# Axis4 (LA8308, 20 pole pairs, 1:4): ripple vs. speed and friction, almost no gravity load. ~5 min.
+# One pose, the SRDF "ready" pose with axis4 turned to the start of the stroke. The wrist is bent (q5 = 1.0),
+# so axis4 turns the tool around and not only about its own axis.
+
+name: axis4
+description: axis4 ripple and friction identification
+
+poses:
+  ready: [0.0, -1.3, 1.5, -2.36, 1.0, 0.0]
+
+defaults:
+  axis: axis4
+  stroke: 4.71              # rad, 3 rotor revolutions
+  speeds:                   # rad/s, f20 = 20 * 4 * v / 2pi, f40 = 2 * f20
+    - 0.0785                # f20 = 1 Hz
+    - 0.1571                # 2 Hz
+    - 0.3142                # 4 Hz
+    - 0.6283                # 8 Hz
+    - 1.2566                # 16 Hz
+    - 2.0                   # friction
+
+sweeps:
+  - name: warmup
+    pose: ready
+    speeds: [1.2566]
+    repeat: 2
+  - name: ready
+    pose: ready
