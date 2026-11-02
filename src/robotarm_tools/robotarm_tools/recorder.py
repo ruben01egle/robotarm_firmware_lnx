@@ -42,7 +42,7 @@ class Recorder:
     """
 
     def __init__(self, output=None, broadcaster=DEFAULT_BROADCASTER,
-                 controller_manager='/controller_manager', rate=500.0, use_sim_time=None,
+                 controller_manager='/controller_manager', rate=400.0, use_sim_time=None,
                  node_name='robotarm_recorder', timeout=5.0):
         self.output = Path(output) if output else Path(time.strftime('joint_states_%Y%m%d_%H%M%S.csv'))
         self.broadcaster = broadcaster

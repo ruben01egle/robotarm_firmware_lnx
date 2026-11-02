@@ -165,6 +165,7 @@ private:
     bool make_cyclic_commands();
     void parse_result_frames();
     bool watchdog(bool strict=false);
+    void dump_transport_timing();
     bool check_joint_interface(hardware_interface::ComponentInfo joint);
     bool read_ros_parameters();
 

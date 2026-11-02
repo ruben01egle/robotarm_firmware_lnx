@@ -850,7 +850,13 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
     }
 
     is_active_ = false;
+    dump_transport_timing();
 
+    return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+void MoteusInterface::dump_transport_timing()
+{
     // Dump timing log after the hardware is safe
     if (transport_timing_) {
         std::time_t now = std::time(nullptr);
@@ -860,8 +866,6 @@ hardware_interface::CallbackReturn MoteusInterface::on_deactivate(const rclcpp_l
         transport_->dump_timing_log(path);
         transport_->set_timing_enabled(false);
     }
-
-    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn MoteusInterface::on_cleanup(const rclcpp_lifecycle::State &/*previous_state*/)
@@ -875,10 +879,33 @@ hardware_interface::CallbackReturn MoteusInterface::on_shutdown(const rclcpp_lif
     return on_deactivate(previous_state);
 }
 
-hardware_interface::CallbackReturn MoteusInterface::on_error(const rclcpp_lifecycle::State & previous_state)
+// Brake instead of stop: a stopped drive lets the arm fall, brake shorts the phases and damps it.
+// Brake mode never runs into the drive watchdog (fw: only position and stay within time out), so
+// the drives keep braking after this last frame until the next configure stops them. A drive in
+// fault ignores it (only stop leaves fault), an unreachable one ends in its servo.timeout_mode.
+//
+// ros2_control (jazzy) moves the component to UNCONFIGURED on SUCCESS: no read/write, no mode
+// switch anymore. Clearing is_active_ keeps the following on_shutdown (EMERGENCY_OFF, Ctrl-C) from
+// sending stop, only on_configure does, i.e. a deliberate restart.
+hardware_interface::CallbackReturn MoteusInterface::on_error(const rclcpp_lifecycle::State & /*previous_state*/)
 {
-    RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Hardware interface encountered an error, executing emergency stop!");
-    return on_deactivate(previous_state);
+    RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Hardware interface encountered an error, braking all drives!");
+    if (!transport_) return hardware_interface::CallbackReturn::SUCCESS;
+
+    for (size_t i = 0; i < actuators_.size(); ++i)
+    {
+        command_frames_[i] = actuators_[i].controller_->MakeBrake();
+    }
+    if (!transport_->write(&command_frames_[0], command_frames_.size())) {
+        // nothing left to try, the drives end in their watchdog
+        RCLCPP_FATAL(rclcpp::get_logger("MoteusInterface"), "Transport write failed, brake not sent");
+    }
+
+    is_active_ = false;
+    dump_transport_timing();
+
+    // also on a failed write: ERROR would finalize the component, which reads as EMERGENCY_OFF
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 void MoteusInterface::joint_interface_to_joint_physical()
