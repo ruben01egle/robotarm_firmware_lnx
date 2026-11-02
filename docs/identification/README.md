@@ -61,8 +61,13 @@ ros2 run robotarm_tools motion_runner docs/identification/axis2.yaml -o ~/identi
    - `run.json`: `status` complete, `hw_diagnostics` true, `files.mid.csv.missed` 0 or close to it.
    - `mid.csv` has the columns `axis2_motor_rotor_position`, `_pid_p`, `_pid_i`, `_pid_d`, `_torque_ff`.
      `rotor_position` is a sawtooth from 0 to 2pi, 3 teeth per stroke.
-   - **Gains**: during the constant speed part of a move, the command is linear in time. A least squares fit
-     `pid_p ~ a * axis2_position + b * t + c` gives `a = -kp`, and `pid_d ~ a * axis2_velocity + c` gives
-     `a = -kd`. Expected for axis 2, in rad: kp = 10000 / 2pi ≈ 1590 Nm/rad, kd = 900 / 2pi ≈ 143 Nm/(rad/s).
-     A clearly different value means the drive does not run the gains of the config dump.
+   - **Gains**: the drive reports `p = kp * (measured - desired)` (same for d and i) and commands
+     `ff - p - i - d` (`servo.pid_position.sign` = -1), so `effort - (torque_ff - pid_p - pid_i - pid_d)` is
+     about 0. During the constant speed part of a slow move, the command is linear in time. A least squares fit
+     `pid_p ~ a * position + b * t + c` gives `a = kp`, and `pid_d ~ a * axis2_velocity + c` gives `a = kd`.
+     Take the position from the rotor angle (`np.unwrap(axis2_motor_rotor_position) / 30` plus an offset):
+     the int16 output position resolves 0.63 mrad, about the size of the position error, and biases kp far
+     too low. Expected for axis 2, in rad: kp = 10000 / 2pi ≈ 1590 Nm/rad, kd = 900 / 2pi ≈ 143 Nm/(rad/s).
+     The fast segments give lower values (ripple at 24/48 Hz, timing offsets between the sampled values).
+     Check run 2026-11-02: kp 1558/1583, kd 140/141.
    - At the 4 Hz speed the ripple should be clearly visible in `axis2_effort` and `pid_p`.

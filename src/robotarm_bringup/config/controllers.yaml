@@ -55,7 +55,7 @@ controller_manager:
       shutdown_on_initial_state_failure: false
     overruns:
       print_warnings: true
-    update_rate: 400
+    update_rate: 500
 
     lock_memory: true
     thread_priority: 99
@@ -92,7 +92,7 @@ moteus_hardware_system:
     execution_mode: "pipelined"  # pipelined or strict_sequential
     timeout_transport_us: 2000
     time_transport: false
-    hw_diagnostics: true
+    hw_diagnostics: false
     
     transport:
       usb_device: "/dev/fdcanusb"
@@ -107,7 +107,7 @@ joint_state_broadcaster:
 # use_local_topics keeps it off /joint_states: -> /joint_state_broadcaster_hires/joint_states
 joint_state_broadcaster_hires:
   ros__parameters:
-    publish_rate: 400               # = update_rate, every cycle
+    publish_rate: 500               # = update_rate, every cycle
     use_local_topics: true
 
 joint_stream_controller:

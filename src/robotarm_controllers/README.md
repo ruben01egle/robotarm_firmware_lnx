@@ -1599,15 +1599,17 @@ A GUI reads the current values, the frame and the limits with `get_parameters` (
 change on a reconfigure) and follows changes from other clients on `/parameter_events`.
 
 Tuning hints:
-- **`cartesian_damping_ratio`**: start with $\zeta \approx 0.7$ (about 5 % overshoot after a
-  release). It holds for any stiffness, so changing $K$ needs no damping retuning. A
-  model armature that is too small lowers the real $\zeta$ by an almost constant factor, which this
-  value absorbs. Watch for buzzing: $D$ is large in heavy directions and amplifies velocity noise.
+- **`cartesian_damping_ratio`**: $\zeta = 0.5$ is validated on the arm (about 16 % overshoot after
+  a release, with the real armature in the model). It holds for any stiffness, so changing $K$
+  needs no damping retuning. Higher values are limited by the light wrist joints, see
+  `max_joint_damping`. Watch for buzzing: $D$ is large in heavy directions and amplifies velocity
+  noise.
 - **`joint_damping`**: acts in parallel to the Cartesian damper. In `impedance` mode it has to damp
   what the Cartesian terms can't see (motion in the null space at singularities, axes with zero
-  stiffness), keep it small: with the gc values it dominates, every mode is overdamped and an elbow
-  motion creeps back over seconds ([task space inertia](../../docs/dynamics/task_space_inertia.md)).
-  In `gc` mode it is the only damping.
+  stiffness), keep it small: with the gc values it would dominate, every mode would be overdamped
+  and an elbow motion would creep back over seconds
+  ([task space inertia](../../docs/dynamics/task_space_inertia.md)). In `gc` mode it is the only
+  damping.
 - **`max_spring_force` / `max_spring_moment`**: bound the force a wrong or jumping reference can
   produce. Keep the moment below the effort of the wrist joints.
 - **`joint_limit_zone`**: has to be longer than the braking distance of the joint at the expected
@@ -1623,7 +1625,7 @@ Tuning hints:
   limit $K_{q,ii} \cdot T$ (spring times loop delay). If a capped joint then rings, lower the
   stiffness, not the cap.
 
-Example (`robotarm_bringup/config/controllers.yaml`, values not tuned):
+Example (`robotarm_bringup/config/controllers.yaml`, validated on the arm):
 
 ```yaml
 cartesian_impedance_controller:
@@ -1631,13 +1633,14 @@ cartesian_impedance_controller:
     mode: "impedance"
     torque_scale: 1.0
     torque_rise_time: 0.003
-    joint_damping: [0.02, 0.1, 0.1, 0.05, 0.01, 0.001]
+    joint_damping: [0.02, 0.1, 0.1, 0.02, 0.01, 0.001]
     joint_limit_zone: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     joint_limit_push: 0.2
+    cartesian_stiffness_frame: "base"
     cartesian_linear_stiffness: [100.0, 100.0, 100.0]
-    cartesian_angular_stiffness: [3.0, 3.0, 3.0]
-    max_linear_stiffness: 500.0
-    max_angular_stiffness: 20.0
+    cartesian_angular_stiffness: [1.0, 1.0, 1.0]
+    max_linear_stiffness: 400.0
+    max_angular_stiffness: 5.0
     cartesian_damping_ratio: 0.5
     max_joint_damping: [0.8, 30.0, 20.0, 0.25, 0.15, 0.08]
     max_spring_force: 20.0
@@ -1992,7 +1995,8 @@ Properties:
 - **Zero stiffness** in a mode gives $k_0 = 0$ and no Cartesian damping there, `joint_damping`
   brakes it.
 - **Armature:** a too small model armature makes $\Lambda$ too light, the real $\zeta$ ends up lower
-  by an almost constant factor. A too large one costs almost nothing.
+  by an almost constant factor. A too large one costs almost nothing. The URDF `<armature>` values
+  are the real ones (validated on the arm), the same source as the MuJoCo plant.
 
 Cost: about 7 µs per cycle on a Ryzen 7 5800H, everything fixed size 6×6 on the stack, no
 allocation. The derivation step by step is in the
@@ -2166,8 +2170,7 @@ $$
 
 So with the damping capped, a softer spring in those directions gives back some damping ratio. If
 the wrist rings after a release, lower `cartesian_angular_stiffness` instead of raising the cap.
-Joint friction and the reflected rotor inertia (armature, 0 in the URDF) add real damping on top, so
-the wrist behaves better than this estimate.
+Joint friction adds real damping on top, so the wrist behaves better than this estimate.
 
 #### Choosing the values
 
@@ -2235,9 +2238,6 @@ a cycle or has a runtime size, everything Cartesian is a fixed size stack local.
 
 | Item | Status / notes |
 |---|---|
-| Gains not tuned | `cartesian_linear_stiffness`, `cartesian_angular_stiffness`, their limits, `cartesian_damping_ratio`, `joint_damping` and the spring limits are placeholders. `joint_damping` still has the gc values and dominates the Cartesian damping in `impedance` mode, reduce it when tuning. |
-| Damping ratio not validated | The tests check $\zeta$ on the model only. Open: release tests with `push_test` in the simulation in several poses, then on the hardware. |
-| Reflected rotor inertia | `robotarm_rbd` reads the URDF `<armature>` and adds it in the RNEA, so the inertia feedforward and $\Lambda$ use it. The URDF values are placeholders (0) until the robot changes are final, while the MuJoCo plant uses the `sim_params.yaml` estimates: until they match, the feedforward is too small and $\Lambda$ about 20–30 % too light, so the real $\zeta$ is lower than configured. Planned: one source for both. |
 | No inertia shaping | Needs a force/torque sensor or an observer, see [background E](#background-e-the-closed-loop). |
 | Friction | Not compensated, causes lag and a dead band ($e \approx F_{friction}/K$). |
 | Coriolis term | $C(q,\dot q)\dot q$ with the measured velocity instead of the PD+ term $C(q,\dot q)\dot q_d$, irrelevant at slow speeds. Switch to $\dot q_d$ if the velocity noise shows. |

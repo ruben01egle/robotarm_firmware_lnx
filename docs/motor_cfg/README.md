@@ -32,7 +32,15 @@ investigation in [docs/tuning](../tuning/).
 
 ## TODO
 
-No open items.
+- [ ] Test the `MakeBrake()` behavior on the arm. `MoteusInterface::on_error()` brakes
+  all drives (phases shorted) instead of stopping them. Check how far each axis sags
+  under gravity in brake mode (axis 2/3 with payload, worst pose) and how hard it stops
+  from full speed, compared to the current watchdog behavior (`timeout_mode` 12, zero
+  velocity clamped to `timeout_max_torque_Nm`).
+- [ ] Depending on the result, maybe set brake as the drive watchdog behavior
+  (`servo.timeout_mode 15`, brake in the firmware mode enum), so a dead host/transport
+  ends in the same state as `on_error()`. Update
+  [Torque and timeout limits](#torque-and-timeout-limits) and the dumps afterwards.
 
 Done on 2026-10-30:
 

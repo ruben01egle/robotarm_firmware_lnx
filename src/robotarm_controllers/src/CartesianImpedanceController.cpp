@@ -466,11 +466,8 @@ bool CartesianImpedanceController::compute_impedance_torque()
     const Eigen::Matrix<double, 6, 6> LV = L * V;
     const Eigen::Matrix<double, 6, 6> D = LV * d_w.asDiagonal() * LV.transpose();
 
-    // cap the damping each joint feels: diag(Jᵀ·D·J) + joint_damping <= max_joint_damping (see the README,
-    // "Background I"). The damper becomes S·Jᵀ·D·J·S with s_i = √(allowed_i / d_ii): a capped joint sits
-    // exactly at its cap, the matrix stays symmetric positive semidefinite (still dissipative), uncapped joints
-    // keep their damping and only lose their coupling to capped ones. dq and dq_ref are scaled alike, so following
-    // the reference exactly still gives no damping torque
+    // cap the damping each joint feels: diag(Jᵀ·D·J) + joint_damping <= max_joint_damping 
+    // The damper becomes S·Jᵀ·D·J·S with s_i = √(allowed_i / d_ii)
     auto & s = data_.tmp.damping_scale;
     s.setOnes();
     if (max_joint_damping_.size() > 0) {

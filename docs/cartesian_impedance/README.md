@@ -23,6 +23,7 @@ Conventions used throughout:
 - [6. Why no inertia shaping](#6-why-no-inertia-shaping)
 - [7. Accuracy and future extensions](#7-accuracy-and-future-extensions)
 - [8. Damping from a damping ratio](#8-damping-from-a-damping-ratio)
+- [9. Capping the joint damping](#9-capping-the-joint-damping)
 - [Open items](#open-items)
 
 ---
@@ -37,7 +38,7 @@ Conventions used throughout:
 | Reference | joint space `q_d`, `q̇_d`, `q̈_d` through controller chaining (JointStream, CartesianJog, later JTC/MoveIt) |
 | No upstream | NaN in a reference → hold the activation pose, NaN velocity/acceleration → 0 |
 | Feedforward | `RNEA(q, q̇, q̈_d)`, measured `q̇` for Coriolis, fall back to `q̇_d` if the noise is too much |
-| Damping | on the velocity error `ẋ − ẋ_d`, never on `ẋ` alone. `D(q)` from one damping ratio `ζ`, the same in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)) |
+| Damping | on the velocity error `ẋ − ẋ_d`, never on `ẋ` alone. `D(q)` from one damping ratio `ζ`, the same in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)), the damping each joint feels capped per joint ([section 9](#9-capping-the-joint-damping)) |
 | Safety | NaN check, torque rate limit (`torque_rise_time`), torque clamp, later error saturation and joint limit protection |
 
 ---
@@ -299,7 +300,7 @@ Assuming a correct model, option A gives:
 |---|---|
 | static stiffness: `K·e = F_ext` in every pose | apparent mass: `Λ(q)` instead of a designed `Λ_d`, pose dependent, anisotropic, coupled |
 | stiffness and damping **force** laws as designed | natural frequency `ω_n` varies with pose and direction |
-| damping ratio `ζ` in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)) | `ζ` only as good as `Λ`: armature still 0 in the URDF |
+| damping ratio `ζ` in every mode and pose ([section 8](#8-damping-from-a-damping-ratio)) | `ζ` lower than configured where a joint damping cap acts ([section 9](#9-capping-the-joint-damping)) |
 | no tracking lag from the damper (velocity error) | return paths curve (`Λ` coupling, `J̇·q̇`, `C·q̇`) |
 | stable and passive, also in contact | contact impact is set by `Λ`, not shaped |
 | no blow up at singularities (`Jᵀ`, no inverse) | spring has no effect in a singular direction, null space motion only damped by `D_j` |
@@ -310,7 +311,6 @@ What the model itself gets wrong, and shows up as a static error `e ≈ F_unmode
 |---|---|
 | joint friction (gears, belts) | tracking lag and a dead band around the target, usually the largest error |
 | mass / CoM error | static gravity offset, can act as negative stiffness in some poses |
-| reflected rotor inertia (`armature`) still 0 in the URDF (placeholder) | inertia feedforward too small (axis2 ~21% of `M`, see [docs/dynamics](../dynamics/README.md)), `Λ` ~20–30% too light, so the real `ζ` is lower than configured |
 | Coriolis from one RNEA call | `C(q,q̇)·q̇` instead of the PD+ term `C(q,q̇)·q̇_d`, irrelevant at slow speeds |
 | velocity noise | amplified by `D` (and quadratically by the Coriolis term), limits how large `D` can be |
 | log map past 180° | spring flips direction, limited by error saturation |
@@ -321,10 +321,9 @@ Roughly ordered by effort and benefit.
 
 | Extension | What it fixes | Needs | Caveats |
 |---|---|---|---|
-| **armature values** | inertia feedforward and `Λ` for the damping | rbd side done (`<armature>` per joint, `τ_i += armature_i·q̈_i` in the RNEA). MuJoCo reads them from the URDF too. Open: real values in `ORT.yaml` (placeholders 0, waiting for the robot changes to be final) | rotor inertia values are estimates, too high costs almost nothing, too low lowers `ζ` |
 | **friction compensation** | lag and dead band from friction | friction model per joint (Coulomb + viscous), identified on the robot | overcompensation adds energy, keep it below the real friction |
-| **stiffness in the tool frame** | intuitive rotation stiffness ("soft about the tool axis") | `K_base = R₆·K_tool·R₆ᵀ` per cycle (`R₆ = diag(R, R)`), the spring as a matrix product. The damping already handles a non diagonal `K` | switching the frame with an existing error changes the force direction, blend it |
-| **stiffness changes at runtime** | new `K` (or frame) without deactivating, which restarts the ramp and drops the upstream | a service (stiffnesses, `ζ`, frame, transition time), handed to `update()` through a `RealtimeThreadSafeBox` | `ΔK·e` steps the spring force: blend old to new over the transition time, apply a request as one set, reject in `gc` mode. The damping follows `K` on its own |
+| ~~stiffness in the tool frame~~ **done** (`cartesian_stiffness_frame`) | intuitive rotation stiffness ("soft about the tool axis") | `K_base = R₆·K_tool·R₆ᵀ` per cycle (`R₆ = diag(R, R)`), the spring as a matrix product. The damping already handles a non diagonal `K` | switching the frame with an existing error changes the force direction, blend it |
+| ~~stiffness changes at runtime~~ **done** as parameters, open: blending | new `K` (or frame) without deactivating, which restarts the ramp and drops the upstream | a service (stiffnesses, `ζ`, frame, transition time), handed to `update()` through a `RealtimeThreadSafeBox` | `ΔK·e` steps the spring force: blend old to new over the transition time, apply a request as one set, reject in `gc` mode. The damping follows `K` on its own |
 | **momentum observer** | estimate of `F_ext` without a sensor, also usable for collision detection | measured joint torques (`state.tau`), `M`, `C`, `g` | lag (limited bandwidth), friction shows up as phantom forces |
 | **inertia shaping without sensor** | designed apparent mass | observer estimate of `F_ext` | only **increasing** the mass is safe. Reducing it with a lagging estimate injects energy, passivity is lost |
 | **inertia shaping with an F/T sensor** | designed, pose independent, decoupled apparent mass: straight return paths, same feel everywhere | wrist F/T sensor, `Λ`, `J̇·q̇` | sensor noise and delay, sensor sees only forces beyond the wrist, full passivity needs care when reducing the mass |
@@ -464,17 +463,145 @@ gives `k0 = 0` and no Cartesian damping in that mode, `D_j` brakes it.
 
 ---
 
+## 9. Capping the joint damping
+
+Section 8 designs the damper for the **TCP**. The motors feel it in joint space. With the reference at rest:
+
+```
+τ = Jᵀ·F_damper = −Jᵀ·D·J·q̇        →   D_q = Jᵀ·D·J   (n×n)
+```
+
+`D_q,ii = j_iᵀ·D·j_i` is how strongly joint `i` is braked by its own velocity, `D_q,ij` how strongly the velocity of
+joint `j` drives torque on joint `i`. Neither is set directly, both follow from `K`, `ζ`, `Λ(q)` and `J(q)`. Because
+the TCP sits away from the wrist center, the **linear** stiffness lands on the wrist joints too: the column `j_i` of
+a wrist joint has a translational part, lever arm times rotation.
+
+### Why more damping can be unstable
+
+The passivity proof of section 5 holds for any positive semidefinite `D`, in continuous time with a rigid arm. The
+real loop is neither:
+
+- **delay** `T ≈ 5–6 ms`: 500 Hz cycle, pipelined CAN round trip, encoder PLL filter, current loop
+- **elastic transmission**: axis1 and the wrist are belt driven and the velocity is measured on the motor side.
+  Above the belt resonance the link no longer follows, the motor only sees its rotor and pulley, `J_eff ≪ M_ii`
+
+One joint, a damper `d` on `J_eff`, delayed by `T`:
+
+```
+loop gain   L(s) = d / (J_eff·s) · e^(−s·T)
+|L| = 1  at ω_c = d / J_eff
+phase    = −90° − ω_c·T
+unstable when ω_c·T > π/2    ⟺    d > d_max = π·J_eff / (2·T)
+```
+
+and it oscillates at about `ω_c`. Light joint plus long delay means little damping is allowed.
+
+> **Aha: a damper is only a damper while the torque opposes the velocity.**
+> The delay turns the torque against the velocity by `ω·T`. Past 90° it pushes **along** the motion and pumps energy
+> in. Measured on axis1 at 85 Hz: torque and velocity only 10–15° apart. More `D` raises `ω_c`, which adds phase lag,
+> so turning the damping up makes it worse, not better.
+
+> **Aha: above the belt resonance the motor carries only itself.**
+> Fitted from the oscillation frequencies (measured 2026-10-30):
+>
+> | | frequency | `T` | `J_eff` | rigid `M_ii` | `d_max` |
+> |---|---|---|---|---|---|
+> | axis1 | 85 Hz | 5.6 ms | ≈ 0.004 | ≈ 0.17 | ≈ 1.0 |
+> | axis4 | 45.6 Hz | 5.5 ms | ≈ 0.0012 | ≈ 0.009 | ≈ 0.3 |
+> | axis5 | 39 Hz | 6.4 ms | ≈ 0.0008 | ≈ 0.0055 | ≈ 0.2 |
+>
+> 1/7 of the rigid inertia on the wrist, 1/40 on axis1, close to rotor inertia × (1:6 belt)². The rigid MuJoCo model
+> can't reproduce it, there the loop only goes unstable at ~10 ms. Axis2 and 3 (no belt, heavy) carry 9 and
+> 3 Nm·s/rad without problems.
+
+### The lower limit
+
+The spring acts with the same delay:
+
+```
+−K·x(t − T) ≈ −K·x + K·T·ẋ          a delayed spring = spring + negative damping K·T
+```
+
+A joint whose own damping is below `K_q,ii·T` (`K_q = Jᵀ·K·J`) winds itself up at its spring frequency (a few Hz).
+So every joint has a window:
+
+```
+K_q,ii·T  <  d_ii  <  π·J_eff,i / (2·T)
+```
+
+Axis5 at 300 N/m, 3 Nm/rad: `K_q,55 ≈ 9.6` → lower limit ≈ 0.06. Axis1 stretched out: `K_q,11 ≈ 45–70` → 0.3–0.4,
+against an upper limit of 1.0. A stiffer spring narrows the window from below, a longer delay from both sides.
+
+> **Aha: capping too hard fails the other way.**
+> A variant of the cap that also counted the couplings pushed the wrist's own damping to 0.01–0.03, below the lower
+> limit, and the wrist oscillated at 5–6 Hz. It was dropped.
+
+### Why per joint and not a smaller `ζ`
+
+`ζ` and `K` are global. Lowering them until the wrist is stable takes the damping away from every TCP direction,
+also from the ones carried by axis2 and 3, which are far from their limit. A cap per joint only acts on the joint that
+exceeds its limit, in the poses where it does.
+
+### The scaling
+
+Per joint the Cartesian part of its own damping, and how much is left after `D_j`:
+
+```
+d_ii = j_iᵀ·D·j_i          a_i = d_max,i − D_j,ii          s_i = 1             if d_ii ≤ a_i
+                                                           s_i = √(a_i/d_ii)   otherwise
+D_q' = S·Jᵀ·D·J·S,   S = diag(s)    →   D'_q,ij = s_i·s_j·D_q,ij
+```
+
+The capped diagonal lands exactly on the cap (`s_i²·d_ii = a_i`), uncapped diagonals stay, couplings to a capped
+joint shrink by `s_i`. The square root is there because `s_i` acts twice: on the velocity going into the damper and on
+the torque coming out. In code:
+
+```
+ė' = J·(s∘q̇) − J_d·(s∘q̇_d)          velocities in, scaled
+τ  = Jᵀ·F_spring + s∘(Jᵀ·(−D·ė'))     torques out, scaled again, the spring untouched
+```
+
+> **Aha: scale both sides, never clip the torque.**
+> `S·D_q·S` is a congruence transform, symmetric and positive semidefinite like `D_q`, so section 5 still holds with
+> `dV/dt = −(S·q̇)ᵀ·D_q·(S·q̇) − q̇ᵀ·D_j·q̇ ≤ 0`. Scaling only the output torque gives `S·D_q`, which is not
+> symmetric and can inject energy: `D_q = [[1, 0.9], [0.9, 1]]`, `S = diag(1, 0.01)` → symmetric part
+> `[[1, 0.45], [0.45, 0.01]]`, determinant < 0, indefinite. Clipping a joint torque does the same, pose dependent.
+
+> **Aha: `q̇_d` has to be scaled too.**
+> Scaling only `q̇` would leave `−D·J_d·q̇_d` as a feedforward the scaled feedback no longer cancels: following the
+> reference exactly would produce a damping torque, and a chained jog would be braked. Scaling both keeps
+> `ė' = 0` for perfect tracking.
+
+`s_i` is continuous in `q` and `K` (`d_ii` is), so neither a pose nor a runtime stiffness change crossing the cap
+makes the torque jump. `s_i ≤ 1` only removes damping, so it stays bounded through singularities like the unscaled
+damper.
+
+### What it costs
+
+In TCP directions mostly made by a capped joint (orientation, small motions through the wrist) the damping drops
+below what `ζ` asks for. A capped joint on its own, with the spring `k_i = (Jᵀ·K·J)_ii` it feels and its inertia `m_i`:
+
+```
+ζ_i ≈ d_max,i / (2·√(k_i·m_i))
+```
+
+So with the damping capped, a **softer** spring gives the damping ratio back. If the wrist rings after a release,
+lower the angular stiffness, not raise the cap. Joint friction adds real damping on top.
+
+The limits are properties of the loop, not of the model: measured on the arm by raising the stiffness until a joint
+oscillates, then reading `D_q,ii` from the model at the logged pose. They scale with the delay, a faster loop raises
+them, more filtering or a torque rate limit inside the loop lowers them. A cleaner fix is the joint damping in the
+drives (moteus `kd`, no host delay), with only the couplings left on the host.
+
+---
+
 ## Open items
 
 Done and documented in the [controller README](../../src/robotarm_controllers/README.md#cartesianimpedancecontroller):
 mapping to the code (explicit `Jᵀ`, norm clamped spring, NaN references), joint limit protection, damping from a
-damping ratio.
+damping ratio, joint damping cap, stiffness frame and stiffness changes at runtime. Armature, `K`, `ζ` and
+`joint_damping` are validated on the real robot.
 
-1. **Armature:** real values in the URDF once the robot changes are final, one source for the controller and the
-   simulation
-2. **Validation of the damping:** release tests with `push_test` in several poses in the simulation (the measured `ζ`
-   should match everywhere), then on the hardware
-3. **Tuning:** `K`, `ζ`, `joint_damping` (still the gc values, too large for impedance mode), check the
-   `torque_rise_time` is never active in normal use
-4. **Later:** see [future extensions](#future-extensions), next in line are the tool frame and stiffness changes at
-   runtime
+1. **Joint damping cap:** measure the limits again when the loop delay or the drive filters change, consider moving
+   the joint damping into the drives (`kd`)
+2. **Later:** see [future extensions](#future-extensions), next in line is friction compensation
