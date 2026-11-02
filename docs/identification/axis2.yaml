@@ -1,4 +1,5 @@
-# Axis2 (LA8308, 20 pole pairs, 1:30): ripple vs. speed, load and direction, friction. ~35 min.
+# Axis2 (LA8308, 20 pole pairs, 1:30): ripple vs. speed, load and direction, friction, output position map.
+# ~38 min.
 # The grid is dense around 4 Hz for both orders: order 20 at f20 = 3 .. 5 Hz, order 40 at f20 = 1.5 .. 2.5 Hz.
 # The load varies a lot along each stroke, but within one pose it is tied to the axis position. Two poses over the
 # same q2 range (-1.2 .. -0.57) at different loads separate load effects from position effects. Plus one pose
@@ -11,6 +12,9 @@ poses:
   low:  [0.0, -1.2, -1.5, 0.0, 0.0, 0.0]    # load -9.2 .. -0.7 Nm, forearm points up and back
   high: [0.0, -1.2, 0.75, 0.0, 0.0, 0.0]    # load -16.3 .. -9.0 Nm, forearm about horizontal
   sign: [0.0, -1.9, 0.0, 0.0, 0.0, 0.0]     # load +6.3 .. -5.1 Nm, arm straight, leaning back past vertical
+  # full range sweeps (output position map), start at the lower end of the range
+  range_folded:   [0.0, -2.69, -1.5, 0.0, 0.0, 0.0]   # load -14.6 .. +14.5 Nm over the range
+  range_straight: [0.0, -2.69, 0.0, 0.0, 0.0, 0.0]    # load -18.5 .. +16.8 Nm, arm points far back at the start
 
 defaults:
   axis: axis2
@@ -45,3 +49,14 @@ sweeps:
     pose: high
   - name: sign
     pose: sign
+  # output position map: the whole range (limits minus 0.1 rad) at one speed, f20 = 12 Hz is above the
+  # resonance. Covers the intermediate shaft (6 turns per output turn) and anything tied to the output angle.
+  # Two poses with different loads at the same position separate position from load effects.
+  - name: range_folded
+    pose: range_folded
+    stroke: 2.94            # -2.69 .. +0.25
+    speeds: [0.1257]
+  - name: range_straight
+    pose: range_straight
+    stroke: 2.94
+    speeds: [0.1257]

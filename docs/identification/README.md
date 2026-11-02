@@ -35,12 +35,21 @@ ros2 run robotarm_tools motion_runner docs/identification/axis2.yaml -o ~/identi
   pose it is tied to the axis position. A second pose over the same range at a different load separates load
   effects from position effects. Loads are from the URDF gravity model. On axis 2, one more pose crosses the torque
   sign change within the stroke.
+- **Output position map**: the strokes above cover only part of each joint's range (axis 2: 36°), not enough
+  for effects tied to the output angle, e.g. the intermediate shaft of axis 2 (6 turns per output turn) or a
+  spot like the vibration of axis 3 around q3 = 0. Every config ends with a `range` sweep over the whole joint
+  range minus 0.1 rad (~6°) at one speed, f20 = 12 Hz (above the resonance, the rotor ripple stays small
+  and sits at a far higher order). Axes 2 and 3 get two poses with different loads at the same position. On axis
+  3 they shift the torque sign change from q3 ≈ 0 to q3 ≈ −0.87: an effect at a fixed q3 is position, one that
+  moves with the sign change is load (belt slack, backlash). The upper end of axis 3 stops at +2.05, above about
+  +2.15 the forearm comes within 2 cm of the upper arm.
 - **No power cycle repetition**: the old logs `docs/tuning/slow_loaded*.csv` (3 boots) show the same order 20
   amplitude within a few percent. With the rotor angle now recorded, the phase of runs from different
   sessions can be compared directly.
 - **Collisions**: every approach move (joints unsynchronized at `approach_speed`) and every stroke was checked
   against the URDF collision meshes with a 2 cm margin, against each other and the ground plane. Nothing else
-  (table edges, cables, the surroundings) is checked: axis 1 sweeps the arm through a half circle.
+  (table edges, cables, the surroundings) is checked. Watch out for: axis 1 `range` turns the arm almost a full
+  circle (±169°), axis 2 `range_straight` starts with the straight arm pointing far back (q2 = −2.69).
 - **Checked in the MuJoCo sim**: all configs run through without timeouts, segments and stamps are consistent.
   The sim says nothing about ripple or friction.
 

@@ -8,6 +8,9 @@ description: axis3 ripple and friction identification, 2 load levels
 poses:
   upright: [0.0, -1.57, -1.2, 0.0, 0.0, 0.0]   # load +4.4 .. -1.7 Nm
   forward: [0.0, -0.8, -1.2, 0.0, 0.0, 0.0]    # load +2.3 .. -4.2 Nm
+  # full range sweeps (output position map), start at the lower end of the range
+  range_upright: [0.0, -1.57, -1.99, 0.0, 0.0, 0.0]  # load sign change at q3 ~ 0 (forearm vertical)
+  range_forward: [0.0, -0.7, -1.99, 0.0, 0.0, 0.0]   # load sign change at q3 ~ -0.87
 
 defaults:
   axis: axis3
@@ -33,3 +36,14 @@ sweeps:
     pose: upright
   - name: forward
     pose: forward
+  # output position map: -1.99 .. +2.05 (lower limit minus 0.1 rad; above about +2.15 the forearm comes within
+  # 2 cm of the upper arm), one speed, f20 = 12 Hz. The two poses move the torque sign change by 0.87 rad: an
+  # effect at a fixed q3 is position, one that moves with the sign change is load (belt slack, backlash).
+  - name: range_upright
+    pose: range_upright
+    stroke: 4.04
+    speeds: [0.3291]
+  - name: range_forward
+    pose: range_forward
+    stroke: 4.04
+    speeds: [0.3291]

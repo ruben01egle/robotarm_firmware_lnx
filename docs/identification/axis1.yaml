@@ -9,6 +9,7 @@ poses:
   tucked:   [-1.57, -1.57, 1.8, 0.0, 0.0, 0.0]   # forearm folded down, tcp radius ~0.42 m (q3 2.2 comes
                                                  # within 2 cm of the upper arm)
   extended: [-1.57, -0.6, 0.5, 0.0, 0.0, 0.0]    # arm reaching forward, tcp radius ~0.67 m
+  range:    [-2.95, -1.57, 1.8, 0.0, 0.0, 0.0]   # tucked, at the lower end of the range
 
 defaults:
   axis: axis1
@@ -30,3 +31,8 @@ sweeps:
     pose: tucked
   - name: extended
     pose: extended
+  # output position map: -2.95 .. +2.95 (limits minus 0.1 rad), almost a full turn of the arm, f20 = 12 Hz
+  - name: range
+    pose: range
+    stroke: 5.9
+    speeds: [0.6283]
