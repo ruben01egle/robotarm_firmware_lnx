@@ -506,7 +506,7 @@ hardware_interface::return_type MoteusInterface::read(const rclcpp::Time &/*time
 
     // STRICT_SEQUENTIAL while active: a full transport_->cycle() (write + blocking read)
     // was called prior and populated replies_frames_
-    // PIPELINED while active: write() fire and forget, collect replies here 
+    // PIPELINED while active: collect replies from previous cycle and dispatch new commands here 
     if (execution_mode_ == ExecutionMode::PIPELINED) {
         // first ever call expects at least one previous transport::write or transport::cycle call
         // small timeout to tolerate overrun instead of crashing over small latency
