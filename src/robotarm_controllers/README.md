@@ -9,6 +9,7 @@
 | `robotarm_controllers/JointStreamController` | `joint_stream_controller::JointStreamController` | Jerk limited joint space following of streamed position targets (e.g. teleoperation) |
 | `robotarm_controllers/CartesianImpedanceController` | `cartesian_impedance_controller::CartesianImpedanceController` | Gravity compensation (`gc`) or Cartesian impedance (`impedance`) on the joint torques, chainable |
 | `robotarm_controllers/FeedforwardController` | `feedforward_controller::FeedforwardController` | Passes a joint space reference to the moteus position loops and adds the inverse dynamics as `torque_ff`, chainable |
+| `robotarm_controllers/HoldController` | `hold_controller::HoldController` | Holds the activation pose as reference of a downstream controller, chained only |
 
 The jog and the joint stream controller claim `position` + `velocity` command interfaces of all
 joints, so only one of them can drive the hardware at a time. With the `chain_to` parameter they
@@ -66,6 +67,7 @@ The hardware rejects `effort` together with `position`/`velocity`/`torque_ff` on
   - [Realtime considerations](#realtime-considerations-2)
   - [Known limitations and roadmap](#known-limitations-and-roadmap-2)
 - [FeedforwardController](#feedforwardcontroller)
+- [HoldController](#holdcontroller)
 
 ---
 
@@ -102,6 +104,11 @@ damping stays bounded and continuous through the wrist singularity, the spring w
 its norms, no torque pushes into a joint limit), the post-processing
 (rate limit, effort clamp, start ramp), stale references after reactivation and the parameter
 validation. Shared helpers (URDF, log handlers) are in `test/test_helpers.hpp`.
+
+`test_feedforward` and `test_hold` use the same setup for the
+[FeedforwardController](#feedforwardcontroller) and the [HoldController](#holdcontroller): no
+allocation in `update()`, the feedforward equals the inverse dynamics of the reference, NaN
+handling, both ramp starts, rate limit and clamp, and holding and re-latching the activation pose.
 
 ---
 
@@ -2275,7 +2282,7 @@ and no sensor noise.
 | Type | Name | Notes |
 |---|---|---|
 | Command interfaces | `<joint>/position`, `<joint>/velocity`, `<joint>/torque_ff` | position/velocity group of `moteus_interface` (PVC mode) |
-| State interfaces | `<joint>/position` | only for the hold pose on activation |
+| State interfaces | `<joint>/position`, `<joint>/effort` | only read on activation: the position for the hold pose, the effort for `ramp_start: "measured"` |
 | Reference interfaces (exported) | `<name>/<joint>/position`, `/velocity`, `/acceleration` | same layout as the impedance controller, e.g. `ff_controller/axis1/position` |
 
 There is no standalone input (no topics, no services). Upstream controllers:
@@ -2294,11 +2301,20 @@ one (on activation the measured pose), a NaN velocity or acceleration counts as 
 upstream the controller holds the activation pose with the moteus position loop plus gravity
 feedforward.
 
-**Post-processing**, in this order: start ramp (from 0 to the full feedforward over 1 s, hard-coded),
-rate limit (`torque_rise_time`), clamp to `torque_scale` × URDF effort. The ramp starts at 0 and
-not at the measured effort, because the moteus PID is still active and already holds the load; the
-ramp hands the load over while its integrator unwinds. `moteus_interface` clamps `torque_ff` to the
-URDF effort a second time.
+**Post-processing**, in this order: start ramp (from the start torque to the full feedforward over
+1 s, hard-coded), rate limit (`torque_rise_time`, starting from the start torque), clamp to
+`torque_scale` × URDF effort. `moteus_interface` clamps `torque_ff` to the URDF effort a second time.
+
+The start torque is selected with `ramp_start`, read on every activation:
+
+- `"zero"`: coming from a position controlled mode. The moteus PID is still active and already
+  holds the load; the ramp hands the load over while its integrator unwinds.
+- `"measured"`: coming from an effort mode (gc, impedance). There the drive integrators are held at 0
+  (`ilimit_scale` 0), the measured joint torque is all that holds the arm, so the ramp continues
+  from it. Activation fails if the measured torque is not finite.
+
+The `mode_manager` in `robotarm_bringup` sets `ramp_start` before every activation, see
+[docs/controller_switching](../../docs/controller_switching/README.md).
 
 ### Parameters
 
@@ -2306,6 +2322,7 @@ URDF effort a second time.
 |---|---|---|---|---|
 | `torque_scale` | `1.0` | – | (0, 1] | Fraction of the URDF effort limits the feedforward is clamped to |
 | `torque_rise_time` | `0.0` | s | ≥ 0, 0 disables | Minimum time from 0 to the effort limit, limits the torque rate per joint |
+| `ramp_start` | `"zero"` | – | `"zero"` or `"measured"` | Start torque of the 1 s start ramp, read on every activation (not only in `on_configure`), see above |
 
 ### Switching
 
@@ -2315,7 +2332,8 @@ request. The restart resets the feedforward to 0 and `moteus_interface` resets `
 new claim, so axis 2 briefly sags until the ramp and the moteus integrator catch up. Therefore:
 
 - activate and deactivate `ff_controller` together with its upstream, in one request,
-- change the upstream (e.g. stream → jog) in one request, `ff_controller` stays active and chained.
+- change the upstream (e.g. stream → jog) in one request, `ff_controller` stays active and chained,
+- while no motion controller is active, keep the [HoldController](#holdcontroller) as its upstream.
 
 The client side rules are in [docs/controller_switching](../../docs/controller_switching/README.md).
 
@@ -2325,6 +2343,40 @@ The client side rules are in [docs/controller_switching](../../docs/controller_s
 |---|---|
 | Friction | Not compensated. A Coulomb + viscous term ($F_c \tanh(\dot q_d / v_0) + b\,\dot q_d$) is the next step against stick-slip at low speed |
 | Simulation | The MuJoCo hardware has no `torque_ff` interface, so `ff_controller` and every upstream chained to it can't be activated in the sim. Open: add `torque_ff` to `robotarm_mujoco_hardware` |
-| Tests | No unit test yet (gravity at rest, pass-through of $q$/$\dot q$, NaN handling, ramp, no allocation in `update`) |
+| ~~Tests~~ | **Done.** `test_feedforward`, see [building and testing](#building-and-testing). |
 | Gains | The moteus `kp`/`ki`/`kd` in `docs/motor_cfg` were tuned without feedforward and still have to be lowered |
 | Start ramp | 1 s, hard-coded |
+
+---
+
+## HoldController
+
+A minimal chained upstream that holds the pose measured at its activation. `robotarm_bringup` runs
+it as `hold_controller`, chained to `ff_controller`: in `ARMED`, and between position controlled
+modes, it keeps `ff_controller` active and chained, so `ff_controller` is never restarted (which
+would ramp the feedforward in from 0 again, see [switching](#switching)).
+
+### Usage
+
+| Type | Name | Notes |
+|---|---|---|
+| Command interfaces | `<chain_to>/<joint>/position`, `/velocity`, `/acceleration` | the reference interfaces of the downstream controller, interleaved per joint |
+| State interfaces | `<joint>/position` | only read on activation |
+
+No topics, no services. It cannot drive the hardware directly.
+
+| Parameter | Default | Constraint | Meaning |
+|---|---|---|---|
+| `joints` | `[]` | not empty | Joint names, in the order of the downstream's reference interfaces |
+| `chain_to` | `""` | not empty | Name of the downstream controller, e.g. `ff_controller` |
+
+Both are read in `on_configure`.
+
+| Transition | What happens |
+|---|---|
+| `on_activate` | Latches the measured joint positions. Fails if one is missing or not finite, rather than commanding garbage. |
+| `update` | Writes the latched position, velocity 0 and acceleration 0 every cycle, so the downstream never sees a reference left behind by a previous upstream. |
+| `on_deactivate` | Nothing. |
+
+Activate it together with `ff_controller` (or in the same request that deactivates the previous
+upstream), so `ff_controller` never runs without an upstream.

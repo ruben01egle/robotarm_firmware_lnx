@@ -52,11 +52,11 @@ public:
     virtual void joint_to_actuator() = 0;
 
     // Read-only check: may this transmission's owned joints move
-    // to the mode combination currently staged on their ModeFlags
+    // to the interface combination currently staged on their ActiveInterfaces
     // by updating the actuators accordingly
     virtual bool validate_mode_switch() const = 0;
-    // Commit: propagate the (already-validated) joint-space mode onto the
-    // actuator-space ModeFlags this transmission owns and return if the actuator changed modes
+    // Commit: propagate the (already-validated) joint-space CommandMode onto the
+    // actuator-space CommandMode this transmission owns and return if the actuator changed modes
     virtual bool perform_mode_switch() = 0;
 
     // One-shot startup calculation: reads the raw, uncorrected absolute encoder reading(s)

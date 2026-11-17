@@ -51,6 +51,7 @@ Treat this as a working reference implementation to build on or adapt, not a pol
 - `torque_ff` is clamped to the joint's URDF effort limit by the interface itself, since the controller_manager's joint limiter doesn't know about custom interfaces.
 - A software communication watchdog per actuator (consecutive-failure counter + exponential moving-average failure rate) that catches missed/degraded replies at the ros2_control level.
 - Optional per-cycle transport timing instrumentation (`TransportTiming`) that can be dumped to CSV for offline latency analysis.
+- Optional per-actuator diagnostic state interfaces (`hw_diagnostics`): rotor angle and the drive's position loop terms, e.g. for system identification.
 - A one-time, non-standard startup routine that reads a secondary/output encoder register and uses it to directly set the moteus internal absolute position estimate (`MakeOutputExact`), bypassing the standard moteus homing flow — see [Non-standard secondary-encoder homing](#non-standard-secondary-encoder-homing).
 - Custom, from-scratch USB transport (`TransportUSB`) built specifically for the official mjbots fdcanusb adapter, designed for more deterministic, real-time-friendly cyclic operation than the stock moteus transport — see [Custom Transport Layer](#custom-transport-layer-experimental).
 
@@ -166,6 +167,7 @@ moteus_hardware_system:
     execution_mode: "pipelined"       # "pipelined" or "strict_sequential"
     timeout_transport_us: 1000
     time_transport: false
+    hw_diagnostics: false
 
     transport:
       usb_device: "/dev/fdcanusb"
@@ -224,10 +226,11 @@ Read in `on_init()` from each `<transmission>`'s parameters, one per `<actuator>
 
 Only relevant for a `differential` transmission, where either joint's dedicated encoder could physically be wired to either actuator's board and the mapping can't be derived structurally. An `identity` transmission has exactly one joint and one actuator, so there's nothing to disambiguate and no param is needed. Read in `on_init()` from the `<transmission>`'s own parameters (not from either `<joint>`); the hardware component fails to initialize if either is missing on a `differential` transmission, or if together they don't name that transmission's two actuators one each.
 
-### Node ROS parameters (declared in `on_configure()`)
+### Node ROS parameters (declared in `on_init()` / `on_configure()`)
 
 | Name | Type | Default | Required | Meaning |
 |---|---|---|:---:|---|
+| `hw_diagnostics` | bool | `false` | No | Read in `on_init()`, because state interfaces are exported before `on_configure()`. Adds the [diagnostic state interfaces](#diagnostic-state-interfaces-hw_diagnostics) per actuator and extends the cyclic query by the registers they need. Changing it requires reloading the hardware component. |
 | `execution_mode` | string | `"auto"` | No | `"auto"` or `"strict_sequential"` selects blocking write-then-read-per-cycle behavior. `"pipelined"` selects fire-and-forget writes with replies collected on the following cycle. Any other value fails configuration. |
 | `time_transport` | bool | `false` | No | Enables `TransportTiming` instrumentation on `on_activate()`; a CSV timing log is written on `on_deactivate()`. |
 | `timeout_transport_us` | uint32 | `0` | Conditionally | Read/cycle timeout budget in microseconds. **Must be explicitly set to a non-zero value when `execution_mode` is `strict_sequential`** (configuration fails otherwise). In `pipelined` mode it may be left at `0`, but the code logs a warning that this can be problematic depending on the transport. |
@@ -238,7 +241,21 @@ Only relevant for a `differential` transmission, where either joint's dedicated 
 |---|---|---|:---:|---|
 | `transport.usb_device` | string | `"/dev/fdcanusb"` | No | Path to the serial device backing the fdcanusb-protocol USB-CAN adapter. |
 
-> Only `can_id`, `encoder_offset`, the URDF joint effort limit, and (for `differential` transmissions) `joint1_encoder_actuator`/`joint2_encoder_actuator` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
+### Diagnostic state interfaces (`hw_diagnostics`)
+
+With `hw_diagnostics: true`, every **actuator** (not joint) exports five extra state interfaces, prefixed with the actuator name from the `<transmission>` (e.g. `axis2_motor/rotor_position`):
+
+| Interface | Unit | Source register | Meaning |
+|---|---|---|---|
+| `rotor_position` | rad | `kEncoder0Position` | Rotor angle within one rotor revolution (primary encoder) |
+| `pid_p` | Nm | `kPositionKp` | Proportional term of the drive's position loop |
+| `pid_i` | Nm | `kPositionKi` | Integral term |
+| `pid_d` | Nm | `kPositionKd` | Derivative term |
+| `torque_ff` | Nm | `kPositionFeedforward` | Feedforward torque as received by the drive |
+
+They are read as `int16` extra registers on every cycle's query (in ascending register order, which the moteus library requires) and are `NaN` if a register is missing from a reply. They are not part of the URDF, so `JointState` ignores them; they only show up in `dynamic_joint_states` of a broadcaster without an interface filter. The extra registers make every reply frame larger, so leave this off in normal operation.
+
+> Only `can_id`, `encoder_offset`, the URDF joint effort limit, and (for `differential` transmissions) `joint1_encoder_actuator`/`joint2_encoder_actuator` are verified as strictly required — everything else has a code-level default. All defaults above are taken directly from `MoteusInterface::on_init()` (`hw_diagnostics`), `MoteusInterface::read_ros_parameters()` and `TransportUSB::declare_and_read_parameters()`.
 
 ## Behavior / How It Works
 
@@ -248,10 +265,10 @@ On `on_configure()`, the interface:
 
 1. Reads the ROS parameters above and instantiates `TransportUSB`, then calls its `declare_and_read_parameters()` and `initialize()` (which opens and configures the serial device: raw/non-canonical mode, low-latency ASYNC flag, no flow control).
 2. Builds fixed wire formats: commands are sent as `position`/`velocity`/`feedforward_torque` floats (everything else on the command side — kp/kd scale, torque/velocity/accel limits, voltage/current overrides, position bounds — is left at the controller's own defaults and not overridden per cycle; the velocity/accel defaults must be `nan`, see [Required drive configuration](#required-drive-configuration)). Query replies are read back as `int16` position/velocity/torque plus an `int8` fault code; everything else is ignored, except one extra register added specifically for the startup homing step: `kEncoder1Position` (secondary/output encoder), read as a float.
-3. Sends an initial `MakeStop()` to every joint (with the extra encoder register attached) via a blocking `cycle()` (10 ms timeout) to get a first telemetry snapshot, then runs the watchdog in **strict** mode — any joint that doesn't answer or that reports a fault aborts configuration.
+3. Sends an initial `MakeStop()` to every joint (with the extra encoder register attached) to get a first telemetry snapshot, then runs the watchdog in **strict** mode — any joint that doesn't answer aborts configuration. The startup frames go out **one at a time**, each in its own blocking `cycle()` (10 ms timeout): with all frames batched, the first cycle after opening the port regularly lost replies (suspected fdcanusb overload).
 4. For each actuator, reads back its raw `kEncoder1Position` extra register value and stages it; once every actuator has a value staged, each transmission's `home()` picks out the raw reading(s) belonging to its own joint(s), offset-corrects them (`remainder(encoder_value - encoder_offset/2π, 1.0)`) and combines them into actuator-space command(s), and `MakeOutputExact` is issued per actuator to directly overwrite that moteus controller's internal absolute output position — this is the non-standard homing step described in detail below.
-5. Cycles those `OutputExact` commands (10 ms timeout), re-checks the watchdog in strict mode.
-6. Sends a final `MakeStop()` to every joint before returning success, so the hardware is guaranteed to be in a safe, stopped state before the first `read()`/`write()` call from the controller manager. In `pipelined` mode this is a fire-and-forget write followed by a 5 ms sleep (to make sure a reply is buffered before the first `read()`); in `strict_sequential` mode it's a blocking 5 ms-timeout cycle.
+5. Cycles those `OutputExact` commands (again one frame at a time, 10 ms timeout each), re-checks the watchdog in strict mode.
+6. Sends a final, batched `MakeStop()` to every joint before returning success, so the hardware is guaranteed to be in a safe, stopped state before the first `read()`/`write()` call from the controller manager. In `pipelined` mode this is a fire-and-forget write followed by a 5 ms sleep (to make sure a reply is buffered before the first `read()`); in `strict_sequential` mode it's a blocking 5 ms-timeout cycle.
 
 If anything in this sequence throws or fails, `on_configure()` returns `CallbackReturn::ERROR` and the hardware component does not become usable.
 
@@ -329,14 +346,17 @@ This is also why the software watchdog below tolerates a short run of misses rat
 
 This package implements two independent layers of fault detection at the ros2_control level (the moteus controllers also run their own firmware-side command watchdog, left at its default configuration and not touched by this plugin):
 
-1. **Immediate hardware fault check** (`read()`): if an actuator's parsed `Query::Result.fault` code is non-zero, `read()` immediately logs `RCLCPP_FATAL` and returns `hardware_interface::return_type::ERROR` for that cycle — no filtering or grace period.
+1. **Immediate hardware fault check** (`read()`): if an actuator's parsed `Query::Result.fault` code is a real fault (non-zero and below 96), `read()` immediately logs `RCLCPP_FATAL` and returns `hardware_interface::return_type::ERROR` for that cycle — no filtering or grace period. Codes `>= 96` (`kFirstLimitCode`) are not faults: the drive keeps running and only reports which limit is currently active (e.g. `99` = `servo.max_current_A`). They are logged as a throttled warning and clear themselves once the limit is no longer hit.
 2. **Software communication watchdog** (`MoteusInterface::watchdog()` / `Actuator::update_status()`), run once per `read()` call for every actuator:
    - Each actuator tracks `consecutive_failures_` (reset to 0 on any successful reply, incremented on any missed reply) and an exponentially-weighted `failure_rate_` (`α = 0.01`, i.e. roughly a 100-cycle time constant), where each missed reply counts as `1.0` and each success as `0.0` in the filter.
    - An actuator is considered to be **in an error state** if `consecutive_failures_ >= 3` **or** the filtered `failure_rate_ > 0.10` (10%).
    - In *strict* mode (used only during `on_configure()`), a single missed reply from any actuator is fatal and aborts configuration.
    - In normal (non-strict) operation, a single missed reply is only logged as a warning, but the error-state thresholds above still apply — occasional missed replies are tolerated, sustained or bursty communication loss is not, and either condition returns `hardware_interface::return_type::ERROR` from `read()`.
 
-On any `ERROR` return, or on `on_shutdown()`/`on_error()`, the interface calls into `on_deactivate()`, which sends a final `MakeStop()` to every joint as an emergency stop before giving up control.
+What happens to the drives depends on how control ends:
+
+- **`ERROR` from `read()`/`write()`** → ros2_control calls `on_error()`, which sends `MakeBrake()` to every actuator instead of a stop. A stopped drive lets the arm fall; brake mode shorts the phases and damps it. Brake mode never runs into the drive's command watchdog, so the drives keep braking after this last frame until the next `on_configure()` stops them. A drive that is in fault ignores it (only a stop leaves a fault), and an unreachable one ends in its `servo.timeout_mode`. `on_error()` returns `SUCCESS` even if the write fails, so the component ends up `UNCONFIGURED` rather than finalized, and it clears `is_active_`, so a following `on_shutdown()` does not override the brake with a stop.
+- **`on_deactivate()`** (and `on_shutdown()`, which calls it while still active) sends a final `MakeStop()` to every joint before giving up control.
 
 ### Non-standard secondary-encoder homing
 
