@@ -37,8 +37,8 @@ the min/max spread is a bit wider than in real use.
 | axis2 | 1.8e-4 kg·m² | 30 | 0.162 kg·m² | LA8308 rotor **estimate** |
 | axis3 | 1.8e-4 kg·m² | 11.45 | 2.4e-2 kg·m² | LA8308 rotor **estimate** |
 | axis4 | 1.8e-4 kg·m² | 4 | 2.9e-3 kg·m² | LA8308 rotor **estimate** |
-| axis5 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | wrist motor **estimate**, see below |
-| axis6 | 2.0–2.5e-5 kg·m² | 4 | **7.2e-4** kg·m² (6.4–8.0e-4) | wrist motor **estimate**, see below |
+| axis5 | 2.0–2.5e-5 kg·m² | 6 | **1.6e-3** kg·m² (1.4–1.8e-3) | wrist motor **estimate**, see below |
+| axis6 | 2.0–2.5e-5 kg·m² | 6 | **1.6e-3** kg·m² (1.4–1.8e-3) | wrist motor **estimate**, see below |
 
 **Wrist differential:** both wrist motors drive both joints
 ([DifferentialTransmission.cpp](../../src/moteus_interface/src/DifferentialTransmission.cpp)):
@@ -49,10 +49,13 @@ the min/max spread is a bit wider than in real use.
 ```
 
 so each wrist joint sees **2·J·N²**, with no cross term. It is twice what a single motor per joint would
-give. With `J = 2.25e-5 kg·m²` (middle of 20–25 kg·mm²) and `N = 4`, that is `7.2e-4 kg·m²`. This assumes the
-1:4 sits between each motor and the differential, and the differential itself is 1:1 (`ratio` 1.0 in the
+give. With `J = 2.25e-5 kg·m²` (middle of 20–25 kg·mm²) and `N = 6`, that is `1.6e-3 kg·m²`. The 1:6 belt sits
+between each motor and the differential, and the differential itself is 1:1 (`ratio` 1.0 in the
 `wrist_transmission`). In the URDF `<armature>` it has to be this full value, `rotor_inertia · ratio²` would
 only give half of it.
+
+The tables below were sampled with the old 1:4 wrist estimate (7.2e-4), the wrist rows are too light. The URDF
+has 9.91e-4 for axis5/6, which matches neither.
 
 ## Results, no tool
 

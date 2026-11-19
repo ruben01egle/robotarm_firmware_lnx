@@ -479,40 +479,95 @@ a wrist joint has a translational part, lever arm times rotation.
 ### Why more damping can be unstable
 
 The passivity proof of section 5 holds for any positive semidefinite `D`, in continuous time with a rigid arm. The
-real loop is neither:
+real loop is neither, and on the arm too much damping on a joint made it oscillate.
 
-- **delay** `T ≈ 5–6 ms`: 500 Hz cycle, pipelined CAN round trip, encoder PLL filter, current loop
-- **elastic transmission**: axis1 and the wrist are belt driven and the velocity is measured on the motor side.
-  Above the belt resonance the link no longer follows, the motor only sees its rotor and pulley, `J_eff ≪ M_ii`
+**Measured (2026-10-30).** Pushed by hand in impedance mode. Own damping `D_q,ii` from the model at the logged pose:
 
-One joint, a damper `d` on `J_eff`, delayed by `T`:
+| joint | config (`K_lin` / `K_ang` / `ζ`) | `D_q,ii` | result |
+|---|---|---|---|
+| axis4, axis5 | 100 / 3 / 0.5 | 0.31, 0.18 | stable |
+| axis4, axis5 | 200, 200, 100 / 3 / 0.5 | 0.35, 0.21 | 46 Hz and 39 Hz, runaway |
+| axis1 | stretched out (q2 ≈ −96°, q3 ≈ 79°) | ≈ 2.1 | bursts at 85–90 Hz, axis1 alone |
+
+All with `torque_rise_time` 0.003, where the torque rate limit never triggered. The first test (200 / 5 / 0.7,
+axis5 at 0.42) ran with 0.03: the rate limit was active in almost every cycle, added lag and pushed the
+oscillation down to 27 Hz, so its log looks different and is not comparable. Axis2 and 3 carried up to 9 and
+3 Nm·s/rad without problems, axis6 never failed.
+
+**So the cause is too much damping on a joint.** Below a joint specific value the same joint was stable, above it
+oscillated.
+
+**How a delayed damper adds energy.** The motor puts the power `P = τ·v` into the joint. For an oscillation
+`v = V·cos(ωt)` and a torque `τ = A·cos(ωt + φ)`, averaged over one period:
 
 ```
-loop gain   L(s) = d / (J_eff·s) · e^(−s·T)
-|L| = 1  at ω_c = d / J_eff
-phase    = −90° − ω_c·T
-unstable when ω_c·T > π/2    ⟺    d > d_max = π·J_eff / (2·T)
+P_avg = ½·A·V·cos(φ)          φ = angle between torque and velocity
 ```
 
-and it oscillates at about `ω_c`. Light joint plus long delay means little damping is allowed.
+- `φ = 180°`: torque opposite to the velocity, `cos = −1`, energy is taken out. The ideal damper `τ = −d·v`.
+- `φ = 90°`: `cos = 0`, no net energy, the torque acts like a spring or a mass.
+- `φ < 90°`: `cos > 0`, energy goes in. `φ = 0°` (torque in phase with the velocity) puts in the most.
 
-> **Aha: a damper is only a damper while the torque opposes the velocity.**
-> The delay turns the torque against the velocity by `ω·T`. Past 90° it pushes **along** the motion and pumps energy
-> in. Measured on axis1 at 85 Hz: torque and velocity only 10–15° apart. More `D` raises `ω_c`, which adds phase lag,
-> so turning the damping up makes it worse, not better.
+With the delay the damper is `τ = −d·v(t − T)`, it lags the ideal damper by `ωT`:
 
-> **Aha: above the belt resonance the motor carries only itself.**
-> Fitted from the oscillation frequencies (measured 2026-10-30):
->
-> | | frequency | `T` | `J_eff` | rigid `M_ii` | `d_max` |
-> |---|---|---|---|---|---|
-> | axis1 | 85 Hz | 5.6 ms | ≈ 0.004 | ≈ 0.17 | ≈ 1.0 |
-> | axis4 | 45.6 Hz | 5.5 ms | ≈ 0.0012 | ≈ 0.009 | ≈ 0.3 |
-> | axis5 | 39 Hz | 6.4 ms | ≈ 0.0008 | ≈ 0.0055 | ≈ 0.2 |
->
-> 1/7 of the rigid inertia on the wrist, 1/40 on axis1, close to rotor inertia × (1:6 belt)². The rigid MuJoCo model
-> can't reproduce it, there the loop only goes unstable at ~10 ms. Axis2 and 3 (no belt, heavy) carry 9 and
-> 3 Nm·s/rad without problems.
+```
+φ = 180° − ωT
+```
+
+| lag `ωT` | `φ` | effect |
+|---|---|---|
+| 0° | 180° | brakes fully |
+| 90° | 90° | neutral |
+| 180° | 0° | pushes fully, most energy in |
+| 270° | −90° | neutral again |
+
+So the damper adds energy once its lag exceeds **90°**, not 180°.
+
+> **Aha: the 180° of Nyquist is the loop phase, not the torque phase.**
+> One joint: `L(s) = d/(J·s) · e^(−s·T)`. The mass (torque → velocity) already contributes −90°, the delay `−ωT`,
+> so the loop reaches −180° at `ωT = 90°`. "Loop phase −180°" and "damper lag 90°" are the same condition, counted
+> at different points of the loop. More damping raises the frequency where the loop gain is 1, there the delay lag
+> is larger, so turning the damping up makes it worse, not better.
+
+**In the logs** (`docs/tuning/impedance_test1–4.csv`), `φ` between the logged effort and velocity of the oscillating
+axis:
+
+| log | axis | frequency | `φ` | lag `180° − φ` |
+|---|---|---|---|---|
+| test1 | axis4 | 48 Hz | 68° | 112° |
+| test1 | axis5 | 44 Hz | 70° | 110° |
+| test4 | axis5 | 38 Hz | 40° | 140° |
+| test2 | axis5 | 38 Hz | 94° | 86° (large amplitude) |
+| test1 | axis1 | 90 Hz | 20° | 160° |
+| test3 | axis1 | 86 Hz | 9° | 171° |
+
+Axis1 pushes almost fully along the motion, axis4 and 5 clearly pump in most bursts, the test2 burst is about
+neutral. The logged effort is the total motor torque (damper, spring, couplings from other joints), not the damper
+alone, and at 500 Hz logging a 90 Hz oscillation has only 5–6 samples per period (about ±10°). Which log belongs to
+which config of the table above is not recorded.
+
+**What contributes**, known qualitatively, not identified:
+
+- **delay**: the velocity is a few ms old when the torque acts (500 Hz cycle, pipelined CAN round trip, encoder
+  filter, current loop). A delayed damper turns from braking to pushing at high frequencies.
+- **belt resonance**: all joints are belt driven and the velocity is measured on the motor side. The belt is a
+  spring between motor and link, near its resonance the motor does not move with the link and the rigid model says
+  little about what it feels. The rigid MuJoCo model doesn't reproduce the oscillations.
+
+Axis1 oscillates much faster than the wrist and with torque and velocity almost in phase, so delay and belt don't
+combine the same way on every joint. The natural damping of the drives presumably makes the difference: axis2 and 3
+are the only two stage drives, and axis6 has to move the second belt pair of the differential along, axis5 does
+not. So axis1, 4 and 5 are much more lightly damped than axis2, 3 and 6, which matches where the oscillations
+appeared. There is no model that gives the limits.
+
+**Outlook:** quantify the natural damping per joint (and the belt resonances), to confirm this and to explain
+the limits instead of only measuring them.
+
+**The upper limits are measured, not computed.** `max_joint_damping` is set conservatively below the damping at
+which a joint oscillated: axis1 0.8 (oscillated at ≈ 2.1), axis4 0.25 (stable 0.31, oscillated 0.35), axis5 0.15
+(stable 0.18, oscillated 0.21), axis6 0.08 (conservative, never failed). Axis2 and 3 get caps above their largest
+damping in the workspace, so they never act. A different delay, belt tension or tool can move the limits, then they
+have to be measured again.
 
 ### The lower limit
 
@@ -526,11 +581,11 @@ A joint whose own damping is below `K_q,ii·T` (`K_q = Jᵀ·K·J`) winds itself
 So every joint has a window:
 
 ```
-K_q,ii·T  <  d_ii  <  π·J_eff,i / (2·T)
+K_q,ii·T  <  d_ii  <  d_max,i          d_max,i measured, see above
 ```
 
-Axis5 at 300 N/m, 3 Nm/rad: `K_q,55 ≈ 9.6` → lower limit ≈ 0.06. Axis1 stretched out: `K_q,11 ≈ 45–70` → 0.3–0.4,
-against an upper limit of 1.0. A stiffer spring narrows the window from below, a longer delay from both sides.
+With a delay of a few ms: axis5 at 300 N/m, 3 Nm/rad, `K_q,55 ≈ 9.6` → lower limit ≈ 0.06. Axis1 stretched out:
+`K_q,11 ≈ 45–70` → 0.3–0.4, against a cap of 0.8. A stiffer spring narrows the window from below.
 
 > **Aha: capping too hard fails the other way.**
 > A variant of the cap that also counted the couplings pushed the wrist's own damping to 0.01–0.03, below the lower
@@ -589,8 +644,8 @@ So with the damping capped, a **softer** spring gives the damping ratio back. If
 lower the angular stiffness, not raise the cap. Joint friction adds real damping on top.
 
 The limits are properties of the loop, not of the model: measured on the arm by raising the stiffness until a joint
-oscillates, then reading `D_q,ii` from the model at the logged pose. They scale with the delay, a faster loop raises
-them, more filtering or a torque rate limit inside the loop lowers them. A cleaner fix is the joint damping in the
+oscillates, then reading `D_q,ii` from the model at the logged pose. They depend on the delay: a faster loop should
+raise them, more filtering or a torque rate limit inside the loop lowers them. A cleaner fix is the joint damping in the
 drives (moteus `kd`, no host delay), with only the couplings left on the host.
 
 ---

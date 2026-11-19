@@ -246,10 +246,10 @@ cartesian_impedance_controller:
     # armature still 0 in the urdf, Λ is ~20-30 % too light and the real zeta lower. Zero stiffness → no cartesian damping
     cartesian_damping_ratio: 0.5    # unitless
     # impedance mode only. Upper bound of the total damping per joint (cartesian damper projected onto the joint +
-    # joint_damping), Nm·s/rad, see the robotarm_controllers README, "Background I: joint damping cap". The host loop
-    # (~6 ms delay) makes the belt driven joints unstable above it: at high frequency the motor only sees its rotor,
-    # not the link. Measured 2026-10-30: axis1 unstable at 2.1 (85 Hz, rotor side inertia ~0.004, limit ~1.0), axis4
-    # unstable at 0.35 (45 Hz), axis5 stable at 0.18 and unstable at 0.21 (39 Hz). Axis6 never failed, conservative.
+    # joint_damping), Nm·s/rad, see the robotarm_controllers README, "Background I: joint damping cap". Too much
+    # damping makes a joint oscillate (loop delay, belt resonance). Set conservatively below the measured limits,
+    # 2026-10-30: axis1 unstable at 2.1 (85 Hz), axis4 stable at 0.31 and unstable at 0.35 (46 Hz), axis5 stable at
+    # 0.18 and unstable at 0.21 (39 Hz). Axis6 never failed, conservative.
     # Axis2-3 above their largest own term (9/3 at 300 N/m, 12/4 at 500 N/m), never limit
     max_joint_damping: [0.8, 30.0, 20.0, 0.25, 0.15, 0.08]
     max_spring_force: 20.0          # N, norm of the translational spring force
