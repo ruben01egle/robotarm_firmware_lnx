@@ -481,7 +481,8 @@ a wrist joint has a translational part, lever arm times rotation.
 The passivity proof of section 5 holds for any positive semidefinite `D`, in continuous time with a rigid arm. The
 real loop is neither, and on the arm too much damping on a joint made it oscillate.
 
-**Measured (2026-10-30).** Pushed by hand in impedance mode. Own damping `D_q,ii` from the model at the logged pose:
+**Measured (2026-10-30).** Pushed by hand in impedance mode. Own damping `D_q,ii` from the model at the logged pose
+(logs and which variant each was recorded with: [docs/tuning](../tuning/README.md#impedance-logs-2026-10-30)):
 
 | joint | config (`K_lin` / `K_ang` / `ζ`) | `D_q,ii` | result |
 |---|---|---|---|
@@ -544,7 +545,7 @@ axis:
 Axis1 pushes almost fully along the motion, axis4 and 5 clearly pump in most bursts, the test2 burst is about
 neutral. The logged effort is the total motor torque (damper, spring, couplings from other joints), not the damper
 alone, and at 500 Hz logging a 90 Hz oscillation has only 5–6 samples per period (about ±10°). Which log belongs to
-which config of the table above is not recorded.
+which config was not recorded, the reconstructed assignment is in [docs/tuning](../tuning/README.md#impedance-logs-2026-10-30).
 
 **What contributes**, known qualitatively, not identified:
 

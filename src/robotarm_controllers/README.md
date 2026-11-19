@@ -2034,7 +2034,8 @@ oscillate.
 
 **Measured on the arm (2026-10-30).** Pushed by hand in impedance mode, the wrist started to
 oscillate and the other joints followed through the off-diagonals of $D_q$. Joint damping from the
-model at the poses of the failures:
+model at the poses of the failures (logs and which variant each was recorded with:
+[docs/tuning](../../docs/tuning/README.md#impedance-logs-2026-10-30)):
 
 | Config ($K_{lin}$ / $K_{ang}$ / $\zeta$) | axis 4 $D_{q,44}$ | axis 5 $D_{q,55}$ | Result |
 |---|---|---|---|
@@ -2098,7 +2099,8 @@ velocity of the oscillating axis:
 Axis 1 pushes almost fully along the motion, axis 4 and 5 clearly pump in most bursts, the test2
 burst is about neutral. The logged effort is the total motor torque (damper, spring, couplings from
 other joints), not the damper alone, and at 500 Hz logging a 90 Hz oscillation has only 5–6 samples
-per period (about ±10°). Which log belongs to which config of the table above is not recorded.
+per period (about ±10°). Which log belongs to which config was not recorded, the reconstructed
+assignment is in [docs/tuning](../../docs/tuning/README.md#impedance-logs-2026-10-30).
 
 **What contributes**, known qualitatively, not identified:
 
