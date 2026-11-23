@@ -10,7 +10,7 @@ The original X4108 380KV wrist motors could not hold the wrist load continuously
 |---|---|
 | Target range | 1.5–2.5 Nm |
 | X4108, no cooling | ~1.1 Nm |
-| MN5008, no cooling | ~2.3–2.5 Nm (mount at the 60 °C PETG limit) |
+| MN5008, no cooling | ~2.3–2.5 Nm (mount ~58 °C after 9 min, near the 60 °C PETG limit) |
 | **MN5008, 35 mm fan** | **~5 Nm** (mount at ~31 °C when holding 2.5 Nm) |
 
 ## Problem: X4108 thermal test
@@ -80,7 +80,7 @@ Findings:
 
 ## Cooling
 
-A 35 mm fan per motor, aimed at the bell openings. At the 2.5 Nm holding load it cut the temperature rise by ~3–4× (mount 31 °C instead of ≥ 60 °C).
+A 35 mm fan per motor, aimed at the bell openings. At the 2.5 Nm holding load it cut the temperature rise by ~3–4× (mount 31 °C instead of ~58 °C and rising).
 
 Other options considered:
 - **Aluminium foil** between motor and mount: no measurable effect. At ~0.02 mm it is too thin to spread heat sideways.

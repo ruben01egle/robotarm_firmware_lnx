@@ -291,7 +291,7 @@ Points to check:
   are reachable within 20 A.
 - **Cooling.** Each motor needs its 35 mm fan for continuous load. With fans, the tests
   give ≈ 9–10 A continuous per motor (≈ 5 Nm wrist pitch); without fans only
-  ≈ 4–4.5 A, with the PETG mount reaching 60 °C (see
+  ≈ 4–4.5 A, with the PETG mount reaching ~58 °C, near the 60 °C limit (see
   [mn5008_testing.md](mn5008_testing.md)). 20 A is a peak (≈ 1.5 · I² · R ≈ 90 W per
   motor). There is no motor thermistor, so nothing stops a stalled wrist without fans
   from overheating the PETG mounts.

@@ -8,11 +8,11 @@ Thermal test of the T-Motor MN5008 KV170 wrist motors (2026-10-22). Background a
 |---|---|---|
 | Load | 4.5 A per motor ≈ 2.5 Nm wrist pitch (upper target) | same |
 | Winding | 59 °C at 9 min, still rising | **~32 °C steady** (ΔT ≈ 9 K) |
-| PETG mount | 60 °C (limit) at 9 min, still rising | **31 °C steady** (ΔT ≈ 8 K) |
+| PETG mount | 58 °C at 9 min (near 60 °C limit), still rising | **31 °C steady** (ΔT ≈ 8 K) |
 | Continuous current per motor (extrapolated) | ~4.0–4.5 A | **~9–10 A** (mount-limited) |
 | Continuous wrist pitch torque | ~2.3–2.5 Nm | **~5 Nm** (~4.5 Nm with 10 % margin) |
 
-- **Without cooling, the upper target of 2.5 Nm is borderline.** The mount reaches the 60 °C PETG limit, with no reserve for roll load.
+- **Without cooling, the upper target of 2.5 Nm is borderline.** The mount reaches ~58 °C after 9 min and is still rising towards the 60 °C PETG limit, with no reserve for roll load.
 - **With a 35 mm fan, the wrist holds 2.5 Nm with the mount at ~31 °C.** The fan cuts the temperature rise by ~3–4×. That leaves about 2× reserve for combined pitch and roll loads.
 - **Decision:** MN5008 KV170 + 1:6 belt + 35 mm fan per motor. No further test runs planned.
 - The extrapolation for run 2 is based on a small ΔT (8–9 K) with ±3 K reading error per point. Treat the ~5 Nm as ±15–25 %.
@@ -87,17 +87,17 @@ Screenshots are in `mn5008_thermal/run1/`.
 | 0 | 4.47 | 0.777 | 15.1 | 2.32 | 0.1452 | ~23 | 25 | |
 | 0.9 | 4.52 | 0.803 | 15.0 | 2.41 | 0.1532 | 35 | 27 | 15 A held ~2.6 s |
 | 1.9 | 4.47 | 0.83 | 15.0 | 2.47 | 0.1552 | 39 | 29 | |
-| 2.9 | 4.46 | 0.85 | 14.9 | 2.49 | 0.1571 | 42 | 40 | |
-| 3.9 | 4.46 | 0.86 | 15.07 | 2.53 | 0.1574 | 42 | 46 | |
-| 4.9 | 4.46 | 0.865 | 15.0 | 2.53 | 0.158 | 44 | 51 | 15 A held ~1.8 s |
-| 5.9 | 4.49 | 0.87 | 15.0 | 2.58 | 0.1627 | 52 | 56 | |
+| 2.9 | 4.46 | 0.85 | 14.9 | 2.49 | 0.1571 | 42 | 35 | |
+| 3.9 | 4.46 | 0.86 | 15.07 | 2.53 | 0.1574 | 42 | 39 | |
+| 4.9 | 4.46 | 0.865 | 15.0 | 2.53 | 0.158 | 44 | 42 | 15 A held ~1.8 s |
+| 5.9 | 4.49 | 0.87 | 15.0 | 2.58 | 0.1627 | 52 | 49 | |
 | 7.0 | 4.49 | 0.90 | 15.0 | 2.64 | 0.1656 | 57 | 54 | |
 | 7.9 | 4.44 | 0.90 | 15.0 | 2.66 | 0.1665 | 59 | 56 | |
-| 8.9 | 4.52 | 0.90 | 15.2 | 2.68 | 0.1667 | 59 | 60 | stopped: mount at 60 °C limit |
+| 8.9 | 4.52 | 0.90 | 15.2 | 2.68 | 0.1667 | 59 | 58 | stopped: mount at 58 °C, near the 60 °C limit |
 
 - The winding was flattening from ~7 min; the 4.5 A d_V level stayed at 0.90 V.
-- The mount was still rising ~2 K/min. Estimated steady state is ~62–68 °C, or ~55–60 °C for the real holding case without the extra step heat.
-- The mount read about equal to the step-method winding mean, which is physically unlikely. Either the step method reads the winding low, or the camera spot partly covered the motor base. The 4.5 A level method gives ~70 °C. The mount reading is what limits the result either way.
+- The mount was still rising ~2 K/min. Estimated steady state is ~60–66 °C, or ~53–58 °C for the real holding case without the extra step heat.
+- The mount read only slightly below the step-method winding mean (58 vs 59 °C at the end), although the mount should lag the winding more. Either the step method reads the winding low, or the camera spot partly covered the motor base. The 4.5 A level method gives ~70 °C. The mount reading is what limits the result either way.
 
 ## Run 2: motor 6, 4.5 A, 35 mm fan
 
@@ -114,7 +114,7 @@ Screenshots are in `mn5008_thermal/run2/`. Motor 6 was used because motor 5 was 
 
 - Steady after ~8–10 min: mount unchanged over the last 2 min, 4.5 A d_V level flat since 8 min.
 - Winding ~32 °C (mean of the last four points, ΔT ≈ 9 K). Mount 31 °C (ΔT ≈ 8 K).
-- In the first ~2 min, run 2 heated only slightly slower than run 1 once the extra step heat in run 1 is accounted for. The fan's effect shows once the motor is well above ambient; from ~4 min the runs clearly separate (6 min: 34 vs 52 °C winding, 30 vs 56 °C mount).
+- In the first ~2 min, run 2 heated only slightly slower than run 1 once the extra step heat in run 1 is accounted for. The fan's effect shows once the motor is well above ambient; from ~4 min the runs clearly separate (6 min: 34 vs 52 °C winding, 30 vs 49 °C mount).
 
 ## Safety notes for future tests
 
